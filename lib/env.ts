@@ -1,0 +1,100 @@
+// Environment presets. The OpenAPI bundles declare generic URLs
+// (`api.pack-solutions.com`) but real-world usage is on Gravitee gateways
+// where each API is served under its own path. We surface dev and rec as
+// named presets so the user doesn't have to remember the exact host.
+
+export type EnvName = "dev" | "rec" | "custom";
+export type EnvPresetName = Exclude<EnvName, "custom">;
+
+export interface EnvPreset {
+  id: EnvPresetName;
+  label: string;
+  description: string;
+  // Gateway origin without any path (e.g. https://dev…gravitee.cloud).
+  host: string;
+  // Returns the base URL for a given API id (folder name under dist/).
+  baseUrlFor(apiId: string): string;
+  tokenUrl: string;
+}
+
+const DEV_HOST = "https://dev.apim.gateway.pack-solutions.gravitee.cloud";
+const REC_HOST = "https://rec.apim.gateway.pack-solutions.gravitee.cloud";
+
+export const ENV_PRESETS: Record<EnvPresetName, EnvPreset> = {
+  dev: {
+    id: "dev",
+    label: "Dev (Gravitee)",
+    description:
+      "Gateway de développement. Chaque API est exposée sous /<api-id>.",
+    host: DEV_HOST,
+    baseUrlFor: (apiId) => `${DEV_HOST}/${apiId}`,
+    tokenUrl:
+      "https://dev.am.gateway.pack-solutions.gravitee.cloud/pack-solutions/oauth/token",
+  },
+  rec: {
+    id: "rec",
+    label: "Recette (Gravitee)",
+    description:
+      "Gateway de recette. Mêmes paths que dev mais sur l'environnement rec.",
+    host: REC_HOST,
+    baseUrlFor: (apiId) => `${REC_HOST}/${apiId}`,
+    tokenUrl:
+      "https://rec.am.gateway.pack-solutions.gravitee.cloud/pack-solutions/oauth/token",
+  },
+};
+
+export const ENV_OPTIONS: EnvName[] = ["dev", "rec", "custom"];
+
+// Strip leading/trailing slashes so a user-typed "/document-api/" normalises
+// to "document-api".
+function trimSlashes(s: string): string {
+  return s.replace(/^\/+|\/+$/g, "");
+}
+
+// The path segment used for an API under the gateway presets: the per-API
+// override when set, else the apiId itself.
+export function contextPathFor(
+  apiId: string,
+  apiPaths?: Record<string, string>,
+): string {
+  const override = apiPaths?.[apiId];
+  const trimmed = override ? trimSlashes(override) : "";
+  return trimmed || apiId;
+}
+
+// Resolve the effective base URL for an API given the user's settings.
+// Custom env returns the user-provided baseUrl as-is — when empty the
+// caller falls back to the spec default. Presets append the per-API context
+// path to the gateway host.
+export function resolveBaseUrl(
+  apiId: string,
+  env: EnvName,
+  customBaseUrl: string,
+  specDefault: string,
+  apiPaths?: Record<string, string>,
+): string {
+  if (env === "custom") return customBaseUrl || specDefault;
+  return `${ENV_PRESETS[env].host}/${contextPathFor(apiId, apiPaths)}`;
+}
+
+// Inverse of resolveBaseUrl for presets: derive the context-path segment from
+// a full base URL the user edited in the builder. Returns null for custom env
+// or when the URL no longer points at the preset host (host was changed).
+export function contextPathFromBaseUrl(
+  env: EnvName,
+  baseUrl: string,
+): string | null {
+  if (env === "custom") return null;
+  const prefix = `${ENV_PRESETS[env].host}/`;
+  if (!baseUrl.startsWith(prefix)) return null;
+  return trimSlashes(baseUrl.slice(prefix.length));
+}
+
+export function resolveTokenUrl(
+  env: EnvName,
+  customTokenUrl: string,
+  specDefault: string,
+): string {
+  if (env === "custom") return customTokenUrl || specDefault;
+  return ENV_PRESETS[env].tokenUrl;
+}

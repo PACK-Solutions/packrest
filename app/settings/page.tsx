@@ -1,0 +1,826 @@
+"use client";
+
+import { useCallback, useEffect, useState } from "react";
+import {
+  Save,
+  Lock,
+  Globe,
+  KeyRound,
+  Layers,
+  FolderSync,
+  RefreshCw,
+  Network,
+  GitBranch,
+  Download,
+  Check,
+} from "lucide-react";
+import { toast } from "sonner";
+
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Card, CardBody, CardHeader } from "@/components/Card";
+import Field from "@/components/Field";
+import {
+  loadSettings,
+  saveSettings,
+  SETTINGS_CHANGED_EVENT,
+  type Settings,
+} from "@/lib/storage";
+import { ENV_OPTIONS, ENV_PRESETS, type EnvName } from "@/lib/env";
+import { cn } from "@/lib/utils";
+
+type SpecsStatus =
+  | { kind: "idle" }
+  | { kind: "saving" }
+  | { kind: "syncing" }
+  | { kind: "ok"; message: string }
+  | { kind: "error"; message: string };
+
+interface Release {
+  tag: string;
+  name: string;
+  releasedAt?: string;
+  hasBundle: boolean;
+}
+
+// How many of the latest releases to preview before the user opts into the
+// full list.
+const RELEASES_PREVIEW = 3;
+
+function formatReleaseDate(iso?: string): string {
+  if (!iso) return "";
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime())
+    ? ""
+    : d.toLocaleDateString("fr-FR", {
+        day: "2-digit",
+        month: "short",
+        year: "numeric",
+      });
+}
+
+export default function SettingsPage() {
+  const [settings, setSettings] = useState<Settings>({
+    environment: "dev",
+    baseUrl: "",
+    tokenUrl: "",
+    clientId: "",
+    clientSecret: "",
+  });
+  const [saved, setSaved] = useState(false);
+  const [apis, setApis] = useState<{ id: string; title: string }[]>([]);
+  const [specsDir, setSpecsDir] = useState("");
+  const [resolvedSpecsDir, setResolvedSpecsDir] = useState("");
+  const [configError, setConfigError] = useState<string | null>(null);
+  const [specsStatus, setSpecsStatus] = useState<SpecsStatus>({ kind: "idle" });
+  const [gitlabProject, setGitlabProject] = useState("");
+  const [gitlabHost, setGitlabHost] = useState("");
+  const [gitlabToken, setGitlabToken] = useState("");
+  const [gitlabHasToken, setGitlabHasToken] = useState(false);
+  const [releases, setReleases] = useState<Release[]>([]);
+  const [loadingReleases, setLoadingReleases] = useState(false);
+  const [releasesTotal, setReleasesTotal] = useState<number | null>(null);
+  const [releasesHasMore, setReleasesHasMore] = useState(false);
+  const [releasesAll, setReleasesAll] = useState(false);
+  // Whether an auto-load has been attempted for the current token (guards the
+  // auto-load effect against retry loops when a load fails).
+  const [releasesLoaded, setReleasesLoaded] = useState(false);
+  const [selectedTag, setSelectedTag] = useState("");
+  const [gitlabStatus, setGitlabStatus] = useState<SpecsStatus>({
+    kind: "idle",
+  });
+
+  useEffect(() => {
+    setSettings(loadSettings());
+    fetch("/api/apis")
+      .then((r) => r.json())
+      .then((data) => setApis(data?.apis ?? []))
+      .catch(() => {
+        /* ignore — per-API config simply won't list any API */
+      });
+    fetch("/api/config")
+      .then((r) => r.json())
+      .then((data) => {
+        setSpecsDir(data?.config?.specsDir ?? "");
+        setResolvedSpecsDir(data?.resolvedSpecsDir ?? "");
+        setConfigError(data?.configError ?? null);
+      })
+      .catch(() => {
+        /* ignore — Settings page still usable without spec config */
+      });
+    fetch("/api/gitlab")
+      .then((r) => r.json())
+      .then((data) => {
+        setGitlabProject(data?.projectPath ?? "");
+        setGitlabHost(data?.host ?? "");
+        setGitlabHasToken(Boolean(data?.hasToken));
+      })
+      .catch(() => {
+        /* ignore — GitLab sync simply stays unconfigured */
+      });
+  }, []);
+
+  // Reflect settings saved elsewhere in the same tab (e.g. the request
+  // builder's "save context path" button) without a reload.
+  useEffect(() => {
+    const sync = () => setSettings(loadSettings());
+    window.addEventListener(SETTINGS_CHANGED_EVENT, sync);
+    window.addEventListener("storage", sync);
+    return () => {
+      window.removeEventListener(SETTINGS_CHANGED_EVENT, sync);
+      window.removeEventListener("storage", sync);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (specsStatus.kind !== "ok") return;
+    const timer = window.setTimeout(
+      () => setSpecsStatus({ kind: "idle" }),
+      3000,
+    );
+    return () => window.clearTimeout(timer);
+  }, [specsStatus]);
+
+  useEffect(() => {
+    if (gitlabStatus.kind !== "ok") return;
+    const timer = window.setTimeout(
+      () => setGitlabStatus({ kind: "idle" }),
+      3000,
+    );
+    return () => window.clearTimeout(timer);
+  }, [gitlabStatus]);
+
+  const onSave = () => {
+    saveSettings(settings);
+    setSaved(true);
+    window.setTimeout(() => setSaved(false), 1500);
+    toast.success("Paramètres enregistrés");
+  };
+
+  const onSaveSpecsPath = async () => {
+    setSpecsStatus({ kind: "saving" });
+    try {
+      const res = await fetch("/api/config", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ specsDir }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setSpecsStatus({
+          kind: "error",
+          message:
+            data.error_description ?? "Erreur lors de l'enregistrement.",
+        });
+        return;
+      }
+      const savedDir = data?.config?.specsDir ?? specsDir;
+      setSpecsDir(savedDir);
+      setResolvedSpecsDir(savedDir);
+      setConfigError(null);
+      setSpecsStatus({
+        kind: "ok",
+        message: `Chemin enregistré : ${savedDir}`,
+      });
+    } catch (e) {
+      setSpecsStatus({ kind: "error", message: String(e) });
+    }
+  };
+
+  const onSyncSpecs = async () => {
+    setSpecsStatus({ kind: "syncing" });
+    try {
+      const res = await fetch("/api/sync-specs", { method: "POST" });
+      const data = await res.json();
+      if (!res.ok) {
+        setSpecsStatus({
+          kind: "error",
+          message:
+            data.error_description ??
+            "Échec de la synchronisation des specs.",
+        });
+        return;
+      }
+      const apis: string[] = data?.copied ?? [];
+      const detail = apis.length
+        ? ` — ${apis.join(", ")}`
+        : " (aucun bundle v1 trouvé)";
+      setSpecsStatus({
+        kind: "ok",
+        message: `Synchronisé : ${apis.length} API${apis.length > 1 ? "s" : ""}${detail}`,
+      });
+    } catch (e) {
+      setSpecsStatus({ kind: "error", message: String(e) });
+    }
+  };
+
+  const onSaveGitlab = async () => {
+    setGitlabStatus({ kind: "saving" });
+    try {
+      const res = await fetch("/api/gitlab", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        // Empty token is omitted server-side, preserving the stored one.
+        body: JSON.stringify({
+          projectPath: gitlabProject,
+          token: gitlabToken,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setGitlabStatus({
+          kind: "error",
+          message: data.error_description ?? "Erreur lors de l'enregistrement.",
+        });
+        return;
+      }
+      setGitlabProject(data?.projectPath ?? gitlabProject);
+      setGitlabHost(data?.host ?? gitlabHost);
+      setGitlabHasToken(Boolean(data?.hasToken));
+      setGitlabToken("");
+      // Reset the list so the auto-load effect re-previews releases for the
+      // (possibly changed) project.
+      setReleases([]);
+      setReleasesTotal(null);
+      setReleasesHasMore(false);
+      setReleasesAll(false);
+      setReleasesLoaded(false);
+      setSelectedTag("");
+      setGitlabStatus({ kind: "ok", message: "Connexion GitLab enregistrée." });
+    } catch (e) {
+      setGitlabStatus({ kind: "error", message: String(e) });
+    }
+  };
+
+  // Loads the latest releases. `all=false` previews just the latest few;
+  // `all=true` fetches the full list. Keeps the current selection if it's
+  // still present, else preselects the newest release that has a bundle.
+  const loadReleases = useCallback(async (all: boolean) => {
+    setLoadingReleases(true);
+    setGitlabStatus({ kind: "idle" });
+    try {
+      const qs = all ? "" : `?per_page=${RELEASES_PREVIEW}`;
+      const res = await fetch(`/api/gitlab/releases${qs}`);
+      const data = await res.json();
+      if (!res.ok) {
+        setReleases([]);
+        setReleasesTotal(null);
+        setReleasesHasMore(false);
+        setReleasesAll(false);
+        setGitlabStatus({
+          kind: "error",
+          message:
+            data.error_description ?? "Impossible de charger les releases.",
+        });
+        return;
+      }
+      const list: Release[] = data?.releases ?? [];
+      setReleases(list);
+      setReleasesTotal(typeof data?.total === "number" ? data.total : null);
+      setReleasesHasMore(Boolean(data?.hasMore));
+      setReleasesAll(all);
+      setSelectedTag((prev) =>
+        prev && list.some((r) => r.tag === prev)
+          ? prev
+          : (list.find((r) => r.hasBundle)?.tag ?? ""),
+      );
+      if (list.length === 0) {
+        setGitlabStatus({
+          kind: "error",
+          message: "Aucune release trouvée pour ce projet.",
+        });
+      }
+    } catch (e) {
+      setGitlabStatus({ kind: "error", message: String(e) });
+    } finally {
+      setLoadingReleases(false);
+      setReleasesLoaded(true);
+    }
+  }, []);
+
+  // Preview the latest releases automatically once a token is known (on mount
+  // or right after one is saved), so the picker is ready without an extra
+  // click. The `releasesLoaded` flag ensures this fires once per token, even
+  // if the load fails — no retry loop.
+  useEffect(() => {
+    if (gitlabHasToken && !releasesLoaded) loadReleases(false);
+  }, [gitlabHasToken, releasesLoaded, loadReleases]);
+
+  const onSyncGitlab = async () => {
+    if (!selectedTag) return;
+    setGitlabStatus({ kind: "syncing" });
+    try {
+      const res = await fetch("/api/gitlab/sync", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tag: selectedTag }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setGitlabStatus({
+          kind: "error",
+          message:
+            data.error_description ?? "Échec de la synchronisation GitLab.",
+        });
+        return;
+      }
+      const copied: string[] = data?.copied ?? [];
+      setGitlabStatus({
+        kind: "ok",
+        message: `Synchronisé depuis ${selectedTag} : ${copied.length} API${
+          copied.length > 1 ? "s" : ""
+        }${copied.length ? ` — ${copied.join(", ")}` : ""}`,
+      });
+    } catch (e) {
+      setGitlabStatus({ kind: "error", message: String(e) });
+    }
+  };
+
+  const setApiPath = (apiId: string, value: string) => {
+    setSettings((prev) => {
+      const apiPaths = { ...(prev.apiPaths ?? {}) };
+      const trimmed = value.trim();
+      if (trimmed) apiPaths[apiId] = trimmed;
+      else delete apiPaths[apiId];
+      return { ...prev, apiPaths };
+    });
+  };
+
+  const isCustom = settings.environment === "custom";
+  const presetHost =
+    settings.environment === "custom"
+      ? null
+      : ENV_PRESETS[settings.environment].host;
+
+  return (
+    <div className="mx-auto max-w-2xl space-y-4">
+      <h1 className="text-xl font-semibold">Paramètres</h1>
+      <p className="text-muted-foreground text-sm">
+        La source des specs est stockée côté serveur dans{" "}
+        <code>.packrest.config.json</code>. Les identifiants OAuth2 et le
+        choix d&apos;environnement sont stockés dans votre navigateur
+        (localStorage) et envoyés uniquement à <code>/api/token</code> pour
+        obtenir un bearer.
+      </p>
+
+      <Card>
+        <CardHeader>
+          <FolderSync className="text-muted-foreground size-3.5" />
+          <span className="font-semibold">Source des specs OpenAPI</span>
+        </CardHeader>
+        <CardBody className="space-y-3 p-4">
+          {configError && (
+            <Alert variant="warn">
+              <AlertDescription>{configError}</AlertDescription>
+            </Alert>
+          )}
+          <Field
+            label="Chemin du dossier"
+            hint="Dossier contenant les sous-dossiers <api>/v1/openapi.bundle.yaml. Stocké côté serveur dans .packrest.config.json."
+          >
+            <Input
+              value={specsDir}
+              onChange={(e) => setSpecsDir(e.target.value)}
+              placeholder={resolvedSpecsDir || "/chemin/vers/openapi/dist"}
+              className="font-mono"
+              spellCheck={false}
+            />
+          </Field>
+          {resolvedSpecsDir && !specsDir && (
+            <p className="text-muted-foreground text-[11px]">
+              Chemin actuellement résolu (variable d&apos;environnement ou
+              valeur par défaut) :{" "}
+              <code className="font-mono">{resolvedSpecsDir}</code>
+            </p>
+          )}
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={onSaveSpecsPath}
+              disabled={specsStatus.kind === "saving" || !specsDir.trim()}
+              className="text-xs"
+            >
+              <Save className="size-3" /> Enregistrer le chemin
+            </Button>
+            <Button
+              variant="gradient"
+              size="sm"
+              onClick={onSyncSpecs}
+              disabled={specsStatus.kind === "syncing"}
+              className="text-xs"
+            >
+              <RefreshCw
+                className={cn(
+                  "size-3",
+                  specsStatus.kind === "syncing" && "animate-spin",
+                )}
+              />
+              Synchroniser maintenant
+            </Button>
+          </div>
+          {(specsStatus.kind === "ok" || specsStatus.kind === "error") && (
+            <p
+              className={cn(
+                "text-xs",
+                specsStatus.kind === "error"
+                  ? "text-destructive"
+                  : "text-emerald-700 dark:text-emerald-400",
+              )}
+            >
+              {specsStatus.message}
+            </p>
+          )}
+          <p className="text-muted-foreground text-[11px]">
+            Équivalent en ligne de commande :{" "}
+            <code>npm run sync-specs</code> (depuis le dossier{" "}
+            <code>packrest/</code>).
+          </p>
+        </CardBody>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <GitBranch className="text-muted-foreground size-3.5" />
+          <span className="font-semibold">
+            Synchroniser depuis une release GitLab
+          </span>
+        </CardHeader>
+        <CardBody className="space-y-3 p-4">
+          <p className="text-muted-foreground text-xs">
+            Télécharge le <code>bundle.zip</code> de la release choisie et en
+            extrait les contrats OpenAPI dans <code>public/specs/</code>, puis
+            rafraîchit le cache. Le token est stocké côté serveur dans{" "}
+            <code>.packrest.config.json</code>, jamais renvoyé au navigateur.
+          </p>
+
+          <Field
+            label="Projet GitLab"
+            hint="Chemin group/projet ou identifiant numérique."
+          >
+            <Input
+              value={gitlabProject}
+              onChange={(e) => setGitlabProject(e.target.value)}
+              placeholder="packsolutions/openapi"
+              className="font-mono"
+              spellCheck={false}
+            />
+          </Field>
+          <Field
+            label="Token d'accès"
+            hint="Personal/Project Access Token avec le scope read_api. Laissez vide pour conserver le token déjà enregistré."
+          >
+            <Input
+              type="password"
+              value={gitlabToken}
+              onChange={(e) => setGitlabToken(e.target.value)}
+              placeholder={
+                gitlabHasToken ? "•••••••• — déjà enregistré" : "glpat-…"
+              }
+              className="font-mono"
+              autoComplete="off"
+              spellCheck={false}
+            />
+          </Field>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={onSaveGitlab}
+              disabled={
+                gitlabStatus.kind === "saving" ||
+                (!gitlabProject.trim() && !gitlabToken.trim())
+              }
+              className="text-xs"
+            >
+              <Save className="size-3" /> Enregistrer la connexion
+            </Button>
+            {gitlabHasToken && gitlabStatus.kind !== "saving" && (
+              <span className="inline-flex items-center gap-1 text-[11px] font-medium text-emerald-700 dark:text-emerald-400">
+                <Check className="size-3" /> Token enregistré
+              </span>
+            )}
+          </div>
+
+          {!gitlabHasToken ? (
+            <p className="text-muted-foreground text-[11px]">
+              Enregistrez un token pour charger la liste des releases.
+            </p>
+          ) : (
+            <div className="space-y-2 border-t pt-3">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-xs font-medium">
+                  Release à synchroniser
+                </span>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => loadReleases(releasesAll)}
+                  disabled={loadingReleases}
+                  className="text-muted-foreground h-auto gap-1 px-1.5 py-1 text-[11px]"
+                >
+                  <RefreshCw
+                    className={cn("size-3", loadingReleases && "animate-spin")}
+                  />
+                  Rafraîchir
+                </Button>
+              </div>
+
+              {releases.length > 0 ? (
+                <>
+                  <Select value={selectedTag} onValueChange={setSelectedTag}>
+                    <SelectTrigger className="font-mono">
+                      <SelectValue placeholder="Choisir un tag" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {releases.map((r) => (
+                        <SelectItem
+                          key={r.tag}
+                          value={r.tag}
+                          disabled={!r.hasBundle}
+                        >
+                          {r.tag}
+                          {r.releasedAt
+                            ? ` · ${formatReleaseDate(r.releasedAt)}`
+                            : ""}
+                          {!r.hasBundle ? " · pas de bundle.zip" : ""}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+
+                  <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
+                    <p className="text-muted-foreground text-[11px]">
+                      {releasesAll
+                        ? `${releases.length} release${releases.length > 1 ? "s" : ""}`
+                        : `${releases.length} dernière${
+                            releases.length > 1 ? "s" : ""
+                          }${releasesTotal != null ? ` sur ${releasesTotal}` : ""}`}
+                    </p>
+                    {releasesHasMore && !releasesAll && (
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => loadReleases(true)}
+                        disabled={loadingReleases}
+                        className="text-primary h-auto px-1.5 py-1 text-[11px]"
+                      >
+                        Charger toutes les releases
+                      </Button>
+                    )}
+                  </div>
+
+                  <Button
+                    variant="gradient"
+                    size="sm"
+                    onClick={onSyncGitlab}
+                    disabled={!selectedTag || gitlabStatus.kind === "syncing"}
+                    className="w-full text-xs sm:w-auto"
+                  >
+                    <Download
+                      className={cn(
+                        "size-3",
+                        gitlabStatus.kind === "syncing" && "animate-spin",
+                      )}
+                    />
+                    Synchroniser ce tag
+                  </Button>
+                </>
+              ) : (
+                loadingReleases && (
+                  <p className="text-muted-foreground text-[11px]">
+                    Chargement des releases…
+                  </p>
+                )
+              )}
+            </div>
+          )}
+
+          {(gitlabStatus.kind === "ok" || gitlabStatus.kind === "error") && (
+            <p
+              className={cn(
+                "text-xs",
+                gitlabStatus.kind === "error"
+                  ? "text-destructive"
+                  : "text-emerald-700 dark:text-emerald-400",
+              )}
+            >
+              {gitlabStatus.message}
+            </p>
+          )}
+        </CardBody>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <Layers className="text-muted-foreground size-3.5" />
+          <span className="font-semibold">Environnement</span>
+        </CardHeader>
+        <CardBody className="space-y-3 p-4">
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+            {ENV_OPTIONS.map((env) => (
+              <EnvOption
+                key={env}
+                env={env}
+                active={settings.environment === env}
+                onSelect={() =>
+                  setSettings({ ...settings, environment: env })
+                }
+              />
+            ))}
+          </div>
+          {settings.environment !== "custom" && (
+            <div className="bg-muted/40 rounded-md p-3 text-xs">
+              <div className="font-semibold">URLs utilisées</div>
+              <dl className="mt-1.5 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 font-mono text-[11px]">
+                <dt className="text-muted-foreground">
+                  base/&lt;api&gt;
+                </dt>
+                <dd>
+                  {ENV_PRESETS[settings.environment].baseUrlFor("<api>")}
+                </dd>
+                <dt className="text-muted-foreground">token</dt>
+                <dd className="break-all">
+                  {ENV_PRESETS[settings.environment].tokenUrl}
+                </dd>
+              </dl>
+            </div>
+          )}
+        </CardBody>
+      </Card>
+
+      {apis.length > 0 && (
+        <Card>
+          <CardHeader>
+            <Network className="text-muted-foreground size-3.5" />
+            <span className="font-semibold">Context paths des APIs</span>
+          </CardHeader>
+          <CardBody className="space-y-3 p-4">
+            <p className="text-muted-foreground text-xs">
+              Segment de chemin sous lequel chaque API est exposée sur la
+              passerelle (ex. <code>document-api</code>). Laissez vide pour
+              utiliser l&apos;identifiant de l&apos;API. S&apos;applique aux
+              passerelles dev/rec.
+            </p>
+            {apis.map((api) => {
+              const value = settings.apiPaths?.[api.id] ?? "";
+              const effective = (value.trim() || api.id).replace(
+                /^\/+|\/+$/g,
+                "",
+              );
+              return (
+                <Field
+                  key={api.id}
+                  label={api.title}
+                  hint={
+                    presetHost
+                      ? `${presetHost}/${effective}`
+                      : "Aperçu indisponible en environnement Personnalisé."
+                  }
+                >
+                  <Input
+                    value={value}
+                    onChange={(e) => setApiPath(api.id, e.target.value)}
+                    placeholder={api.id}
+                    className="font-mono"
+                    spellCheck={false}
+                  />
+                </Field>
+              );
+            })}
+          </CardBody>
+        </Card>
+      )}
+
+      {isCustom && (
+        <Card>
+          <CardHeader>
+            <Globe className="text-muted-foreground size-3.5" />
+            <span className="font-semibold">URLs personnalisées</span>
+          </CardHeader>
+          <CardBody className="space-y-3 p-4">
+            <Field
+              label="Base URL"
+              hint="Préfixe des appels API. Laissez vide pour utiliser la valeur du contrat (servers[0].url)."
+            >
+              <Input
+                type="url"
+                value={settings.baseUrl}
+                onChange={(e) =>
+                  setSettings({ ...settings, baseUrl: e.target.value })
+                }
+                placeholder="https://api.exemple.com"
+              />
+            </Field>
+            <Field
+              label="Token URL"
+              hint="Endpoint OAuth2 Client Credentials. Laissez vide pour utiliser celui déclaré dans la spec."
+            >
+              <Input
+                type="url"
+                value={settings.tokenUrl}
+                onChange={(e) =>
+                  setSettings({ ...settings, tokenUrl: e.target.value })
+                }
+                placeholder="https://iam.exemple.com/oauth/token"
+              />
+            </Field>
+          </CardBody>
+        </Card>
+      )}
+
+      <Card>
+        <CardHeader>
+          <Lock className="text-muted-foreground size-3.5" />
+          <span className="font-semibold">Identifiants client OAuth2</span>
+        </CardHeader>
+        <CardBody className="space-y-3 p-4">
+          <Field label="Client ID" required>
+            <Input
+              value={settings.clientId}
+              onChange={(e) =>
+                setSettings({ ...settings, clientId: e.target.value })
+              }
+              className="font-mono"
+              autoComplete="username"
+            />
+          </Field>
+          <Field
+            label="Client Secret"
+            hint="Stocké dans le navigateur (localStorage). À ne pas saisir sur une machine partagée."
+            required
+          >
+            <Input
+              type="password"
+              value={settings.clientSecret}
+              onChange={(e) =>
+                setSettings({ ...settings, clientSecret: e.target.value })
+              }
+              className="font-mono"
+              autoComplete="current-password"
+            />
+          </Field>
+        </CardBody>
+      </Card>
+
+      <div className="flex items-center gap-3">
+        <Button variant="gradient" onClick={onSave}>
+          <Save className="size-3.5" /> Enregistrer
+        </Button>
+        {saved && (
+          <span className="inline-flex items-center gap-1 text-xs font-semibold text-emerald-700 dark:text-emerald-400">
+            <KeyRound className="size-3" /> Enregistré
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function EnvOption({
+  env,
+  active,
+  onSelect,
+}: {
+  env: EnvName;
+  active: boolean;
+  onSelect: () => void;
+}) {
+  const meta =
+    env === "custom"
+      ? {
+          label: "Personnalisé",
+          description: "Renseignez vos propres URLs.",
+        }
+      : {
+          label: ENV_PRESETS[env].label,
+          description: ENV_PRESETS[env].description,
+        };
+  return (
+    <button
+      type="button"
+      onClick={onSelect}
+      className={cn(
+        "flex flex-col gap-1 rounded-md border p-3 text-left text-xs transition",
+        active
+          ? "border-primary bg-primary/5 text-foreground ring-primary/20 ring-2"
+          : "border-input bg-card text-foreground hover:border-foreground/40",
+      )}
+    >
+      <span className="font-semibold">{meta.label}</span>
+      <span className="text-muted-foreground text-[11px]">
+        {meta.description}
+      </span>
+    </button>
+  );
+}
