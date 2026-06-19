@@ -62,6 +62,27 @@ export function AppShell({ apis, children }: Props) {
             <NavBody apis={apis} />
           </aside>
           <main className="min-w-0 flex-1 p-4 md:p-6">{children}</main>
+          {/* Filigrane décoratif — pâquerette, clin d'œil au nom PackRest */}
+          <svg
+            viewBox="0 0 200 200"
+            aria-hidden="true"
+            className="pointer-events-none fixed bottom-4 right-4 z-30 size-12 select-none opacity-80 drop-shadow-sm sm:bottom-6 sm:right-6 sm:size-16"
+          >
+            <g fill="#fcd34d" stroke="#b45309" strokeWidth="4" strokeLinejoin="round">
+              {Array.from({ length: 18 }).map((_, i) => (
+                <ellipse
+                  key={i}
+                  cx="100"
+                  cy="50"
+                  rx="11"
+                  ry="37"
+                  transform={`rotate(${i * 20} 100 100)`}
+                />
+              ))}
+            </g>
+            <circle cx="100" cy="100" r="27" fill="#92400e" />
+            <circle cx="100" cy="100" r="14" fill="#fcd34d" />
+          </svg>
         </div>
       </div>
     </TooltipProvider>
@@ -220,63 +241,30 @@ function Brand() {
   );
 }
 
-// Brand mark — eight-petal yellow flower, matching the favicon (app/icon.svg)
-// but with filled yellow petals so it reads as "fleur jaune" at small sizes.
+// Brand mark — same daisy as the corner watermark (white petals, gold outline
+// and a two-tone amber centre) so the logo, favicon and filigrane all match.
 function PackRestMark({ className }: { className?: string }) {
   return (
     <svg
-      viewBox="0 0 32 32"
+      viewBox="0 0 200 200"
       className={className}
       aria-hidden
       focusable="false"
     >
-      <g
-        fill="#facc15"
-        stroke="#a16207"
-        strokeWidth={1.4}
-        strokeLinejoin="round"
-      >
-        <ellipse cx="16" cy="6.5" rx="3.2" ry="4.2" />
-        <ellipse cx="16" cy="25.5" rx="3.2" ry="4.2" />
-        <ellipse cx="6.5" cy="16" rx="4.2" ry="3.2" />
-        <ellipse cx="25.5" cy="16" rx="4.2" ry="3.2" />
-        <ellipse
-          cx="9.3"
-          cy="9.3"
-          rx="3.2"
-          ry="4.2"
-          transform="rotate(-45 9.3 9.3)"
-        />
-        <ellipse
-          cx="22.7"
-          cy="9.3"
-          rx="3.2"
-          ry="4.2"
-          transform="rotate(45 22.7 9.3)"
-        />
-        <ellipse
-          cx="9.3"
-          cy="22.7"
-          rx="3.2"
-          ry="4.2"
-          transform="rotate(45 9.3 22.7)"
-        />
-        <ellipse
-          cx="22.7"
-          cy="22.7"
-          rx="3.2"
-          ry="4.2"
-          transform="rotate(-45 22.7 22.7)"
-        />
+      <g fill="#fcd34d" stroke="#b45309" strokeWidth={4} strokeLinejoin="round">
+        {Array.from({ length: 18 }).map((_, i) => (
+          <ellipse
+            key={i}
+            cx="100"
+            cy="50"
+            rx="11"
+            ry="37"
+            transform={`rotate(${i * 20} 100 100)`}
+          />
+        ))}
       </g>
-      <circle
-        cx="16"
-        cy="16"
-        r="4"
-        fill="#a16207"
-        stroke="#713f12"
-        strokeWidth={1.2}
-      />
+      <circle cx="100" cy="100" r="27" fill="#92400e" />
+      <circle cx="100" cy="100" r="14" fill="#fcd34d" />
     </svg>
   );
 }

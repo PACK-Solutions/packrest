@@ -28,6 +28,8 @@ import {
 } from "@/components/ui/select";
 import { Card, CardBody, CardHeader } from "@/components/Card";
 import Field from "@/components/Field";
+import SyncDiff from "@/components/SyncDiff";
+import type { SpecDiff } from "@/lib/spec-diff";
 import {
   loadSettings,
   saveSettings,
@@ -81,6 +83,9 @@ export default function SettingsPage() {
   const [resolvedSpecsDir, setResolvedSpecsDir] = useState("");
   const [configError, setConfigError] = useState<string | null>(null);
   const [specsStatus, setSpecsStatus] = useState<SpecsStatus>({ kind: "idle" });
+  // Diffs persist past the status message's 3s auto-dismiss so the user can
+  // read what moved; cleared at the start of the next sync.
+  const [specsDiffs, setSpecsDiffs] = useState<SpecDiff[]>([]);
   const [gitlabProject, setGitlabProject] = useState("");
   const [gitlabHost, setGitlabHost] = useState("");
   const [gitlabToken, setGitlabToken] = useState("");
@@ -97,6 +102,7 @@ export default function SettingsPage() {
   const [gitlabStatus, setGitlabStatus] = useState<SpecsStatus>({
     kind: "idle",
   });
+  const [gitlabDiffs, setGitlabDiffs] = useState<SpecDiff[]>([]);
 
   useEffect(() => {
     setSettings(loadSettings());
@@ -197,6 +203,7 @@ export default function SettingsPage() {
 
   const onSyncSpecs = async () => {
     setSpecsStatus({ kind: "syncing" });
+    setSpecsDiffs([]);
     try {
       const res = await fetch("/api/sync-specs", { method: "POST" });
       const data = await res.json();
@@ -213,6 +220,7 @@ export default function SettingsPage() {
       const detail = apis.length
         ? ` — ${apis.join(", ")}`
         : " (aucun bundle v1 trouvé)";
+      setSpecsDiffs((data?.diffs as SpecDiff[]) ?? []);
       setSpecsStatus({
         kind: "ok",
         message: `Synchronisé : ${apis.length} API${apis.length > 1 ? "s" : ""}${detail}`,
@@ -317,6 +325,7 @@ export default function SettingsPage() {
   const onSyncGitlab = async () => {
     if (!selectedTag) return;
     setGitlabStatus({ kind: "syncing" });
+    setGitlabDiffs([]);
     try {
       const res = await fetch("/api/gitlab/sync", {
         method: "POST",
@@ -333,6 +342,7 @@ export default function SettingsPage() {
         return;
       }
       const copied: string[] = data?.copied ?? [];
+      setGitlabDiffs((data?.diffs as SpecDiff[]) ?? []);
       setGitlabStatus({
         kind: "ok",
         message: `Synchronisé depuis ${selectedTag} : ${copied.length} API${
@@ -439,6 +449,7 @@ export default function SettingsPage() {
               {specsStatus.message}
             </p>
           )}
+          <SyncDiff diffs={specsDiffs} />
           <p className="text-muted-foreground text-[11px]">
             Équivalent en ligne de commande :{" "}
             <code>npm run sync-specs</code> (depuis le dossier{" "}
@@ -618,6 +629,7 @@ export default function SettingsPage() {
               {gitlabStatus.message}
             </p>
           )}
+          <SyncDiff diffs={gitlabDiffs} />
         </CardBody>
       </Card>
 

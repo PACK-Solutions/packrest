@@ -60,6 +60,10 @@ scopes → execute → response panel.
    TS module. Update both when changing resolution rules or copy logic.
    (The GitLab source in `lib/gitlab.ts` is UI/route-only — not mirrored in
    the CLI, which still copies from the local `specsDir` at predev/prebuild.)
+   The **spec-diff** algorithm is duplicated the same way: `lib/spec-diff.ts`
+   (typed; both sync paths return `diffs` in their result, surfaced by the
+   Settings UI via `components/SyncDiff.tsx`) and a plain-JS mirror in
+   `scripts/copy-specs.mjs` (console summary). Keep the two in step.
 3. **Don't break the server / client boundary.** `specs.ts` is server-only
    (uses `node:fs`). The request builder is `"use client"` and only sees
    serialised props.

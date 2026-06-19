@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { unzipSync } from "fflate";
 import { loadConfig, saveConfig, type GitlabConfig } from "./sync";
+import { diffSpec, type SpecDiff } from "./spec-diff";
 
 // Server-side GitLab release source. Downloads the `bundle.zip` asset of a
 // chosen release, unzips it in memory, and writes each OpenAPI bundle into
@@ -61,6 +62,8 @@ export interface GitlabSyncResult {
   bundleName: string;
   copied: string[];
   skipped: string[];
+  /** Per-API structural diff vs the previously-synced bundles. */
+  diffs: SpecDiff[];
 }
 
 export async function loadGitlabConfig(): Promise<GitlabConfig> {
@@ -296,11 +299,19 @@ async function extractBundle(
 
   await fs.mkdir(DEST, { recursive: true });
   const copied: string[] = [];
+  const diffs: SpecDiff[] = [];
   for (const [api, { content }] of picked) {
-    await fs.writeFile(path.join(DEST, `${api}.yaml`), decoder.decode(content));
+    const destFile = path.join(DEST, `${api}.yaml`);
+    const decoded = decoder.decode(content);
+    // Read the previously-synced bundle before overwriting so we can report
+    // what moved. Missing file → null → the API reads as "added".
+    const previous = await fs.readFile(destFile, "utf8").catch(() => null);
+    await fs.writeFile(destFile, decoded);
     copied.push(api);
+    diffs.push(diffSpec(api, previous, decoded));
   }
   copied.sort();
+  diffs.sort((a, b) => a.api.localeCompare(b.api));
 
   if (copied.length === 0) {
     throw new GitlabError(
@@ -310,5 +321,5 @@ async function extractBundle(
     );
   }
 
-  return { tag, bundleName, copied, skipped: [] };
+  return { tag, bundleName, copied, skipped: [], diffs };
 }

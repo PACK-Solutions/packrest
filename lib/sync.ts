@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import constants from "./sync-constants.json";
+import { diffSpec, type SpecDiff } from "./spec-diff";
 
 // Server-side mirror of scripts/copy-specs.mjs. Shared constants live in
 // sync-constants.json so both this module and the CLI agree on env var
@@ -121,6 +122,8 @@ export interface SyncResult {
   copied: string[];
   skipped: string[];
   missing: boolean;
+  /** Per-API structural diff vs the previously-synced bundles. */
+  diffs: SpecDiff[];
 }
 
 // Serialises concurrent calls: a second click while a sync is in flight
@@ -146,21 +149,22 @@ async function doCopy(specsDir?: string): Promise<SyncResult> {
   try {
     realSource = await fs.realpath(source);
   } catch {
-    return { source, dest: DEST, copied: [], skipped: [], missing: true };
+    return { source, dest: DEST, copied: [], skipped: [], missing: true, diffs: [] };
   }
   if (isForbiddenSpecsDir(realSource)) {
-    return { source, dest: DEST, copied: [], skipped: [], missing: true };
+    return { source, dest: DEST, copied: [], skipped: [], missing: true, diffs: [] };
   }
   let entries;
   try {
     entries = await fs.readdir(realSource, { withFileTypes: true });
   } catch {
-    return { source, dest: DEST, copied: [], skipped: [], missing: true };
+    return { source, dest: DEST, copied: [], skipped: [], missing: true, diffs: [] };
   }
   await fs.mkdir(DEST, { recursive: true });
   const apis = entries.filter((e) => e.isDirectory()).map((e) => e.name);
   const copied: string[] = [];
   const skipped: string[] = [];
+  const diffs: SpecDiff[] = [];
   for (const api of apis) {
     // API folder names come from readdir — they shouldn't contain path
     // separators, but if a symlink shenanigan brought one in, refuse it.
@@ -181,8 +185,13 @@ async function doCopy(specsDir?: string): Promise<SyncResult> {
         continue;
       }
       const content = await fs.readFile(realSrc, "utf8");
-      await fs.writeFile(path.join(DEST, `${api}.yaml`), content);
+      const destFile = path.join(DEST, `${api}.yaml`);
+      // Capture the previously-synced bundle before overwriting so we can
+      // report what moved. Missing file → null → the API reads as "added".
+      const previous = await fs.readFile(destFile, "utf8").catch(() => null);
+      await fs.writeFile(destFile, content);
       copied.push(api);
+      diffs.push(diffSpec(api, previous, content));
     } catch {
       skipped.push(api);
     }
@@ -193,5 +202,6 @@ async function doCopy(specsDir?: string): Promise<SyncResult> {
     copied,
     skipped,
     missing: false,
+    diffs,
   };
 }
