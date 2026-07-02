@@ -17,7 +17,10 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 tauri-plugin-store = "2"
 tauri-plugin-fs = "2"
-tauri-plugin-http = "2"
+# `unsafe-headers` lets JS override forbidden headers (notably `Origin`). The
+# Gravitee gateway rejects the production webview origin (`tauri://localhost`)
+# with a 403 on the token endpoint; lib/token.ts sets an accepted `Origin`.
+tauri-plugin-http = { version = "2", features = ["unsafe-headers"] }
 tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
