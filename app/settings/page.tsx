@@ -36,7 +36,12 @@ import {
   SETTINGS_CHANGED_EVENT,
   type Settings,
 } from "@/lib/storage";
-import { ENV_OPTIONS, ENV_PRESETS, type EnvName } from "@/lib/env";
+import {
+  ENV_OPTIONS,
+  ENV_PRESETS,
+  defaultContextPathFor,
+  type EnvName,
+} from "@/lib/env";
 import { cn } from "@/lib/utils";
 
 type SpecsStatus =
@@ -680,13 +685,13 @@ export default function SettingsPage() {
           <CardBody className="space-y-3 p-4">
             <p className="text-muted-foreground text-xs">
               Segment de chemin sous lequel chaque API est exposée sur la
-              passerelle (ex. <code>document-api</code>). Laissez vide pour
-              utiliser l&apos;identifiant de l&apos;API. S&apos;applique aux
-              passerelles dev/rec.
+              passerelle (ex. <code>documents</code>). Laissez vide pour utiliser
+              le chemin par défaut. S&apos;applique aux passerelles dev/rec.
             </p>
             {apis.map((api) => {
               const value = settings.apiPaths?.[api.id] ?? "";
-              const effective = (value.trim() || api.id).replace(
+              const fallback = defaultContextPathFor(api.id);
+              const effective = (value.trim() || fallback).replace(
                 /^\/+|\/+$/g,
                 "",
               );
@@ -696,14 +701,16 @@ export default function SettingsPage() {
                   label={api.title}
                   hint={
                     presetHost
-                      ? `${presetHost}/${effective}`
+                      ? effective
+                        ? `${presetHost}/${effective}`
+                        : `${presetHost} (racine)`
                       : "Aperçu indisponible en environnement Personnalisé."
                   }
                 >
                   <Input
                     value={value}
                     onChange={(e) => setApiPath(api.id, e.target.value)}
-                    placeholder={api.id}
+                    placeholder={fallback ? `(${fallback})` : "(racine)"}
                     className="font-mono"
                     spellCheck={false}
                   />

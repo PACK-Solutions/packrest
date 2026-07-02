@@ -20,14 +20,45 @@ export interface EnvPreset {
 const DEV_HOST = "https://dev.apim.gateway.pack-solutions.gravitee.cloud";
 const REC_HOST = "https://rec.apim.gateway.pack-solutions.gravitee.cloud";
 
+// Default gateway context path per API — the segment appended after the host,
+// before the OpenAPI path. The request URL is `baseUrl + <openapi path>`, and
+// most bundles already carry their resource segment (contract.yaml paths start
+// with /contracts, etc.), so those APIs sit at the gateway root (""). Only
+// person and webhook add a prefix their bundles omit. An API absent from this
+// map falls back to its apiId (the historical default). Overridable per API in
+// Settings ("context paths des APIs").
+const DEFAULT_CONTEXT_PATHS: Record<string, string> = {
+  contract: "",
+  "service-request": "",
+  document: "",
+  "order-book": "",
+  product: "",
+  person: "person",
+  webhook: "webhooks",
+};
+
+// The gateway context-path segment for an API in the absence of a user
+// override. Returns "" for APIs served at the gateway root; falls back to the
+// apiId for anything not listed above.
+export function defaultContextPathFor(apiId: string): string {
+  const def = DEFAULT_CONTEXT_PATHS[apiId];
+  return def !== undefined ? def : apiId;
+}
+
+// Join a gateway host with a context path, avoiding a trailing/double slash
+// when the context path is empty (API served at the root).
+function joinHost(host: string, contextPath: string): string {
+  return contextPath ? `${host}/${contextPath}` : host;
+}
+
 export const ENV_PRESETS: Record<EnvPresetName, EnvPreset> = {
   dev: {
     id: "dev",
     label: "Dev (Gravitee)",
     description:
-      "Gateway de développement. Chaque API est exposée sous /<api-id>.",
+      "Gateway de développement. Chaque API a son propre context path.",
     host: DEV_HOST,
-    baseUrlFor: (apiId) => `${DEV_HOST}/${apiId}`,
+    baseUrlFor: (apiId) => joinHost(DEV_HOST, defaultContextPathFor(apiId)),
     tokenUrl:
       "https://dev.am.gateway.pack-solutions.gravitee.cloud/pack-solutions/oauth/token",
   },
@@ -37,7 +68,7 @@ export const ENV_PRESETS: Record<EnvPresetName, EnvPreset> = {
     description:
       "Gateway de recette. Mêmes paths que dev mais sur l'environnement rec.",
     host: REC_HOST,
-    baseUrlFor: (apiId) => `${REC_HOST}/${apiId}`,
+    baseUrlFor: (apiId) => joinHost(REC_HOST, defaultContextPathFor(apiId)),
     tokenUrl:
       "https://rec.am.gateway.pack-solutions.gravitee.cloud/pack-solutions/oauth/token",
   },
@@ -52,14 +83,15 @@ function trimSlashes(s: string): string {
 }
 
 // The path segment used for an API under the gateway presets: the per-API
-// override when set, else the apiId itself.
+// override when set, else the default context path (which may be "" for APIs
+// served at the gateway root).
 export function contextPathFor(
   apiId: string,
   apiPaths?: Record<string, string>,
 ): string {
   const override = apiPaths?.[apiId];
   const trimmed = override ? trimSlashes(override) : "";
-  return trimmed || apiId;
+  return trimmed || defaultContextPathFor(apiId);
 }
 
 // Resolve the effective base URL for an API given the user's settings.
@@ -74,7 +106,7 @@ export function resolveBaseUrl(
   apiPaths?: Record<string, string>,
 ): string {
   if (env === "custom") return customBaseUrl || specDefault;
-  return `${ENV_PRESETS[env].host}/${contextPathFor(apiId, apiPaths)}`;
+  return joinHost(ENV_PRESETS[env].host, contextPathFor(apiId, apiPaths));
 }
 
 // Inverse of resolveBaseUrl for presets: derive the context-path segment from
@@ -85,7 +117,10 @@ export function contextPathFromBaseUrl(
   baseUrl: string,
 ): string | null {
   if (env === "custom") return null;
-  const prefix = `${ENV_PRESETS[env].host}/`;
+  const host = ENV_PRESETS[env].host;
+  // Edited back to exactly the host → the API is served at the gateway root.
+  if (baseUrl === host || baseUrl === `${host}/`) return "";
+  const prefix = `${host}/`;
   if (!baseUrl.startsWith(prefix)) return null;
   return trimSlashes(baseUrl.slice(prefix.length));
 }

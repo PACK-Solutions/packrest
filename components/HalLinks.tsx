@@ -11,6 +11,9 @@ import { halLinkLabel, resolveHalHref, type HalLink } from "@/lib/hal";
 interface Props {
   links: HalLink[];
   apiBaseUrl: string;
+  // Full URL of the resource that produced these links (the displayed
+  // response's request URL). Used to resolve bare-relative hrefs.
+  currentUrl?: string;
   // Called with `(url, label)` — label is a short human-friendly name for
   // the navigation breadcrumb (e.g. `next`, `items[0].self`).
   onFollow?: (url: string, label: string) => void;
@@ -28,7 +31,12 @@ function formatContext(context: string[]): string {
   return out;
 }
 
-export default function HalLinks({ links, apiBaseUrl, onFollow }: Props) {
+export default function HalLinks({
+  links,
+  apiBaseUrl,
+  currentUrl,
+  onFollow,
+}: Props) {
   // Group by context so embedded resources visually separate from the
   // root document's links.
   const groups = useMemo(() => {
@@ -63,6 +71,7 @@ export default function HalLinks({ links, apiBaseUrl, onFollow }: Props) {
                 <LinkRow
                   link={link}
                   apiBaseUrl={apiBaseUrl}
+                  currentUrl={currentUrl}
                   onFollow={onFollow}
                 />
               </li>
@@ -77,15 +86,17 @@ export default function HalLinks({ links, apiBaseUrl, onFollow }: Props) {
 function LinkRow({
   link,
   apiBaseUrl,
+  currentUrl,
   onFollow,
 }: {
   link: HalLink;
   apiBaseUrl: string;
+  currentUrl?: string;
   onFollow?: (url: string, label: string) => void;
 }) {
   const resolved = link.templated
     ? link.href
-    : resolveHalHref(link.href, apiBaseUrl);
+    : resolveHalHref(link.href, apiBaseUrl, currentUrl);
   return (
     <div className="flex flex-col gap-1.5">
       <div className="flex flex-wrap items-center gap-2">

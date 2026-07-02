@@ -95,13 +95,24 @@ function walk(value: unknown, context: string[], out: HalLink[]): void {
 
 // Resolves a (possibly relative) HAL href against the API base URL.
 //
-// Important: `baseUrl` MUST be the API base (e.g.
-// `https://gateway.example.com/person`), NOT the full request URL. Hrefs
-// returned by HAL APIs typically look like `/individuals/{id}` — they're
-// absolute paths but mounted under the API's prefix. `new URL` would
-// resolve `/individuals/...` against the host root (dropping `/person`),
-// so we prepend the base path manually when the href starts with `/`.
-export function resolveHalHref(href: string, baseUrl: string): string {
+// `baseUrl` is the API base (e.g. `https://gateway.example.com/person`) — it
+// carries the gateway context path. `currentUrl`, when provided, is the full
+// URL of the resource that emitted this href (the request URL of the response
+// being displayed); it is used to resolve bare-relative hrefs against the
+// resource actually being viewed rather than the frozen operation base.
+//
+// Absolute-path hrefs (`/…`) are resolved against the base origin with the
+// context path re-applied — but *idempotently*. Some HAL APIs omit the gateway
+// prefix (e.g. `/individuals/{id}` under a `/person` base), so we must prepend
+// it; others already include it (e.g. `/service-request/…` under a
+// `/service-request` base). Prepending unconditionally duplicated the prefix
+// (`/person/person/…`), so we only add it when the href doesn't already carry
+// it.
+export function resolveHalHref(
+  href: string,
+  baseUrl: string,
+  currentUrl?: string,
+): string {
   if (!href) return href;
   if (/^https?:\/\//i.test(href)) return href;
   if (!baseUrl) return href;
@@ -109,12 +120,21 @@ export function resolveHalHref(href: string, baseUrl: string): string {
     const base = new URL(baseUrl);
     if (href.startsWith("/")) {
       const basePath = base.pathname.replace(/\/$/, "");
+      // Already prefixed (or the prefix itself) → don't add it again.
+      if (
+        !basePath ||
+        href === basePath ||
+        href.startsWith(basePath + "/")
+      ) {
+        return base.origin + href;
+      }
       return base.origin + basePath + href;
     }
-    // Bare relative href ("users/42") — resolve against the API base as if
-    // it were a directory, so we don't lose its last segment.
+    // Bare relative href ("documents") — resolve against the URL of the
+    // resource that produced it (so nested/followed resources resolve
+    // correctly), falling back to the API base as a directory.
     const baseAsDir = baseUrl.endsWith("/") ? baseUrl : baseUrl + "/";
-    return new URL(href, baseAsDir).toString();
+    return new URL(href, currentUrl || baseAsDir).toString();
   } catch {
     return href;
   }
@@ -123,13 +143,16 @@ export function resolveHalHref(href: string, baseUrl: string): string {
 // Used by JsonView: given a leaf string at a JSON path, return its
 // clickable URL or null. Recognises any `href` whose path crosses a
 // `_links` segment; templated hrefs (containing `{x}`) are skipped.
-export function makeHalLinkResolver(baseUrl: string): LinkResolver {
+export function makeHalLinkResolver(
+  baseUrl: string,
+  currentUrl?: string,
+): LinkResolver {
   return (path, value) => {
     if (typeof value !== "string") return null;
     if (path[path.length - 1] !== "href") return null;
     if (!path.includes("_links")) return null;
     if (isProbablyTemplated(value)) return null;
-    return resolveHalHref(value, baseUrl);
+    return resolveHalHref(value, baseUrl, currentUrl);
   };
 }
 

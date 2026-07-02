@@ -15,7 +15,6 @@ import {
   User,
   FileText,
   ScrollText,
-  CreditCard,
   MessageSquareWarning,
   Webhook,
   Box,
@@ -175,15 +174,6 @@ export const API_THEME: Record<string, ApiTheme> = {
     bgSoft: "bg-violet-50 dark:bg-violet-900/30",
     text: "text-violet-800 dark:text-violet-200",
     border: "border-violet-200/80 dark:border-violet-800/60",
-  },
-  "payment-method": {
-    label: "Payment Method",
-    icon: CreditCard,
-    ring: "ring-amber-500/25 dark:ring-amber-400/25",
-    bg: "bg-amber-100 dark:bg-amber-900/40",
-    bgSoft: "bg-amber-50 dark:bg-amber-900/30",
-    text: "text-amber-800 dark:text-amber-100",
-    border: "border-amber-300/80 dark:border-amber-700/60",
   },
   "service-request": {
     label: "Service Request",

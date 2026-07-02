@@ -10,7 +10,7 @@ export const dynamic = "force-dynamic";
 export const metadata: Metadata = {
   title: "PackRest — client REST",
   description:
-    "Client REST guidé pour les APIs Pack Solutions. Postman-like, pensé pour les non-développeurs.",
+    "Client REST guidé pour les APIs Pack Solutions, pensé pour les non-développeurs.",
 };
 
 export default async function RootLayout({

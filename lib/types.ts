@@ -38,6 +38,9 @@ export interface OpenApiMediaType {
   schema?: JsonSchema;
   example?: unknown;
   examples?: Record<string, OpenApiExample>;
+  // Per-property encoding (multipart/form-data). We only read `contentType`
+  // (a comma-separated allow-list) to drive a file input's `accept`.
+  encoding?: Record<string, { contentType?: string }>;
 }
 
 export interface OpenApiRequestBody {

@@ -18,8 +18,7 @@ export default async function Home() {
         </h1>
         <p className="text-muted-foreground mt-1 text-sm">
           Toutes les APIs Pack Solutions, prêtes à être appelées depuis votre
-          navigateur. Pas besoin de connaître Postman — les exemples du
-          contrat servent de point de départ.
+          navigateur. Les exemples du contrat servent de point de départ.
         </p>
       </header>
 

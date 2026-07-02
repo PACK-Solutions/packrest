@@ -129,6 +129,7 @@ export default function ResponsePanel({
                   body={response.body}
                   parsedBody={parsedBody}
                   apiBaseUrl={apiBaseUrl}
+                  currentUrl={response.request?.url}
                   onFollowLink={onFollowLink}
                 />
               ),
@@ -143,6 +144,7 @@ export default function ResponsePanel({
                       <HalLinks
                         links={halLinks}
                         apiBaseUrl={apiBaseUrl}
+                        currentUrl={response.request?.url}
                         onFollow={onFollowLink}
                       />
                     ),
@@ -175,11 +177,13 @@ function BodyView({
   body,
   parsedBody,
   apiBaseUrl,
+  currentUrl,
   onFollowLink,
 }: {
   body: unknown;
   parsedBody: unknown;
   apiBaseUrl: string;
+  currentUrl?: string;
   onFollowLink?: (url: string, label: string) => void;
 }) {
   const [view, setView] = useState<"json" | "tree">("json");
@@ -199,8 +203,8 @@ function BodyView({
     }
   }, [parsedBody]);
   const linkResolver = useMemo(
-    () => makeHalLinkResolver(apiBaseUrl),
-    [apiBaseUrl],
+    () => makeHalLinkResolver(apiBaseUrl, currentUrl),
+    [apiBaseUrl, currentUrl],
   );
   // Adapt JsonView's `(url, path)` click signature to the parent's
   // `(url, label)` follow API.

@@ -211,7 +211,7 @@ function NavBody({
         <Section title="Outils">
           <NavLink
             href="/collections"
-            label="Collections"
+            label="Import Bruno"
             icon={FolderOpen}
             onNavigate={onNavigate}
           />

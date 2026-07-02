@@ -1,10 +1,24 @@
 # packrest
 
-Client web façon Postman pour utilisateurs non-développeurs. L'app charge les
+Client web REST pour utilisateurs non-développeurs. L'app charge les
 contrats OpenAPI de Pack Solutions et permet d'exécuter chaque endpoint depuis
 le navigateur : choix de l'API → choix de l'endpoint → formulaire pré-rempli à
 partir des `examples` du contrat → obtention d'un token OAuth2 → exécution →
 panneau de réponse.
+
+## Collections Bruno
+
+Les requêtes ne sont pas persistées ; l'échange se fait via des collections
+[Bruno](https://www.usebruno.com/) (format `opencollection` YAML) :
+
+- **Export API** — sur la page d'une API, « Exporter (Bruno) » télécharge un
+  `.zip` généré depuis le spec (dossiers par tag, `opencollection.yml` avec
+  l'auth OAuth2 client-credentials, environnements Dev/Rec).
+- **Export requête** — dans le builder, « Exporter (Bruno) » télécharge la
+  requête courante en un fichier `.yml`.
+- **Import** — la page **Import Bruno** charge un `.zip` (ou un `.yml`) ; les
+  requêtes reconnues (endpoint présent dans les specs chargés) s'ouvrent
+  pré-remplies dans le builder. L'import est éphémère (rien n'est enregistré).
 
 ## Démarrage
 

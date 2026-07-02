@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { KeyRound, Loader2, Play, Save, Terminal } from "lucide-react";
+import { Download, KeyRound, Loader2, Play, Save, Terminal } from "lucide-react";
 import { toast } from "sonner";
 
 import { Card, CardHeader, CardBody } from "@/components/Card";
@@ -10,13 +10,13 @@ import MethodBadge from "@/components/MethodBadge";
 import Field from "@/components/Field";
 import SchemaField from "@/components/SchemaField";
 import JsonEditor from "@/components/JsonEditor";
+import MultipartBodySection from "@/components/MultipartBodySection";
 import ResponsePanel from "@/components/ResponsePanel";
 import ScopeSelector from "@/components/ScopeSelector";
 import TokenStatus from "@/components/TokenStatus";
 import TokenInspector from "@/components/TokenInspector";
 import HeaderEditor from "@/components/HeaderEditor";
 import Markdown from "@/components/Markdown";
-import PromptDialog from "@/components/PromptDialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -26,21 +26,32 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { executeRequest, type ProxyResponse } from "@/lib/http";
+import {
+  executeRequest,
+  fileToBase64,
+  type MultipartPayload,
+  type ProxyResponse,
+} from "@/lib/http";
 import {
   loadSettings,
   saveSettings,
-  loadCollections,
-  saveCollections,
-  newId,
   SETTINGS_CHANGED_EVENT,
   type SavedHeader,
 } from "@/lib/storage";
+import {
+  serializeRequestYml,
+  IMPORT_SEED_KEY,
+  type BrunoHeader,
+  type BrunoParam,
+  type BrunoRequest,
+  type ImportSeed,
+} from "@/lib/bruno";
 import { fetchToken, currentToken, clearToken } from "@/lib/token";
 import {
   resolveBaseUrl,
   resolveTokenUrl,
   contextPathFromBaseUrl,
+  defaultContextPathFor,
 } from "@/lib/env";
 import type { TokenState } from "@/lib/storage";
 import type {
@@ -99,6 +110,9 @@ export default function RequestBuilder(props: Props) {
   const [baseUrl, setBaseUrl] = useState(() =>
     resolveBaseUrl(apiId, "dev", "", defaultBaseUrl),
   );
+  // Per-API placeholder mirroring the resolved default (e.g. webhook/person get
+  // their `/webhooks`, `/person` prefix), shown only when the field is emptied.
+  const baseUrlPlaceholder = resolveBaseUrl(apiId, "dev", "", defaultBaseUrl);
   // Current environment, kept in state so the "save context path" button knows
   // whether it applies (presets only). Re-synced from settings at mount and
   // whenever settings change (this tab via SETTINGS_CHANGED_EVENT, other tabs
@@ -145,6 +159,14 @@ export default function RequestBuilder(props: Props) {
     operation.requestBody?.content?.["application/json"]?.schema;
   const [bodyValue, setBodyValue] = useState<unknown>(null);
 
+  // multipart/form-data endpoints (file upload). When there's no JSON body but
+  // a multipart one, the "Corps" tab renders a file picker + metadata form and
+  // the request is sent as a real multipart body (rebuilt in /api/proxy).
+  const multipartMedia = operation.requestBody?.content?.["multipart/form-data"];
+  const multipartSchema: JsonSchema | undefined = multipartMedia?.schema;
+  const isMultipart = !bodySchema && !!multipartSchema;
+  const [files, setFiles] = useState<Record<string, File | null>>({});
+
   const [customHeaders, setCustomHeaders] = useState<SavedHeader[]>([]);
 
   const requiredScopes = (operation.security ?? []).flatMap((e) =>
@@ -181,8 +203,31 @@ export default function RequestBuilder(props: Props) {
   // stack is non-empty the user is "off" the operation — handleSave /
   // handleCopyCurl use the stack's top URL and response.
   const [followStack, setFollowStack] = useState<FollowEntry[]>([]);
-  // Save dialog state — replaces two consecutive window.prompt calls.
-  const [saveDialogOpen, setSaveDialogOpen] = useState(false);
+
+  // One-shot seeding from a Bruno import. The /collections importer writes the
+  // chosen request into sessionStorage then navigates here; we apply the values
+  // once on mount and clear the key so a refresh starts clean.
+  useEffect(() => {
+    let raw: string | null = null;
+    try {
+      raw = window.sessionStorage.getItem(IMPORT_SEED_KEY);
+    } catch {
+      return;
+    }
+    if (!raw) return;
+    window.sessionStorage.removeItem(IMPORT_SEED_KEY);
+    let seed: ImportSeed;
+    try {
+      seed = JSON.parse(raw) as ImportSeed;
+    } catch {
+      return;
+    }
+    if (seed.apiId !== apiId || seed.operationId !== operationId) return;
+    if (seed.params) setParamValues((prev) => ({ ...prev, ...seed.params }));
+    if (seed.headers) setCustomHeaders(seed.headers);
+    if (seed.body !== undefined) setBodyValue(seed.body);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const currentResponse: ProxyResponse | null =
     followStack.length > 0
@@ -232,28 +277,37 @@ export default function RequestBuilder(props: Props) {
     }
   };
 
+  // Enabled custom headers plus the current bearer. Shared by run / follow /
+  // curl so the Authorization + custom-header logic lives in one place.
+  // Canonical capital `Bearer` — RFC 7235 says case-insensitive, but Gravitee
+  // (and some other gateways) reject lowercase `bearer`.
+  const buildLiveHeaders = (): Record<string, string> => {
+    const live = currentToken() ?? token;
+    const headers: Record<string, string> = {};
+    for (const h of customHeaders) {
+      if (h.enabled !== false && h.key) headers[h.key] = h.value;
+    }
+    if (live) headers["Authorization"] = `Bearer ${live.accessToken}`;
+    return headers;
+  };
+
   const handleRun = async () => {
     setRunning(true);
     setError(null);
     setResponse(null);
     setFollowStack([]);
     try {
-      const live = currentToken() ?? token;
-      const headers: Record<string, string> = {};
-      for (const h of customHeaders) {
-        if (h.enabled !== false && h.key) headers[h.key] = h.value;
-      }
-      if (live) {
-        // Canonical capital `Bearer`. RFC 7235 says case-insensitive, but
-        // Gravitee (and some other gateways) reject lowercase `bearer`.
-        headers["Authorization"] = `Bearer ${live.accessToken}`;
-      }
+      const headers = buildLiveHeaders();
       const wantsBody = !["GET", "HEAD"].includes(method.toUpperCase());
       const res = await executeRequest({
         method,
         url: composedUrl,
         headers,
-        body: wantsBody ? (bodyValue as object) : undefined,
+        body: wantsBody && !isMultipart ? (bodyValue as object) : undefined,
+        multipart:
+          isMultipart && wantsBody
+            ? await buildMultipart(bodyValue, files)
+            : undefined,
       });
       setResponse(res);
     } catch (e) {
@@ -271,16 +325,10 @@ export default function RequestBuilder(props: Props) {
     setRunning(true);
     setError(null);
     try {
-      const live = currentToken() ?? token;
-      const headers: Record<string, string> = {};
-      for (const h of customHeaders) {
-        if (h.enabled !== false && h.key) headers[h.key] = h.value;
-      }
-      if (live) headers["Authorization"] = `Bearer ${live.accessToken}`;
       const res = await executeRequest({
         method: "GET",
         url,
-        headers,
+        headers: buildLiveHeaders(),
         body: undefined,
       });
       setFollowStack((s) => [...s, { url, label, response: res }]);
@@ -324,40 +372,75 @@ export default function RequestBuilder(props: Props) {
     ? `GET ${followStack[followStack.length - 1].label}`
     : `${method.toUpperCase()} ${path}`;
 
-  const handleSave = () => setSaveDialogOpen(true);
-
-  const commitSave = (name: string, colName: string) => {
-    const collections = loadCollections();
-    let col = collections.find((c) => c.name === colName);
-    if (!col) {
-      col = { id: newId("col"), name: colName, baseUrl, requests: [] };
-      collections.push(col);
+  // Export the currently-composed request as a single Bruno request file
+  // (.yml). Mirrors the "Copier en curl" mental model: what you export is what
+  // would be sent (the operation request, or the followed URL when navigating).
+  const handleExportBruno = () => {
+    const params: BrunoParam[] = [];
+    if (!isFollowing) {
+      for (const p of pathParams) {
+        params.push({
+          name: p.name,
+          value: paramValues[p.name] ?? "",
+          type: "path",
+          description: p.description,
+        });
+      }
+      for (const p of queryParams) {
+        const value = paramValues[p.name] ?? "";
+        if (value === "") continue;
+        params.push({
+          name: p.name,
+          value,
+          type: "query",
+          description: p.description,
+        });
+      }
     }
-    col.requests.push({
-      id: newId("req"),
-      name,
-      apiId,
-      operationId,
+    const headers: BrunoHeader[] = customHeaders
+      .filter((h) => h.key)
+      .map((h) => ({
+        name: h.key,
+        value: h.value,
+        disabled: h.enabled === false,
+      }));
+    const wantsBody = !["GET", "HEAD"].includes(effectiveMethod.toUpperCase());
+    // Bruno's opencollection body model here is json/text only — a binary
+    // multipart upload can't round-trip through the YAML. Export the request
+    // shape without the body and note it so the user re-attaches the file in
+    // Bruno rather than shipping a misleading JSON body.
+    const asMultipart = wantsBody && isMultipart && !isFollowing;
+    const docs = asMultipart
+      ? [
+          operation.summary,
+          "⚠️ Requête multipart/form-data : ajoutez le fichier et les champs du formulaire dans Bruno (corps non exporté).",
+        ]
+          .filter(Boolean)
+          .join("\n\n")
+      : operation.summary;
+    const req: BrunoRequest = {
+      name: effectiveDefaultName,
+      tags: [apiId],
       method: effectiveMethod.toUpperCase(),
       url: effectiveUrl,
-      headers: customHeaders,
-      body: effectiveBody
-        ? {
-            mode: "raw",
-            raw: JSON.stringify(effectiveBody, null, 2),
-            mediaType: "application/json",
-          }
-        : { mode: "none" },
+      params: params.length ? params : undefined,
+      headers: headers.length ? headers : undefined,
+      body:
+        !asMultipart && wantsBody && effectiveBody != null
+          ? { type: "json", data: JSON.stringify(effectiveBody, null, 2) }
+          : undefined,
+      docs,
+    };
+    const blob = new Blob([serializeRequestYml(req)], {
+      type: "application/yaml",
     });
-    saveCollections(collections);
-    const s = loadSettings();
-    // Only the custom env has a single global base URL to remember; preset
-    // base URLs are derived per-API (see handleSaveContextPath).
-    if (s.environment === "custom" && s.baseUrl !== baseUrl)
-      saveSettings({ ...s, baseUrl });
-    toast.success("Requête sauvegardée", {
-      description: `Collection « ${colName} »`,
-    });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${effectiveDefaultName.replace(/[/\\]+/g, "-").trim() || "request"}.yml`;
+    a.click();
+    URL.revokeObjectURL(url);
+    toast.success("Requête exportée (Bruno)");
   };
 
   // Persist the context path of the current API, derived from the edited base
@@ -374,39 +457,64 @@ export default function RequestBuilder(props: Props) {
       return;
     }
     const apiPaths = { ...(s.apiPaths ?? {}) };
-    if (ctx === apiId) delete apiPaths[apiId];
+    // Don't persist an override that just restates the default.
+    if (ctx === defaultContextPathFor(apiId)) delete apiPaths[apiId];
     else apiPaths[apiId] = ctx;
     saveSettings({ ...s, apiPaths });
     toast.success(`Context path enregistré pour « ${apiId} »`, {
-      description: `/${ctx}`,
+      description: ctx ? `/${ctx}` : "(racine de la passerelle)",
     });
   };
 
   const handleCopyCurl = () => {
-    const live = currentToken() ?? token;
-    const headers: Record<string, string> = {};
-    for (const h of customHeaders) {
-      if (h.enabled !== false && h.key) headers[h.key] = h.value;
-    }
-    if (live) headers["Authorization"] = `Bearer ${live.accessToken}`;
+    const headers = buildLiveHeaders();
     const wantsBody = !["GET", "HEAD"].includes(effectiveMethod.toUpperCase());
-    if (wantsBody && effectiveBody) {
+    // A multipart upload only applies to the operation request, not to a
+    // followed GET (isFollowing collapses effectiveMethod to GET).
+    const asMultipart = wantsBody && isMultipart && !isFollowing;
+    if (wantsBody && effectiveBody && !asMultipart) {
       headers["Content-Type"] = headers["Content-Type"] ?? "application/json";
     }
+    const form = asMultipart ? curlForm(bodyValue, files) : undefined;
     const curl = buildCurl({
       method: effectiveMethod,
       url: effectiveUrl,
       headers,
       body:
-        wantsBody && effectiveBody
+        wantsBody && effectiveBody && !asMultipart
           ? JSON.stringify(effectiveBody, null, 2)
           : null,
+      form,
     });
     navigator.clipboard.writeText(curl).then(
       () => toast.success("Commande curl copiée"),
       () => toast.error("Échec de la copie"),
     );
   };
+
+  // The "Corps" tab renders a JSON body form, a multipart upload form, or
+  // nothing (GET / no request body).
+  const bodyContent = bodySchema ? (
+    <BodySection schema={bodySchema} value={bodyValue} onChange={setBodyValue} />
+  ) : isMultipart ? (
+    <MultipartBodySection
+      schema={multipartSchema!}
+      encoding={multipartMedia?.encoding}
+      value={bodyValue}
+      onChange={setBodyValue}
+      files={files}
+      onFilesChange={setFiles}
+    />
+  ) : null;
+
+  // Greyed-out managed rows shown in the header editor: the (masked) bearer
+  // and the Content-Type the proxy will set for the body.
+  const managedHeaders = [
+    ...(token
+      ? [{ key: "Authorization", value: `Bearer ${maskToken(token.accessToken)}` }]
+      : []),
+    ...managedContentType(!!bodySchema, isMultipart),
+  ];
 
   return (
     <div className="space-y-4">
@@ -446,7 +554,7 @@ export default function RequestBuilder(props: Props) {
             <Input
               value={baseUrl}
               onChange={(e) => setBaseUrl(e.target.value)}
-              placeholder="https://api.pack-solutions.com"
+              placeholder={baseUrlPlaceholder}
               className="h-8 font-mono text-xs"
             />
             {environment !== "custom" && (
@@ -557,20 +665,8 @@ export default function RequestBuilder(props: Props) {
                     },
                   ]
                 : []),
-              ...(bodySchema
-                ? [
-                    {
-                      id: "body",
-                      label: "Corps",
-                      content: (
-                        <BodySection
-                          schema={bodySchema}
-                          value={bodyValue}
-                          onChange={setBodyValue}
-                        />
-                      ),
-                    },
-                  ]
+              ...(bodyContent
+                ? [{ id: "body", label: "Corps", content: bodyContent }]
                 : []),
               {
                 id: "headers",
@@ -580,19 +676,7 @@ export default function RequestBuilder(props: Props) {
                   <HeaderEditor
                     value={customHeaders}
                     onChange={setCustomHeaders}
-                    managed={[
-                      ...(token
-                        ? [
-                            {
-                              key: "Authorization",
-                              value: `Bearer ${maskToken(token.accessToken)}`,
-                            },
-                          ]
-                        : []),
-                      ...(bodySchema
-                        ? [{ key: "Content-Type", value: "application/json" }]
-                        : []),
-                    ]}
+                    managed={managedHeaders}
                   />
                 ),
               },
@@ -610,8 +694,8 @@ export default function RequestBuilder(props: Props) {
           )}
           {running ? "Exécution…" : "Exécuter"}
         </Button>
-        <Button variant="outline" onClick={handleSave}>
-          <Save className="size-3.5" /> Enregistrer
+        <Button variant="outline" onClick={handleExportBruno}>
+          <Download className="size-3.5" /> Exporter (Bruno)
         </Button>
         <Button variant="outline" onClick={handleCopyCurl}>
           <Terminal className="size-3.5" /> Copier en curl
@@ -628,26 +712,70 @@ export default function RequestBuilder(props: Props) {
         onNavJumpTo={handleNavJumpTo}
         onNavToOperation={handleNavToOperation}
       />
-
-      <PromptDialog
-        open={saveDialogOpen}
-        title="Enregistrer la requête"
-        description="Donnez un nom à la requête et choisissez (ou créez) la collection cible."
-        field1Label="Nom de la requête"
-        field1DefaultValue={effectiveDefaultName}
-        field1Placeholder="ex. Récupérer un client"
-        field2Label="Collection"
-        field2DefaultValue={apiId}
-        field2Placeholder="ex. person"
-        submitLabel="Enregistrer"
-        onSubmit={(name, colName) => {
-          commitSave(name, colName || apiId);
-          setSaveDialogOpen(false);
-        }}
-        onCancel={() => setSaveDialogOpen(false)}
-      />
     </div>
   );
+}
+
+// Assemble a MultipartPayload from the metadata object + picked files. Empty
+// metadata fields are dropped; non-string values are JSON-encoded (e.g. the
+// `metadata` object part). Files are base64-encoded for transport to the proxy.
+async function buildMultipart(
+  value: unknown,
+  files: Record<string, File | null>,
+): Promise<MultipartPayload> {
+  const fields: Record<string, string> = {};
+  const obj = (
+    value && typeof value === "object" && !Array.isArray(value) ? value : {}
+  ) as Record<string, unknown>;
+  for (const [k, v] of Object.entries(obj)) {
+    if (v === null || v === undefined || v === "") continue;
+    fields[k] = typeof v === "string" ? v : JSON.stringify(v);
+  }
+  const out: MultipartPayload["files"] = [];
+  for (const [field, f] of Object.entries(files)) {
+    if (!f) continue;
+    out.push({
+      field,
+      filename: f.name,
+      contentType: f.type || "application/octet-stream",
+      base64: await fileToBase64(f),
+    });
+  }
+  return { fields, files: out };
+}
+
+// Same field/file collection as buildMultipart, but shaped for a curl `-F`
+// preview (filenames only, no base64).
+function curlForm(
+  value: unknown,
+  files: Record<string, File | null>,
+): { fields: Record<string, string>; files: { field: string; filename: string }[] } {
+  const fields: Record<string, string> = {};
+  const obj = (
+    value && typeof value === "object" && !Array.isArray(value) ? value : {}
+  ) as Record<string, unknown>;
+  for (const [k, v] of Object.entries(obj)) {
+    if (v === null || v === undefined || v === "") continue;
+    fields[k] = typeof v === "string" ? v : JSON.stringify(v);
+  }
+  const outFiles: { field: string; filename: string }[] = [];
+  for (const [field, f] of Object.entries(files)) {
+    if (f) outFiles.push({ field, filename: f.name });
+  }
+  return { fields, files: outFiles };
+}
+
+// The Content-Type the proxy will set, as a managed header row. JSON bodies
+// are stamped application/json; multipart uploads get the boundary from fetch,
+// so we only show the bare type. GET / bodyless requests get no row.
+function managedContentType(
+  hasJsonBody: boolean,
+  isMultipart: boolean,
+): { key: string; value: string }[] {
+  if (hasJsonBody) return [{ key: "Content-Type", value: "application/json" }];
+  if (isMultipart)
+    return [{ key: "Content-Type", value: "multipart/form-data" }];
+  return [];
 }
 
 function maskToken(token: string): string {
@@ -663,6 +791,13 @@ export function buildCurl(opts: {
   url: string;
   headers: Record<string, string>;
   body?: string | null;
+  // multipart/form-data parts. When present, `-F` flags are emitted (and
+  // curl sets the multipart Content-Type + boundary itself) instead of
+  // `--data-raw`.
+  form?: {
+    fields: Record<string, string>;
+    files: { field: string; filename: string }[];
+  };
 }): string {
   const lines: string[] = [
     `curl -X ${opts.method.toUpperCase()} '${escapeSingleQuotes(opts.url)}'`,
@@ -670,7 +805,14 @@ export function buildCurl(opts: {
   for (const [k, v] of Object.entries(opts.headers)) {
     lines.push(`-H '${escapeSingleQuotes(`${k}: ${v}`)}'`);
   }
-  if (opts.body) {
+  if (opts.form) {
+    for (const [k, v] of Object.entries(opts.form.fields)) {
+      lines.push(`-F '${escapeSingleQuotes(`${k}=${v}`)}'`);
+    }
+    for (const f of opts.form.files) {
+      lines.push(`-F '${escapeSingleQuotes(`${f.field}=@${f.filename}`)}'`);
+    }
+  } else if (opts.body) {
     lines.push(`--data-raw '${escapeSingleQuotes(opts.body)}'`);
   }
   return lines.join(" \\\n  ");

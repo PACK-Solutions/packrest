@@ -10,7 +10,8 @@ import { diffSpec, type SpecDiff } from "./spec-diff";
 // plain `node` and can't import TS, so the copy/resolve logic is
 // duplicated — but the strings can't drift.
 
-const { ENV_VAR_NAME, CONFIG_FILENAME, DEFAULT_RELATIVE_PARTS } = constants;
+const { ENV_VAR_NAME, CONFIG_FILENAME, DEFAULT_RELATIVE_PARTS, EXCLUDED_APIS } =
+  constants;
 
 const REPO_ROOT = process.cwd();
 const DEST = path.join(REPO_ROOT, "public", "specs");
@@ -161,7 +162,12 @@ async function doCopy(specsDir?: string): Promise<SyncResult> {
     return { source, dest: DEST, copied: [], skipped: [], missing: true, diffs: [] };
   }
   await fs.mkdir(DEST, { recursive: true });
-  const apis = entries.filter((e) => e.isDirectory()).map((e) => e.name);
+  const apis = entries
+    .filter((e) => e.isDirectory())
+    .map((e) => e.name)
+    // Deprecated / merged APIs are never copied (e.g. payment-method, whose
+    // endpoints moved into person).
+    .filter((name) => !EXCLUDED_APIS.includes(name));
   const copied: string[] = [];
   const skipped: string[] = [];
   const diffs: SpecDiff[] = [];

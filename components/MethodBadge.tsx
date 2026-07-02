@@ -19,8 +19,8 @@ interface Props {
   className?: string;
 }
 
-// HTTP method pill — distinct hue per verb (GET=sky, POST=emerald, etc.),
-// matching Postman's convention so a long endpoint list scans easily.
+// HTTP method pill — distinct hue per verb (GET=sky, POST=emerald, etc.)
+// so a long endpoint list scans easily.
 export default function MethodBadge({
   method,
   size = "sm",

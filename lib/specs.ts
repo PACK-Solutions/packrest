@@ -11,6 +11,9 @@ import type {
 } from "./types";
 import { HTTP_METHODS } from "./types";
 import { dereference } from "./deref";
+import constants from "./sync-constants.json";
+
+const { EXCLUDED_APIS } = constants;
 
 // Server-side OpenAPI spec loader. Reads YAML bundles copied into
 // public/specs/<api>.yaml by scripts/copy-specs.mjs and caches them in
@@ -33,6 +36,8 @@ export async function listApis(): Promise<string[]> {
     listCache = entries
       .filter((f) => f.endsWith(".yaml") || f.endsWith(".yml"))
       .map((f) => f.replace(/\.ya?ml$/, ""))
+      // Defensive: hide deprecated / merged APIs even if a stale file lingers.
+      .filter((id) => !EXCLUDED_APIS.includes(id))
       .sort();
   } catch {
     listCache = [];

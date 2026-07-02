@@ -14,6 +14,7 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardHeader, CardBody } from "@/components/Card";
 import MethodBadge from "@/components/MethodBadge";
 import Markdown from "@/components/Markdown";
+import BrunoExportButton from "@/components/BrunoExportButton";
 import { apiTheme } from "@/lib/design";
 import { listEndpoints, loadSpec } from "@/lib/specs";
 import { cn } from "@/lib/utils";
@@ -75,6 +76,9 @@ export default async function ApiPage({ params }: PageProps) {
               v{spec.info.version} ·{" "}
               <span className="font-mono">{spec.servers?.[0]?.url}</span>
             </p>
+          </div>
+          <div className="ml-auto">
+            <BrunoExportButton apiId={apiId} title={spec.info.title} />
           </div>
         </div>
         {spec.info.description && (

@@ -1,4 +1,4 @@
-# `packrest/` — Postman-like client for non-developers
+# `packrest/` — REST client for non-developers
 
 A Next.js 16 app that loads the bundled OpenAPI specs from a configurable
 source directory and lets business users exercise every endpoint without
@@ -32,17 +32,25 @@ scopes → execute → response panel.
   - `api/gitlab/releases/route.ts` — GET: list release tags (+ bundle presence).
   - `api/gitlab/sync/route.ts` — POST `{tag}`: download `bundle.zip`, extract
     specs into `public/specs/`, reset cache.
+  - `api/bruno/export/route.ts` — GET `?api=<id>`: build a Bruno collection
+    from the spec and stream it as a `.zip` (via `lib/bruno-export.ts`).
+  - `api/endpoints/route.ts` — GET: lightweight
+    `[{apiId, method, path, operationId}]` index; the Bruno importer uses it to
+    match imported requests back to operation pages.
 - `components/` — `RequestBuilder` (state-heavy), plus `Card`, `Field`,
   `Tabs`, `StatusBadge`, `MethodBadge`, `SchemaField`, `JsonEditor`,
-  `ResponsePanel`, `ScopeSelector`, `TokenStatus`, `HeaderEditor`.
+  `ResponsePanel`, `ScopeSelector`, `TokenStatus`, `HeaderEditor`,
+  `BrunoExportButton`.
 - `lib/` — `specs.ts` (server-side YAML loader, module cache + `resetSpecCache`),
   `sync.ts` (config loader + copy helper, mirror of `scripts/copy-specs.mjs`),
   `gitlab.ts` (GitLab release download + unzip via `fflate`, writes
   `public/specs/<api>.yaml`; tolerant of nested `<api>/v1/openapi.bundle.yaml`
   and flat `<api>.yaml` zip layouts),
-  `types.ts` (OpenAPI 3.1 type surface used by the UI),
+  `bruno.ts` (Bruno `opencollection` YAML serialize/parse, neutral — used on
+  both server and client), `bruno-export.ts` (server-only: spec → collection
+  tree), `types.ts` (OpenAPI 3.1 type surface used by the UI),
   `schema-form` lives in `components/SchemaField.tsx` (recursive renderer),
-  `example-extractor.ts`, `postman.ts`, `storage.ts`, `token.ts`, `http.ts`,
+  `example-extractor.ts`, `storage.ts`, `token.ts`, `http.ts`,
   `design.ts`.
 - `public/specs/` — populated at predev/prebuild (or via `npm run sync-specs` /
   the Settings UI) by `scripts/copy-specs.mjs` from the configured `specsDir`.
@@ -87,8 +95,14 @@ automated check — run it before shipping.
 
 - Only the OAuth2 Client Credentials flow is supported — the contracts
   don't declare anything else.
-- Postman v2.1 import maps `{{baseUrl}}` to the single configured base URL;
-  multi-environment Postman configs are flattened on import.
+- Requests are **not persisted** (no localStorage collections). Exchange is via
+  Bruno collections: export a whole API (`/api/bruno/export`) or the current
+  request from the builder; import a Bruno `.zip`/`.yml` on `/collections`.
+  Bruno import supports the newer `opencollection` YAML format only (not the
+  classic `.bru` DSL). Imported requests are matched to a spec endpoint by
+  method + path and opened in the builder via a one-shot `sessionStorage` seed
+  (`IMPORT_SEED_KEY`); a request with no matching loaded spec is shown but not
+  openable.
 - `client_secret` is stored in `localStorage` for convenience. Acceptable
   for an internal tool; a public deployment would need a server-side
   encrypted store and a per-user session.

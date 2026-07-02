@@ -132,9 +132,8 @@ const REPO_ROOT = path.resolve(__dirname, "..");
 const DEST = path.join(REPO_ROOT, "public", "specs");
 
 const constantsPath = path.join(REPO_ROOT, "lib", "sync-constants.json");
-const { ENV_VAR_NAME, CONFIG_FILENAME, DEFAULT_RELATIVE_PARTS } = JSON.parse(
-  await fs.readFile(constantsPath, "utf8"),
-);
+const { ENV_VAR_NAME, CONFIG_FILENAME, DEFAULT_RELATIVE_PARTS, EXCLUDED_APIS } =
+  JSON.parse(await fs.readFile(constantsPath, "utf8"));
 
 const CONFIG_FILE = path.join(REPO_ROOT, CONFIG_FILENAME);
 const DEFAULT_SOURCE = path.resolve(REPO_ROOT, ...DEFAULT_RELATIVE_PARTS);
@@ -168,7 +167,12 @@ async function main() {
 
   await fs.mkdir(DEST, { recursive: true });
 
-  const apis = entries.filter((e) => e.isDirectory()).map((e) => e.name);
+  const apis = entries
+    .filter((e) => e.isDirectory())
+    .map((e) => e.name)
+    // Deprecated / merged APIs are never copied (e.g. payment-method, whose
+    // endpoints moved into person).
+    .filter((name) => !EXCLUDED_APIS.includes(name));
   const copied = [];
   const skipped = [];
   const diffs = [];

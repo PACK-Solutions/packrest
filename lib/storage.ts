@@ -7,29 +7,6 @@ export interface SavedHeader {
   enabled?: boolean;
 }
 
-export interface SavedRequest {
-  id: string;
-  name: string;
-  apiId?: string;
-  operationId?: string;
-  method: string;
-  url: string;
-  headers: SavedHeader[];
-  body?: {
-    mode: "raw" | "none";
-    raw?: string;
-    mediaType?: string;
-  };
-}
-
-export interface SavedCollection {
-  id: string;
-  name: string;
-  description?: string;
-  baseUrl?: string;
-  requests: SavedRequest[];
-}
-
 export interface Settings {
   // dev | rec use built-in Gravitee URL presets; custom honours baseUrl / tokenUrl.
   environment: "dev" | "rec" | "custom";
@@ -51,7 +28,6 @@ export interface TokenState {
 }
 
 const KEYS = {
-  collections: "packrest.collections",
   settings: "packrest.settings",
   token: "packrest.token",
 } as const;
@@ -74,13 +50,6 @@ function safeWrite(key: string, value: unknown): void {
   } catch {
     // quota errors are not surfaced — PackRest still works without persistence
   }
-}
-
-export function loadCollections(): SavedCollection[] {
-  return safeRead<SavedCollection[]>(KEYS.collections, []);
-}
-export function saveCollections(list: SavedCollection[]): void {
-  safeWrite(KEYS.collections, list);
 }
 
 const DEFAULT_SETTINGS: Settings = {

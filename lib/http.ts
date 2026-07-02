@@ -25,11 +25,26 @@ export interface ProxyResponse {
   };
 }
 
+// A multipart/form-data payload, conveyed to the proxy as JSON. Files are
+// base64-encoded here and reconstructed into a real FormData server-side (the
+// proxy lets fetch derive the multipart boundary). Symmetric with the
+// response-side base64 file handling.
+export interface MultipartPayload {
+  fields: Record<string, string>;
+  files: {
+    field: string;
+    filename: string;
+    contentType: string;
+    base64: string;
+  }[];
+}
+
 export async function executeRequest(opts: {
   method: string;
   url: string;
   headers?: Record<string, string>;
   body?: string | object | null;
+  multipart?: MultipartPayload;
 }): Promise<ProxyResponse> {
   const res = await fetch("/api/proxy", {
     method: "POST",
@@ -41,4 +56,17 @@ export async function executeRequest(opts: {
     throw new Error(`Proxy error ${res.status}: ${text}`);
   }
   return (await res.json()) as ProxyResponse;
+}
+
+// Read a browser File into a base64 string (no data: prefix) for transport to
+// the proxy inside the JSON request body.
+export async function fileToBase64(file: File): Promise<string> {
+  const buf = await file.arrayBuffer();
+  const bytes = new Uint8Array(buf);
+  let binary = "";
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+  }
+  return btoa(binary);
 }

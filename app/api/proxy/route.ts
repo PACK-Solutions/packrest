@@ -22,11 +22,26 @@ import {
 
 export const dynamic = "force-dynamic";
 
+interface ProxyMultipart {
+  fields?: Record<string, string>;
+  files?: {
+    field: string;
+    filename: string;
+    contentType: string;
+    base64: string;
+  }[];
+}
+
 interface ProxyRequest {
   method: string;
   url: string;
   headers?: Record<string, string>;
   body?: string | Record<string, unknown> | null;
+  // multipart/form-data upload. The browser can't send binary through the
+  // JSON proxy body, so files arrive base64-encoded and are rebuilt into a
+  // FormData here. base64 inflates payloads ~33% (a 10 MB file → ~13 MB JSON);
+  // fine for a local dev tool.
+  multipart?: ProxyMultipart;
 }
 
 interface ProxyFile {
@@ -91,7 +106,7 @@ export async function POST(req: Request) {
       { status: 400 },
     );
   }
-  const { method, url, headers: rawHeaders = {}, body } = payload;
+  const { method, url, headers: rawHeaders = {}, body, multipart } = payload;
   if (!method || !url) {
     return NextResponse.json(
       { error: "invalid_request", message: "method and url are required" },
@@ -128,17 +143,15 @@ export async function POST(req: Request) {
     headers,
     signal: controller.signal,
   };
-  if (body !== undefined && body !== null && method.toUpperCase() !== "GET") {
-    if (typeof body === "string") {
-      init.body = body;
-    } else {
-      init.body = JSON.stringify(body);
-      if (!hasHeader(headers, "content-type")) {
-        (init.headers as Record<string, string>)["Content-Type"] =
-          "application/json";
-      }
-    }
-  }
+  // Human-readable summary of a multipart body for the request echo (binary
+  // can't be stringified back to the UI); null for JSON/string/empty bodies.
+  const multipartSummary = applyRequestBody(
+    init,
+    headers,
+    method,
+    body,
+    multipart,
+  );
 
   const start = Date.now();
   let upstream: Response;
@@ -225,7 +238,7 @@ export async function POST(req: Request) {
       ? init.body.length > 8192
         ? `${init.body.slice(0, 8192)}…`
         : init.body
-      : null;
+      : multipartSummary;
   if (process.env.NODE_ENV !== "production") {
     // Surface what Node.js fetch is sending so the user can compare with
     // their working curl directly from the terminal.
@@ -251,9 +264,85 @@ export async function POST(req: Request) {
   });
 }
 
+// Populate `init.body` (and adjust `headers`, which is `init.headers`) from the
+// JSON or multipart payload. GET requests carry no body. Returns the multipart
+// echo summary, or null for JSON/string/empty bodies.
+function applyRequestBody(
+  init: RequestInit,
+  headers: Record<string, string>,
+  method: string,
+  body: ProxyRequest["body"],
+  multipart: ProxyMultipart | undefined,
+): string | null {
+  if (method.toUpperCase() === "GET") return null;
+  if (isNonEmptyMultipart(multipart)) {
+    return applyMultipartBody(init, headers, multipart);
+  }
+  if (body === undefined || body === null) return null;
+  if (typeof body === "string") {
+    init.body = body;
+  } else {
+    init.body = JSON.stringify(body);
+    if (!hasHeader(headers, "content-type")) {
+      headers["Content-Type"] = "application/json";
+    }
+  }
+  return null;
+}
+
+function isNonEmptyMultipart(
+  m: ProxyMultipart | undefined,
+): m is ProxyMultipart {
+  return (
+    m != null &&
+    ((m.fields != null && Object.keys(m.fields).length > 0) ||
+      (m.files != null && m.files.length > 0))
+  );
+}
+
+function applyMultipartBody(
+  init: RequestInit,
+  headers: Record<string, string>,
+  multipart: ProxyMultipart,
+): string {
+  const form = new FormData();
+  const parts: string[] = [];
+  for (const [k, v] of Object.entries(multipart.fields ?? {})) {
+    form.append(k, v);
+    parts.push(`${k}=${v}`);
+  }
+  for (const f of multipart.files ?? []) {
+    const bytes = Buffer.from(f.base64, "base64");
+    form.append(
+      f.field,
+      new Blob([bytes], { type: f.contentType || "application/octet-stream" }),
+      f.filename,
+    );
+    parts.push(`${f.field}=${f.filename} (${formatBytes(bytes.byteLength)})`);
+  }
+  init.body = form;
+  // Let undici derive the multipart boundary — a caller-supplied Content-Type
+  // would clobber it and break the upstream parse.
+  deleteHeader(headers, "content-type");
+  return `[multipart] ${parts.join("; ")}`;
+}
+
 function hasHeader(headers: Record<string, string>, name: string): boolean {
   const lower = name.toLowerCase();
   return Object.keys(headers).some((k) => k.toLowerCase() === lower);
+}
+
+function deleteHeader(headers: Record<string, string>, name: string): void {
+  const lower = name.toLowerCase();
+  for (const k of Object.keys(headers)) {
+    if (k.toLowerCase() === lower) delete headers[k];
+  }
+}
+
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 // Reads the upstream body in chunks, throwing `body_too_large` once we
