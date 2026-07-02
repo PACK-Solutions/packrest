@@ -1,5 +1,11 @@
-// localStorage-backed persistence for PackRest. All getters tolerate
-// SSR (no window) and return the default value when called server-side.
+// Persistence for PackRest. Backed by tauri-plugin-store when running inside
+// the Tauri webview, and by localStorage as a fallback (plain-browser
+// `next dev` / prerender). Either way the public API stays *synchronous* —
+// an in-memory cache is hydrated once at startup by `bootstrapStorage()`
+// (awaited by the Tauri provider before any page renders), so the ~dozen
+// call sites keep reading settings/token inline without awaiting.
+
+import { storeGet, storeSet, storeDelete } from "./store";
 
 export interface SavedHeader {
   key: string;
@@ -32,26 +38,6 @@ const KEYS = {
   token: "packrest.token",
 } as const;
 
-function safeRead<T>(key: string, fallback: T): T {
-  if (typeof window === "undefined") return fallback;
-  try {
-    const raw = window.localStorage.getItem(key);
-    if (raw === null) return fallback;
-    return JSON.parse(raw) as T;
-  } catch {
-    return fallback;
-  }
-}
-
-function safeWrite(key: string, value: unknown): void {
-  if (typeof window === "undefined") return;
-  try {
-    window.localStorage.setItem(key, JSON.stringify(value));
-  } catch {
-    // quota errors are not surfaced — PackRest still works without persistence
-  }
-}
-
 const DEFAULT_SETTINGS: Settings = {
   environment: "dev",
   baseUrl: "",
@@ -62,31 +48,65 @@ const DEFAULT_SETTINGS: Settings = {
 };
 
 // Fired on the window after settings are written, so components mounted in the
-// same tab (the request builder, the settings page) can re-sync immediately —
-// the native `storage` event only fires in *other* tabs.
+// same tab (the request builder, the settings page) can re-sync immediately.
 export const SETTINGS_CHANGED_EVENT = "packrest:settings-changed";
 
+// --- in-memory cache (source of truth after hydration) ---------------------
+
+let settingsCache: Settings = { ...DEFAULT_SETTINGS };
+let tokenCache: TokenState | null = null;
+let hydrated = false;
+
+// --- hydration -------------------------------------------------------------
+
+// Populate the in-memory cache from the persistent backend. Idempotent, and
+// awaited by the Tauri provider before the app renders so synchronous readers
+// never see stale defaults.
+export async function bootstrapStorage(): Promise<void> {
+  if (hydrated) return;
+  try {
+    const s = await storeGet<Partial<Settings>>(KEYS.settings);
+    settingsCache = { ...DEFAULT_SETTINGS, ...(s ?? {}) };
+    tokenCache = (await storeGet<TokenState>(KEYS.token)) ?? null;
+  } catch {
+    // keep defaults on any read/parse failure
+  }
+  hydrated = true;
+}
+
+// --- persistence (fire-and-forget; cache already updated) ------------------
+
+function persistSettings(): void {
+  storeSet(KEYS.settings, settingsCache).catch(() => {});
+}
+
+function persistToken(): void {
+  (tokenCache === null
+    ? storeDelete(KEYS.token)
+    : storeSet(KEYS.token, tokenCache)
+  ).catch(() => {});
+}
+
+// --- public API (synchronous) ----------------------------------------------
+
 export function loadSettings(): Settings {
-  return { ...DEFAULT_SETTINGS, ...safeRead<Partial<Settings>>(KEYS.settings, {}) };
+  return { ...settingsCache };
 }
 export function saveSettings(s: Settings): void {
-  safeWrite(KEYS.settings, s);
+  settingsCache = { ...s };
+  persistSettings();
   if (typeof window !== "undefined")
     window.dispatchEvent(new Event(SETTINGS_CHANGED_EVENT));
 }
 
 export function loadToken(): TokenState | null {
-  const t = safeRead<TokenState | null>(KEYS.token, null);
-  if (!t) return null;
-  if (t.expiresAt <= Date.now()) return null;
-  return t;
+  if (!tokenCache) return null;
+  if (tokenCache.expiresAt <= Date.now()) return null;
+  return tokenCache;
 }
 export function saveToken(t: TokenState | null): void {
-  if (t === null) {
-    if (typeof window !== "undefined") window.localStorage.removeItem(KEYS.token);
-    return;
-  }
-  safeWrite(KEYS.token, t);
+  tokenCache = t;
+  persistToken();
 }
 
 export function newId(prefix: string): string {

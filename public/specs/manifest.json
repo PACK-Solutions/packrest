@@ -1,0 +1,11 @@
+{
+  "apis": [
+    "contract",
+    "document",
+    "order-book",
+    "person",
+    "product",
+    "service-request",
+    "webhook"
+  ]
+}

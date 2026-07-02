@@ -1,10 +1,14 @@
 "use client";
 
 import { saveToken, loadToken, type TokenState } from "./storage";
+import { checkUrl } from "./url-policy";
+import { tauriFetch } from "./net";
 
-// Client-side helper that POSTs to /api/token and persists the resulting
-// bearer in localStorage. Returns the fresh TokenState on success or an
-// Error with a human-readable message.
+// OAuth2 Client Credentials, run directly against the IAM token endpoint via
+// the Tauri HTTP plugin (no CORS, no server hop). Formerly proxied through
+// /api/token; the SSRF allowlist (checkUrl) and 30s timeout are preserved.
+// The client_secret never leaves the process — it's read from the store and
+// posted straight to the token URL.
 
 interface TokenResponse {
   access_token: string;
@@ -21,12 +25,33 @@ export async function fetchToken(opts: {
   clientSecret: string;
   scopes: string[];
 }): Promise<TokenState> {
-  const res = await fetch("/api/token", {
+  const check = checkUrl(opts.tokenUrl);
+  if (!check.ok) throw new Error(check.reason);
+
+  const form = new URLSearchParams();
+  form.set("grant_type", "client_credentials");
+  if (opts.scopes.length) form.set("scope", opts.scopes.join(" "));
+
+  const basic = btoa(`${opts.clientId}:${opts.clientSecret}`);
+
+  const res = await tauriFetch(check.url.toString(), {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(opts),
+    headers: {
+      Authorization: `Basic ${basic}`,
+      "Content-Type": "application/x-www-form-urlencoded",
+      Accept: "application/json",
+    },
+    body: form.toString(),
+    signal: AbortSignal.timeout(30_000),
   });
-  const data = (await res.json()) as TokenResponse;
+
+  const text = await res.text();
+  let data: TokenResponse;
+  try {
+    data = JSON.parse(text) as TokenResponse;
+  } catch {
+    throw new Error(`Réponse IAM invalide (HTTP ${res.status})`);
+  }
   if (!res.ok || data.error) {
     throw new Error(data.error_description ?? data.error ?? `HTTP ${res.status}`);
   }

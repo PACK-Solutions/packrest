@@ -162,6 +162,9 @@ async function main() {
     console.warn(
       `[copy-specs] source not found at ${source}. Set "specsDir" in ${CONFIG_FILENAME} or ${ENV_VAR_NAME}. Skipping.`,
     );
+    // Still (re)write the manifest so the Tauri client can discover any
+    // bundles already present in public/specs.
+    await writeManifest();
     return;
   }
 
@@ -207,6 +210,30 @@ async function main() {
   if (skipped.length) {
     console.log(`[copy-specs]   no v1 bundle in: ${skipped.join(", ")}`);
   }
+  await writeManifest();
+}
+
+// Emit public/specs/manifest.json listing the api ids present in DEST. The
+// Tauri static export bundles these files; the client fetches the manifest on
+// first launch to seed its writable spec store and to list APIs outside Tauri.
+async function writeManifest() {
+  let files = [];
+  try {
+    files = await fs.readdir(DEST);
+  } catch {
+    return;
+  }
+  const apis = files
+    .filter((f) => /\.ya?ml$/i.test(f))
+    .map((f) => f.replace(/\.ya?ml$/i, ""))
+    .filter((id) => !EXCLUDED_APIS.includes(id))
+    .sort();
+  await fs.mkdir(DEST, { recursive: true });
+  await fs.writeFile(
+    path.join(DEST, "manifest.json"),
+    JSON.stringify({ apis }, null, 2) + "\n",
+  );
+  console.log(`[copy-specs] manifest: ${apis.length} API(s)`);
 }
 
 main().catch((err) => {

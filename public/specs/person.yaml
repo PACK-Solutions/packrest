@@ -1,0 +1,4106 @@
+openapi: 3.1.2
+info:
+  title: Person Management API
+  description: |
+    # Overview
+    The Person Management API provides a comprehensive set of operations for managing **Individuals**. It serves as the central repository for identity, address, and fiscal information.
+
+    ## Core Concepts
+
+    ### Lifecycle and Status
+    Every **Individual** transitions through a defined lifecycle. The `status` field is strictly computed by the server and exposed on read operations; it cannot be provided during creation or updated manually.
+
+    The person's lifecycle can be one of the following states:
+    - `DRAFT`: The person is being created. Required identity fields: `first_name`, `last_name`, and `birth.date_of_birth`. Before submitting, the client must also set, through the intermediate endpoints, a principal address (`POST /individuals/{id}/addresses/PRINCIPAL`), the French residency fiscal information (`POST /individuals/{id}/fiscal-informations/FRENCH_RESIDENCY`), and at least one bank account (`POST /individuals/{id}/bank-accounts`).
+    - `SUBMITTED`: The person has been submitted to the client via `POST /individuals/{id}/submit`. The person can now be selected for a contract role in a subscription.
+    - `ENGAGED`: The person is engaged on a contract once that contract has been accepted (Contract API: `ACCEPTED`). Direct mutations remain available (`POST /individuals/{id}`, `POST /individuals/{id}/addresses/{address_type}`, `POST /individuals/{id}/fiscal-informations/{fiscal_type}`, `POST /individuals/{id}/bank-accounts`); when a sensitive field is touched, the server automatically creates the matching service request(s) and exposes them under `_embedded.service_requests` (a single update may touch several sensitive fields and trigger several reviews). `ENGAGED` is sticky and is not rolled back if the underlying contract is later cancelled.
+
+    ### Lifecycle Transitions
+    - `DRAFT` → `SUBMITTED`: Triggered by calling `POST /individuals/{id}/submit`. All required identity fields must be present, and the principal address, French residency fiscal information, and at least one bank account must already be set; otherwise the call fails with `422 Unprocessable Entity`.
+    - `SUBMITTED` → `ENGAGED`: Triggered when an approved `CONTRACT_SUBSCRIPTION` service request transitions the related contract to `ACCEPTED`. The service request is created by the partner after the contract has been submitted.
+
+    ### Lifecycle Models
+    To ensure data integrity and clear separation of concerns, the API uses distinct models for different stages of a person's lifecycle:
+    - **Create Models** (`IndividualCreate`): Used when adding a new person. These include required fields and do not allow `id` input.
+    - **Update Models** (`IndividualUpdate`): Used for partial updates (POST on an existing resource). All fields are optional.
+    - **Read Models** (`IndividualResource`): HAL-compliant representations used for GET operations, including self-links and related resource links.
+
+    ## Security and Authentication
+    The API is secured using **OAuth 2.0** (Client Credentials flow).
+    Clients must obtain an access token and include it in the `Authorization` header as a Bearer token.
+
+    ### Scopes
+    Access is controlled via two primary scopes:
+    - `persons:read`: Grants read-only access. Required for all `GET` operations.
+    - `persons:write`: Grants write access. Required for all mutating operations (`POST`, `DELETE`).
+
+    ## Key Use Cases
+    - **Identity Management**: Create and maintain accurate profiles for customers, partners, or employees.
+    - **Fiscal Compliance**: Handle complex tax residency and identification (TIN) across multiple jurisdictions (FATCA, CRS).
+    - **Communication**: Maintain physical addresses per person.
+
+    ## Navigation & HAL
+    This API follows **HAL (Hypertext Application Language)** principles. Most resources include a `_links` object, allowing you to discover related actions and navigate the API programmatically.
+  version: 0.0.59
+  contact:
+    email: support@pack-solutions.com
+    name: Pack Solutions Support
+  license:
+    name: Proprietary
+    url: https://pack-solutions.com/license
+security:
+  - oauth2:
+      - persons:read
+      - persons:write
+tags:
+  - name: individual
+    description: |
+      Operations related to natural persons (individuals).
+      Includes management of identity, birth details, and social security.
+  - name: fiscal-information
+    description: |
+      Management of tax residency and reporting (CRS, FATCA).
+      Handle Tax Identification Numbers (TIN) across different jurisdictions.
+  - name: address
+    description: |
+      Physical address management for persons.
+      Supports up to 3 address types per person: PRINCIPAL (mandatory), CORRESPONDENCE, and FISCAL.
+      The address type serves as the natural identifier. If CORRESPONDENCE or FISCAL are not explicitly set, they default to the PRINCIPAL address.
+  - name: bank-account
+    description: |
+      Banking coordinates management for persons.
+      Supports IBAN-based accounts with direct debit and bank transfer authorization.
+paths:
+  /individuals:
+    get:
+      operationId: listIndividuals
+      summary: List Individuals
+      description: |
+        Returns a paginated list of all natural persons.
+        Use this endpoint to browse your customer base or search for individuals based on their status.
+        The response is HAL-compliant, including pagination links and embedded resources.
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Limit'
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/Status'
+          description: Filter by person lifecycle status (e.g., DRAFT, SUBMITTED, ENGAGED).
+      responses:
+        '200':
+          content:
+            application/hal+json:
+              schema:
+                $ref: '#/components/schemas/IndividualCollection'
+              examples:
+                individualCollection:
+                  $ref: '#/components/examples/IndividualCollection'
+          description: Successful response with list of individuals.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+      tags:
+        - individual
+    post:
+      operationId: createIndividual
+      summary: Create Individual
+      description: |
+        Registers a new natural person in the system.
+
+        ### Lifecycle & Status
+        Upon creation, an individual is set to the `DRAFT` status.
+        - **Required fields**: `first_name`, `last_name`, and `birth.date_of_birth` are required to obtain a person id.
+        - **Status transitions**: Once all requirements are fulfilled, the client must call `POST /individuals/{id}/submit` to transition the person to `SUBMITTED`.
+        - **Requirements**: Use the `requirements` array in the response to identify missing or invalid information preventing submission.
+
+        ### Identity & Uniqueness
+        A duplicate check is automatically performed based on the combination of:
+        - **First Name**
+        - **Last Name**
+        - **Date of Birth**
+
+        If a record with these identical attributes already exists, the API will return a `409 Conflict` error to prevent data fragmentation.
+
+        To bypass this check and force the creation of a duplicate record, set the `X-Force-Duplicate` header to `true`. This is exclusively used for proven homonyms and requires the `persons:write` scope.
+
+        ### Guidelines
+        - **ID**: Do not provide an `id`. It is generated by the system and returned in the response.
+        - **Format**: Ensure dates follow the `YYYY-MM-DD` format.
+        - **Required Fields**: Refer to the `IndividualCreate` schema for a list of mandatory fields.
+      parameters:
+        - name: X-Force-Duplicate
+          in: header
+          required: false
+          schema:
+            type: boolean
+            const: true
+          description: |
+            Administrative override to bypass duplicate detection.
+            Exclusively used for proven homonyms.
+            Requires the `persons:write` scope.
+      requestBody:
+        required: true
+        description: Data needed to create a new individual.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/IndividualCreate'
+            examples:
+              individualCreate:
+                $ref: '#/components/examples/IndividualCreate'
+      responses:
+        '201':
+          description: Individual created successfully.
+          headers:
+            Location:
+              description: URL of the created resource
+              schema:
+                type: string
+                format: uri-reference
+                maxLength: 2048
+          content:
+            application/hal+json:
+              schema:
+                $ref: '#/components/schemas/IndividualResource'
+              examples:
+                individualCreated:
+                  $ref: '#/components/examples/IndividualResource'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: |
+            Conflict. The request would create an individual that violates a uniqueness rule.
+            - `duplicatePerson`: an individual with the same `first_name`, `last_name`, and `birth.date_of_birth` already exists. Set the `X-Force-Duplicate` header to `true` to bypass this check for proven homonyms.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Conflict'
+              examples:
+                duplicatePerson:
+                  $ref: '#/components/examples/DuplicatePersonConflict'
+        '413':
+          $ref: '#/components/responses/ContentTooLarge'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+      security:
+        - oauth2:
+            - persons:write
+      tags:
+        - individual
+  /individuals/{person_id}:
+    delete:
+      operationId: deleteIndividualById
+      description: |
+        Archive an individual's record in the system. This is a logical deletion; the data is preserved
+        for historical and compliance purposes but the individual will no longer be considered active.
+
+        ### Restrictions
+        - Individuals in `ENGAGED` status (engaged in a contract) cannot be archived. The related
+          contracts must be cancelled or ended before the individual can be archived. Calling this
+          endpoint on an engaged individual returns `409 Conflict`.
+      parameters:
+        - $ref: '#/components/parameters/PersonId'
+      responses:
+        '204':
+          $ref: '#/components/responses/NoContent'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: |
+            Conflict. The individual cannot be archived in its current state.
+            - `personEngaged`: the individual is in `ENGAGED` status (engaged in a contract). Cancel or end the related contracts before retrying.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Conflict'
+              examples:
+                personEngaged:
+                  $ref: '#/components/examples/ConflictPersonEngaged'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+      summary: Archive the specified instance of Individual by id (logical deletion)
+      security:
+        - oauth2:
+            - persons:write
+      tags:
+        - individual
+    get:
+      operationId: getIndividualById
+      description: Retrieve detailed information about a specific individual using their unique identifier.
+      parameters:
+        - $ref: '#/components/parameters/PersonId'
+      responses:
+        '200':
+          content:
+            application/hal+json:
+              schema:
+                $ref: '#/components/schemas/IndividualResource'
+              examples:
+                individualResource:
+                  $ref: '#/components/examples/IndividualResource'
+                individualDraft:
+                  $ref: '#/components/examples/IndividualDraft'
+                individualEngaged:
+                  $ref: '#/components/examples/IndividualEngaged'
+                individualUnderReview:
+                  $ref: '#/components/examples/IndividualUnderReview'
+          description: |
+            Individual retrieved. `_embedded.service_requests` is absent when
+            no manual review is in flight, or populated with the navigation
+            previews of the active service requests (which carry the
+            submitted values awaiting approval).
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+      summary: Retrieve the specified instance of Individual by id
+      tags:
+        - individual
+    post:
+      operationId: updateIndividualById
+      description: |
+        Update an existing individual's information. Partial update: only the
+        provided fields are modified.
+
+        ### Direct update vs. service request — server-driven
+
+        When the individual is `DRAFT` or `SUBMITTED`, all fields are updated
+        directly. When the individual is `ENGAGED`, sensitive fields
+        (`last_name`, `birth.*`, `civility`, `address` linkage, …) require
+        manual review. The partner does **not** need to detect this case
+        up front: the server inspects the payload and, when review is
+        required, automatically creates the corresponding service request(s),
+        which carry the submitted values until they are approved. A single
+        update may touch several sensitive fields at once (e.g. name, address
+        and bank account) and therefore trigger several service requests.
+
+        The status code reflects what actually happened:
+        - `200 OK` — the whole payload was applied immediately. No service
+          request was created; `_embedded.service_requests` is absent.
+        - `202 Accepted` — at least one field requires manual review. The
+          server created one or more service requests and exposes their
+          navigation previews in `_embedded.service_requests` (each entry's
+          `_links.self.href`); the submitted values awaiting approval are
+          carried by those service requests.
+
+        ### Mixed-payload behaviour
+
+        A payload that mixes directly-updatable fields with review-able ones
+        is **not** rejected: the server applies the direct fields immediately
+        and creates a service request for the rest. The response is then
+        `202 Accepted` with the directly-applied fields reflected on the
+        resource and the review-able ones carried by the service request.
+
+        ### Applying an approved service request
+
+        Reviewers apply approved changes through the standalone Service
+        Request API; partners never need to replay the change manually.
+
+        ### Requirements system
+
+        After each direct update, review the `requirements` array in the
+        response to see what remains before calling
+        `POST /individuals/{id}/submit`. Requirements for ongoing service
+        requests live on the service request itself, not on the individual.
+      parameters:
+        - $ref: '#/components/parameters/PersonId'
+      requestBody:
+        required: true
+        description: Individual content
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/IndividualUpdate'
+      responses:
+        '200':
+          description: |
+            Update applied immediately. The whole payload was directly
+            updatable on the individual: `_embedded.service_requests` is
+            absent.
+          content:
+            application/hal+json:
+              schema:
+                $ref: '#/components/schemas/IndividualResource'
+              examples:
+                individualResource:
+                  $ref: '#/components/examples/IndividualResource'
+        '202':
+          description: |
+            Update accepted. At least one field requires manual review: the
+            server auto-created the matching service request(s), exposed under
+            `_embedded.service_requests`, which carry the submitted values.
+            Directly-updatable fields in a mixed payload
+            are already reflected on the returned resource. The examples
+            below walk through every SR type the server may auto-create on an
+            `ENGAGED` individual (`NAME_CHANGE`, `ADDRESS_CHANGE`,
+            `FAMILY_STATUS_CHANGE`, `BANK_ACCOUNT_CHANGE`); the first also
+            shows several reviews triggered by a single update.
+          content:
+            application/hal+json:
+              schema:
+                $ref: '#/components/schemas/IndividualResource'
+              examples:
+                individualUnderReview:
+                  $ref: '#/components/examples/IndividualUnderReview'
+                individualUnderAddressReview:
+                  $ref: '#/components/examples/IndividualUnderAddressReview'
+                individualUnderFamilyStatusReview:
+                  $ref: '#/components/examples/IndividualUnderFamilyStatusReview'
+                individualUnderBankAccountReview:
+                  $ref: '#/components/examples/IndividualUnderBankAccountReview'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: |
+            Conflict. The update collides with a real invariant on the
+            individual (e.g. attempting to clear a mandatory field).
+            Service-request workflows never surface here — they are returned
+            as `202` with `_embedded.service_requests` populated.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Conflict'
+              examples:
+                incompatibleStatus:
+                  $ref: '#/components/examples/ConflictIncompatibleStatus'
+        '413':
+          $ref: '#/components/responses/ContentTooLarge'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+      summary: Update the specified instance of Individual by id
+      security:
+        - oauth2:
+            - persons:write
+      tags:
+        - individual
+  /individuals/{person_id}/fiscal-informations:
+    get:
+      operationId: listPersonFiscalInformations
+      summary: List Fiscal Records
+      description: |
+        Returns a collection of all fiscal and tax reporting records
+        associated with a person.
+
+        This endpoint allows you to view the person's status across
+        different regulatory frameworks such as **FATCA** (US), **CRS**
+        (International), and local **French Residency** rules.
+
+        If no fiscal information has been explicitly registered for the
+        person, `FRENCH_RESIDENCY` is returned as the implicit default.
+
+        ### Writes
+        Per-type create/replace flows through `POST /individuals/{person_id}/fiscal-informations/{fiscal_type}`. There is no collection-level write.
+      tags:
+        - fiscal-information
+      parameters:
+        - $ref: '#/components/parameters/PersonId'
+      responses:
+        '200':
+          description: Successful retrieval of fiscal records.
+          content:
+            application/hal+json:
+              schema:
+                $ref: '#/components/schemas/FiscalInformations'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+  /individuals/{person_id}/fiscal-informations/{fiscal_type}:
+    parameters:
+      - $ref: '#/components/parameters/PersonId'
+      - $ref: '#/components/parameters/FiscalType'
+    get:
+      operationId: getPersonFiscalInformationByType
+      summary: Retrieve Fiscal Information by Type
+      description: |
+        Retrieve specific fiscal information for a person based on the type
+        (FATCA, CRS, or FRENCH_RESIDENCY).
+
+        `FRENCH_RESIDENCY` is the implicit default: it is returned even when
+        no fiscal information has been explicitly registered for the person.
+      tags:
+        - fiscal-information
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/hal+json:
+              schema:
+                $ref: '#/components/schemas/FiscalInformation'
+              examples:
+                fatca:
+                  $ref: '#/components/examples/FiscalInformation_FATCA'
+                crs:
+                  $ref: '#/components/examples/FiscalInformation_CRS'
+                frenchResidency:
+                  $ref: '#/components/examples/FiscalInformation_FrenchResidency'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+    post:
+      operationId: upsertPersonFiscalInformationByType
+      summary: Upsert Fiscal Information by Type
+      description: |
+        Create or fully replace the fiscal record under the given type
+        (FATCA, CRS, or FRENCH_RESIDENCY). The submitted body represents
+        the fiscal record in its entirety; partial update is not supported.
+
+        The body's `fiscal_type` discriminator must match the
+        `{fiscal_type}` value in the path. A mismatch returns `422
+        Unprocessable Entity`.
+      tags:
+        - fiscal-information
+      security:
+        - oauth2:
+            - persons:write
+      requestBody:
+        required: true
+        description: Fiscal record payload to upsert under the given type.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FiscalInformationCreate'
+            examples:
+              fatca:
+                $ref: '#/components/examples/FiscalInformationCreate_FATCA'
+              crs:
+                $ref: '#/components/examples/FiscalInformationCreate_CRS'
+              frenchResidency:
+                $ref: '#/components/examples/FiscalInformationCreate_FrenchResidency'
+      responses:
+        '200':
+          description: Fiscal record upserted (created or fully replaced).
+          content:
+            application/hal+json:
+              schema:
+                $ref: '#/components/schemas/FiscalInformation'
+              examples:
+                fatca:
+                  $ref: '#/components/examples/FiscalInformation_FATCA'
+                crs:
+                  $ref: '#/components/examples/FiscalInformation_CRS'
+                frenchResidency:
+                  $ref: '#/components/examples/FiscalInformation_FrenchResidency'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '413':
+          $ref: '#/components/responses/ContentTooLarge'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+  /individuals/{person_id}/addresses:
+    get:
+      operationId: getPersonAddresses
+      summary: List Addresses
+      description: |
+        Returns all physical addresses associated with a specific person.
+
+        ### Address Types
+        A person can have up to 3 distinct address types:
+        - **PRINCIPAL**: The primary residence (mandatory).
+        - **CORRESPONDENCE**: The address where mail should be sent (optional; defaults to PRINCIPAL if not provided).
+        - **FISCAL**: The legal tax residency address (optional; defaults to PRINCIPAL if not provided).
+
+        ### Writes
+        Per-type create/replace flows through `POST /individuals/{person_id}/addresses/{address_type}`. There is no collection-level write.
+      tags:
+        - address
+      parameters:
+        - $ref: '#/components/parameters/PersonId'
+      responses:
+        '200':
+          description: Successful retrieval of the address collection.
+          content:
+            application/hal+json:
+              schema:
+                $ref: '#/components/schemas/Addresses'
+              examples:
+                addresses:
+                  $ref: '#/components/examples/Addresses'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+  /individuals/{person_id}/addresses/{address_type}:
+    parameters:
+      - $ref: '#/components/parameters/PersonId'
+      - $ref: '#/components/parameters/AddressType'
+    get:
+      operationId: getPersonAddressByType
+      summary: Retrieve Address by Type
+      description: |
+        Retrieve a specific address for a person based on the address type
+        (PRINCIPAL, CORRESPONDENCE, or FISCAL).
+
+        If the requested type has not been explicitly set, the server
+        returns the PRINCIPAL address as the default value.
+
+        If no address is set for the specified type and the person, the
+        server returns a `404 Not Found` error.
+      tags:
+        - address
+      responses:
+        '200':
+          description: |
+            Address retrieved. `_embedded.service_requests` is absent when no
+            `ADDRESS_CHANGE` review is in flight on this typed address, or
+            populated with the navigation previews of the active reviews.
+          content:
+            application/hal+json:
+              schema:
+                $ref: '#/components/schemas/AddressResource'
+              examples:
+                addressResource:
+                  $ref: '#/components/examples/AddressResource'
+                addressResourceUnderReview:
+                  $ref: '#/components/examples/AddressUnderReview'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+    post:
+      operationId: upsertPersonAddressByType
+      summary: Upsert Address by Type
+      description: |
+        Create or fully replace the address under the given type
+        (PRINCIPAL, CORRESPONDENCE, or FISCAL). The submitted body
+        represents the address in its entirety; partial update is not
+        supported.
+
+        ### Direct update vs. service request — server-driven
+
+        When the owning individual is `DRAFT` or `SUBMITTED`, the typed
+        address is upserted directly. When the individual is `ENGAGED`,
+        the server automatically creates an `ADDRESS_CHANGE` service
+        request scoped to this typed address; the persisted address still
+        reflects the value approved prior to the upsert until the service
+        request is approved.
+
+        The status code reflects what actually happened:
+        - `200 OK` — the typed address was upserted immediately. No service
+          request was created; `_embedded.service_requests` is absent.
+        - `202 Accepted` — the owning individual is `ENGAGED`: the server
+          created an `ADDRESS_CHANGE` service request and exposes its
+          navigation preview as an entry in `_embedded.service_requests`
+          (follow `_links.self.href`).
+      tags:
+        - address
+      security:
+        - oauth2:
+            - persons:write
+      requestBody:
+        required: true
+        description: Address payload to upsert under the given type.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AddressCreate'
+      responses:
+        '200':
+          description: |
+            Address upserted immediately (created or fully replaced). The
+            owning individual is `DRAFT` or `SUBMITTED`; no service request
+            was created and `_embedded.service_requests` is absent.
+          content:
+            application/hal+json:
+              schema:
+                $ref: '#/components/schemas/AddressResource'
+              examples:
+                addressResource:
+                  $ref: '#/components/examples/AddressResource'
+        '202':
+          description: |
+            Upsert accepted. The owning individual is `ENGAGED`: the server
+            auto-created an `ADDRESS_CHANGE` service request, exposed under
+            `_embedded.service_requests`. The address payload is held under
+            review until the service request is approved.
+          content:
+            application/hal+json:
+              schema:
+                $ref: '#/components/schemas/AddressResource'
+              examples:
+                addressResourceUnderReview:
+                  $ref: '#/components/examples/AddressUnderReview'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '413':
+          $ref: '#/components/responses/ContentTooLarge'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+  /individuals/{person_id}/submit:
+    post:
+      operationId: submitPerson
+      summary: Submit a person
+      description: |
+        Submits the person's data and transitions the person from `DRAFT` to `SUBMITTED` status.
+
+        ### Prerequisites
+        The person must be in `DRAFT` status and the following data must be present.
+
+        Identity fields on the individual itself:
+        - `first_name`
+        - `last_name`
+        - `birth.date_of_birth`
+
+        Required sub-resources, each set through its own intermediate endpoint before submission:
+        - A **principal address** — set via `POST /individuals/{person_id}/addresses/PRINCIPAL`.
+        - The **French residency fiscal information** (`FRENCH_RESIDENCY`) — set via `POST /individuals/{person_id}/fiscal-informations/FRENCH_RESIDENCY`.
+        - At least one **bank account** — created via `POST /individuals/{person_id}/bank-accounts`.
+
+        If any of the above is missing, submission fails with `422 Unprocessable Entity` and the
+        response `errors[]` array enumerates every missing item (one entry per prerequisite, with
+        `code: MISSING`) so the client can fix them and retry.
+
+        ### Behavior
+        - If submission succeeds, the person transitions to `SUBMITTED` status. The person can then be selected for a contract role in a subscription.
+        - If submission fails (e.g., missing required data), a `422 Unprocessable Entity` error is returned with details about what is missing.
+
+        ### Restrictions
+        - This endpoint can only be called on persons in `DRAFT` status.
+        - Calling this on a person already in `SUBMITTED` or `ENGAGED` status will result in a `409 Conflict` error.
+      parameters:
+        - $ref: '#/components/parameters/PersonId'
+      responses:
+        '200':
+          description: Person submitted successfully.
+          content:
+            application/hal+json:
+              schema:
+                $ref: '#/components/schemas/IndividualResource'
+              examples:
+                individualSubmitted:
+                  $ref: '#/components/examples/IndividualResource'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: |
+            Conflict. The individual cannot be submitted in its current state.
+            - `incompatibleStatus`: the individual is not in `DRAFT` status. Only individuals in `DRAFT` can be submitted.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Conflict'
+              examples:
+                incompatibleStatus:
+                  $ref: '#/components/examples/ConflictIncompatibleStatus'
+        '422':
+          description: |
+            Unprocessable Entity. The person is in `DRAFT` but cannot be submitted because required
+            data is missing. The `errors[]` array lists every missing item — one entry per
+            prerequisite — so the client can set the missing data and retry.
+
+            Possible missing prerequisites:
+            - **Principal address** — set via `POST /individuals/{person_id}/addresses/PRINCIPAL`.
+            - **French residency fiscal information** (`FRENCH_RESIDENCY`) — set via `POST /individuals/{person_id}/fiscal-informations/FRENCH_RESIDENCY`.
+            - **Bank account** — at least one is required; create one via `POST /individuals/{person_id}/bank-accounts`.
+
+            Missing identity fields (`first_name`, `last_name`, `birth.date_of_birth`) are reported
+            here too, with `code: MISSING_FIELD` and a `pointer` to the offending field.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/UnprocessableEntity'
+              examples:
+                missingPrerequisites:
+                  $ref: '#/components/examples/UnprocessableSubmitMissingPrerequisites'
+                missingBankAccount:
+                  $ref: '#/components/examples/UnprocessableSubmitMissingBankAccount'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+      security:
+        - oauth2:
+            - persons:write
+      tags:
+        - individual
+  /individuals/{person_id}/bank-accounts:
+    get:
+      operationId: listBankAccounts
+      summary: List Bank Accounts
+      description: |
+        Returns the complete list of bank accounts associated with a specific person.
+      tags:
+        - bank-account
+      parameters:
+        - $ref: '#/components/parameters/PersonId'
+      responses:
+        '200':
+          description: Successful retrieval of the bank account collection.
+          content:
+            application/hal+json:
+              schema:
+                $ref: '#/components/schemas/BankAccounts'
+              examples:
+                bankAccountCollection:
+                  $ref: '#/components/examples/BankAccountCollection'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+    post:
+      operationId: createBankAccount
+      summary: Create Bank Account
+      description: |
+        Creates a new bank account for the specified person.
+
+        ### Guidelines
+        - **ID**: Do not provide an `id`. It is generated by the system.
+        - **BIC**: May be omitted if it can be derived from the IBAN.
+        - **Validation**: IBAN format and BIC consistency are verified on creation.
+
+        ### Direct update vs. service request — server-driven
+
+        When the owning individual is `DRAFT` or `SUBMITTED`, the bank
+        account is created directly. When the individual is `ENGAGED`, the
+        server automatically creates a `BANK_ACCOUNT_CHANGE` service
+        request; the new bank account is held under review until the
+        request is approved.
+
+        The status code reflects what actually happened:
+        - `201 Created` — the bank account was created immediately. The
+          response carries a `Location` header to the new resource and
+          `_embedded.service_requests` is absent.
+        - `202 Accepted` — the owning individual is `ENGAGED`: the server
+          auto-created the `BANK_ACCOUNT_CHANGE` service request, exposed as
+          an entry in `_embedded.service_requests` (follow `_links.self.href`).
+          No `Location` header is returned; clients should follow the service
+          request to track approval.
+      tags:
+        - bank-account
+      parameters:
+        - $ref: '#/components/parameters/PersonId'
+      requestBody:
+        required: true
+        description: Data needed to create a new bank account.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BankAccountCreate'
+            examples:
+              bankAccountCreate:
+                $ref: '#/components/examples/BankAccountCreate'
+      responses:
+        '201':
+          description: |
+            Bank account created immediately. The owning individual is
+            `DRAFT` or `SUBMITTED`; no service request was created and
+            `_embedded.service_requests` is absent.
+          headers:
+            Location:
+              description: URL of the created resource
+              schema:
+                type: string
+                format: uri-reference
+                maxLength: 2048
+          content:
+            application/hal+json:
+              schema:
+                $ref: '#/components/schemas/BankAccountResource'
+              examples:
+                bankAccountCreated:
+                  $ref: '#/components/examples/BankAccountResource'
+        '202':
+          description: |
+            Creation accepted. The owning individual is `ENGAGED`: the
+            server auto-created a `BANK_ACCOUNT_CHANGE` service request,
+            exposed under `_embedded.service_requests`. The bank account is
+            held under review until the service request is approved.
+          content:
+            application/hal+json:
+              schema:
+                $ref: '#/components/schemas/BankAccountResource'
+              examples:
+                bankAccountUnderReview:
+                  $ref: '#/components/examples/BankAccountUnderReview'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '413':
+          $ref: '#/components/responses/ContentTooLarge'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+      security:
+        - oauth2:
+            - persons:write
+  /individuals/{person_id}/bank-accounts/{bank_account_id}:
+    get:
+      operationId: getBankAccountById
+      summary: Retrieve a Bank Account
+      description: Retrieve detailed information about a specific bank account.
+      tags:
+        - bank-account
+      parameters:
+        - $ref: '#/components/parameters/PersonId'
+        - $ref: '#/components/parameters/BankAccountId'
+      responses:
+        '200':
+          description: |
+            Bank account retrieved. `_embedded.service_requests` is absent
+            when no review is in flight on this account, or populated with
+            the navigation previews of active `BANK_ACCOUNT_CHANGE`
+            service requests on the owning individual.
+          content:
+            application/hal+json:
+              schema:
+                $ref: '#/components/schemas/BankAccountResource'
+              examples:
+                bankAccountResource:
+                  $ref: '#/components/examples/BankAccountResource'
+                bankAccountUnderReview:
+                  $ref: '#/components/examples/BankAccountUnderReview'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+    post:
+      operationId: updateBankAccountById
+      summary: Update a Bank Account
+      description: |
+        Update or close an existing bank account.
+
+        ### Closing a Bank Account
+        To close a bank account, provide `valid_until` and `closure_reason_code`.
+        A closed bank account remains visible for audit purposes.
+
+        ### Direct update vs. service request — server-driven
+
+        When the owning individual is `DRAFT` or `SUBMITTED`, every field
+        is updated directly. When the individual is `ENGAGED`, the server
+        automatically creates a `BANK_ACCOUNT_CHANGE` service request and
+        the submitted values are held under review until approval.
+
+        The status code reflects what actually happened:
+        - `200 OK` — the update was applied immediately. No service request
+          was created and `_embedded.service_requests` is absent.
+        - `202 Accepted` — the owning individual is `ENGAGED`: the server
+          auto-created the `BANK_ACCOUNT_CHANGE` service request, exposed as
+          an entry in `_embedded.service_requests` (follow `_links.self.href`).
+      tags:
+        - bank-account
+      parameters:
+        - $ref: '#/components/parameters/PersonId'
+        - $ref: '#/components/parameters/BankAccountId'
+      requestBody:
+        required: true
+        description: Bank account content to update.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BankAccountUpdate'
+      responses:
+        '200':
+          description: |
+            Bank account updated immediately. The owning individual is
+            `DRAFT` or `SUBMITTED`; no service request was created and
+            `_embedded.service_requests` is absent.
+          content:
+            application/hal+json:
+              schema:
+                $ref: '#/components/schemas/BankAccountResource'
+              examples:
+                bankAccountUpdated:
+                  $ref: '#/components/examples/BankAccountResource'
+        '202':
+          description: |
+            Update accepted. The owning individual is `ENGAGED`: the server
+            auto-created a `BANK_ACCOUNT_CHANGE` service request, exposed
+            under `_embedded.service_requests`. The submitted values are
+            held under review until the service request is approved.
+          content:
+            application/hal+json:
+              schema:
+                $ref: '#/components/schemas/BankAccountResource'
+              examples:
+                bankAccountUpdatedUnderReview:
+                  $ref: '#/components/examples/BankAccountUnderReview'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '413':
+          $ref: '#/components/responses/ContentTooLarge'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+      security:
+        - oauth2:
+            - persons:write
+components:
+  schemas:
+    Address:
+      title: Address
+      description: Postal address details following a Stripe-like structure with address lines.
+      type: object
+      properties:
+        city:
+          type: string
+          minLength: 1
+          maxLength: 100
+          description: City or locality.
+          example: New York
+        country_code:
+          $ref: '#/components/schemas/CountryCode'
+        line1:
+          type: string
+          minLength: 1
+          maxLength: 255
+          description: Primary address line (e.g., street number and street name).
+          example: 10 Main Street
+        line2:
+          type: string
+          maxLength: 255
+          description: Secondary address line (e.g., building, apartment, floor).
+          example: Building A, Apartment 42, 3rd floor
+        line3:
+          type: string
+          maxLength: 255
+          description: Third address line (e.g., special delivery code, additional routing).
+          example: Suite 200
+        line4:
+          type: string
+          maxLength: 255
+          description: Fourth address line (e.g., PO Box, additional delivery instructions).
+          example: PO Box 12345
+        postal_code:
+          type: string
+          minLength: 1
+          maxLength: 20
+          pattern: ^[A-Za-z0-9 -]{1,20}$
+          description: Postal or ZIP code.
+          example: '10001'
+        state:
+          type: string
+          maxLength: 100
+          description: State, province, or region.
+          example: NY
+      required:
+        - line1
+        - postal_code
+        - city
+        - country_code
+    AddressCreate:
+      type: object
+      description: Payload for creating a new Address.
+      title: Address Creation
+      allOf:
+        - $ref: '#/components/schemas/Address'
+        - type: object
+          required:
+            - line1
+            - postal_code
+            - city
+            - country_code
+    AddressResource:
+      type: object
+      description: |
+        HAL representation of an Address. Embeds a `service_requests` list
+        under `_embedded` when one or more `ADDRESS_CHANGE` reviews are in
+        flight on this typed address (typically because the partner upserted
+        the address on an `ENGAGED` individual). The key is absent when no
+        review is required.
+      title: Address Resource
+      allOf:
+        - $ref: '#/components/schemas/TypedAddress'
+        - type: object
+          properties:
+            _embedded:
+              $ref: '#/components/schemas/AddressResourceEmbedded'
+            _links:
+              allOf:
+                - $ref: '#/components/schemas/HalSelfLinks'
+                - type: object
+                  description: |
+                    HAL navigation for a typed address.
+
+                    | Relation | Method | Always present |
+                    |---|---|---|
+                    | `self` | GET | yes |
+                    | `individual` | GET | yes |
+                  properties:
+                    individual:
+                      $ref: '#/components/schemas/HalLink'
+                      description: Link to the owning individual.
+                  required:
+                    - individual
+          required:
+            - _links
+    AddressResourceEmbedded:
+      title: Address Resource Embedded
+      description: |
+        Embedded resources for an Address resource. Exposes a
+        `service_requests` list when one or more `ADDRESS_CHANGE` reviews are in
+        flight on this typed address (typically because the partner upserted
+        the address on an `ENGAGED` individual). The key is absent when no
+        review is required.
+      readOnly: true
+      additionalProperties: true
+      allOf:
+        - $ref: '#/components/schemas/WithServiceRequests'
+    TypedAddress:
+      type: object
+      title: TypedAddress
+      description: Address with server-generated type.
+      allOf:
+        - $ref: '#/components/schemas/Address'
+        - type: object
+          required:
+            - address_type
+          properties:
+            address_type:
+              allOf:
+                - $ref: '#/components/schemas/AddressType'
+              readOnly: true
+    Addresses:
+      type: object
+      title: Addresses
+      description: 'A collection of addresses for a specific person. A person can have a maximum of 3 addresses: - PRINCIPAL (mandatory) - CORRESPONDENCE (optional, if not set, PRINCIPAL is used) - FISCAL (optional, if not set, PRINCIPAL is used)'
+      properties:
+        _embedded:
+          $ref: '#/components/schemas/AddressesEmbedded'
+        _links:
+          $ref: '#/components/schemas/HalSelfLinks'
+      examples:
+        - $ref: '#/components/examples/Addresses'
+    AddressesEmbedded:
+      type: object
+      title: Addresses Embedded
+      description: Embedded resources for an Addresses collection
+      properties:
+        addresses:
+          description: 'List of addresses. A person can have a maximum of 3 addresses: - PRINCIPAL (mandatory) - CORRESPONDENCE (optional, if not set, PRINCIPAL is used) - FISCAL (optional, if not set, PRINCIPAL is used)'
+          type: array
+          maxItems: 3
+          items:
+            $ref: '#/components/schemas/AddressResource'
+      required:
+        - addresses
+    BankAccount:
+      title: BankAccount
+      description: Banking coordinates associated with a person.
+      type: object
+      properties:
+        account_holder_name:
+          type: string
+          maxLength: 140
+          description: Full name of the account holder.
+          example: Jean Dupont
+        bic:
+          type: string
+          maxLength: 11
+          description: Bank Identifier Code (ISO 9362). May be derived from the IBAN.
+          example: BNPAFRPPXXX
+        change_reason_code:
+          oneOf:
+            - type: string
+              maxLength: 50
+            - type: 'null'
+          description: Reason code for the creation of this account replacing a previous one.
+          example: BANK_CHANGE
+        closure_reason_code:
+          oneOf:
+            - type: string
+              maxLength: 50
+            - type: 'null'
+          description: Reason code for closing this bank account.
+          example: ACCOUNT_CLOSED
+        currency:
+          $ref: '#/components/schemas/CurrencyCode'
+        iban:
+          type: string
+          maxLength: 34
+          description: International Bank Account Number (ISO 13616).
+          example: FR7630006000011234567890189
+        is_bank_transfer_authorized:
+          type: boolean
+          description: Whether the account is authorized for bank transfers.
+          example: true
+        is_direct_debit_authorized:
+          type: boolean
+          description: Whether the account is authorized for direct debit.
+          example: true
+        label:
+          type: string
+          maxLength: 100
+          description: Human-readable label for the bank account.
+          example: Compte courant principal
+        valid_from:
+          type: string
+          format: date
+          minLength: 10
+          maxLength: 10
+          description: Date from which the bank account is valid (ISO 8601).
+          example: 2025-01-15
+        valid_until:
+          oneOf:
+            - type: string
+              format: date
+              minLength: 10
+              maxLength: 10
+            - type: 'null'
+          description: Date until which the bank account is valid. Set when closing the account.
+          example: 2026-12-31
+      required:
+        - account_holder_name
+        - iban
+        - currency
+        - valid_from
+    BankAccounts:
+      type: object
+      title: BankAccounts
+      description: Collection of all bank accounts associated with a specific person.
+      properties:
+        _embedded:
+          $ref: '#/components/schemas/BankAccountsEmbedded'
+        _links:
+          $ref: '#/components/schemas/HalSelfLinks'
+      required:
+        - _embedded
+        - _links
+    BankAccountsEmbedded:
+      type: object
+      title: BankAccounts Embedded
+      description: Embedded bank accounts in a collection response.
+      properties:
+        bank_accounts:
+          type: array
+          maxItems: 100
+          description: List of bank account resources.
+          items:
+            $ref: '#/components/schemas/BankAccountResource'
+      required:
+        - bank_accounts
+    BankAccountCreate:
+      type: object
+      description: Payload for creating a new bank account.
+      title: BankAccount Creation
+      allOf:
+        - $ref: '#/components/schemas/BankAccount'
+        - type: object
+          required:
+            - account_holder_name
+            - iban
+            - currency
+            - valid_from
+    BankAccountResource:
+      type: object
+      description: |
+        HAL representation of a BankAccount. Embeds a `service_requests`
+        list under `_embedded` when one or more `BANK_ACCOUNT_CHANGE` reviews
+        are in flight on the owning individual (typically because the partner
+        mutated this account on an `ENGAGED` individual). The key is absent
+        when no review is required.
+      title: BankAccount Resource
+      allOf:
+        - $ref: '#/components/schemas/ExistingBankAccount'
+        - type: object
+          properties:
+            _embedded:
+              $ref: '#/components/schemas/BankAccountResourceEmbedded'
+            _links:
+              allOf:
+                - $ref: '#/components/schemas/HalSelfLinks'
+                - type: object
+                  description: |
+                    HAL navigation for a bank account.
+
+                    | Relation | Method | Always present |
+                    |---|---|---|
+                    | `self` | GET | yes |
+                    | `individual` | GET | yes |
+                  properties:
+                    individual:
+                      $ref: '#/components/schemas/HalLink'
+                      description: Link to the owning individual.
+                  required:
+                    - individual
+          required:
+            - _links
+    BankAccountResourceEmbedded:
+      title: Bank Account Resource Embedded
+      description: |
+        Embedded resources for a Bank Account resource. Exposes a
+        `service_requests` list when one or more `BANK_ACCOUNT_CHANGE` reviews
+        are in flight on the owning individual (typically because the partner
+        mutated this account on an `ENGAGED` individual). The key is absent
+        when no review is required.
+      readOnly: true
+      additionalProperties: true
+      allOf:
+        - $ref: '#/components/schemas/WithServiceRequests'
+    BankAccountUpdate:
+      type: object
+      description: Payload for updating or closing a bank account. All fields are optional.
+      title: BankAccount Update
+      properties:
+        account_holder_name:
+          type: string
+          maxLength: 140
+          description: Full name of the account holder.
+        bic:
+          type: string
+          maxLength: 11
+          description: Bank Identifier Code (ISO 9362).
+        closure_reason_code:
+          type: string
+          maxLength: 50
+          description: Reason code for closing this bank account.
+        is_bank_transfer_authorized:
+          type: boolean
+          description: Whether the account is authorized for bank transfers.
+        is_direct_debit_authorized:
+          type: boolean
+          description: Whether the account is authorized for direct debit.
+        label:
+          type: string
+          maxLength: 100
+          description: Human-readable label for the bank account.
+        valid_until:
+          type: string
+          format: date
+          minLength: 10
+          maxLength: 10
+          description: Date until which the bank account is valid. Set when closing the account.
+      additionalProperties: false
+    BadRequest:
+      type: object
+      title: Bad Request
+      description: Bad Request (400)
+      allOf:
+        - $ref: '#/components/schemas/ValidationProblemDetails'
+    Birth:
+      type: object
+      title: Birth
+      description: Birth details
+      properties:
+        birth_name:
+          type: string
+          maxLength: 100
+          description: Name at birth
+          example: Dubois
+        date_of_birth:
+          type: string
+          format: date
+          minLength: 10
+          maxLength: 10
+          description: Date of birth
+          example: 1990-02-03
+        place_of_birth:
+          $ref: '#/components/schemas/PlaceOfBirth'
+          description: Place of birth details
+    BirthWithRequiredDate:
+      type: object
+      title: BirthWithRequiredDate
+      description: Birth details with required date of birth, used when date of birth is mandatory.
+      allOf:
+        - $ref: '#/components/schemas/Birth'
+        - type: object
+          required:
+            - date_of_birth
+    CRS:
+      title: CRS
+      description: CRS (Common Reporting Standard) specific data
+      allOf:
+        - $ref: '#/components/schemas/FiscalInformationBase'
+        - type: object
+          required:
+            - tax_identification_number
+          properties:
+            controlling_person:
+              $ref: '#/components/schemas/ControllingPerson'
+            date_of_self_certification:
+              type: string
+              format: date
+              minLength: 10
+              maxLength: 10
+              description: Date of self-certification
+              example: 2020-01-01
+            fiscal_type:
+              type: string
+              maxLength: 30
+              const: CRS
+            is_self_certification_present:
+              type: boolean
+              description: Indicates if self-certification is present
+              example: true
+    CRSCreate:
+      type: object
+      description: Payload for creating a new CRS.
+      title: CRS Creation
+      unevaluatedProperties: false
+      allOf:
+        - $ref: '#/components/schemas/CRS'
+    CRSResource:
+      type: object
+      title: CRS Resource
+      description: CRS resource with HAL links
+      allOf:
+        - $ref: '#/components/schemas/CRS'
+        - type: object
+          properties:
+            _links:
+              allOf:
+                - $ref: '#/components/schemas/HalSelfLinks'
+                - type: object
+                  description: |
+                    HAL navigation for a CRS fiscal information.
+
+                    | Relation | Method | Always present |
+                    |---|---|---|
+                    | `self` | GET | yes |
+                    | `individual` | GET | yes |
+                  properties:
+                    individual:
+                      $ref: '#/components/schemas/HalLink'
+                      description: Link to the owning individual.
+                  required:
+                    - individual
+          required:
+            - _links
+    Communication:
+      type: object
+      title: Communication
+      description: Communication details including phone numbers and email
+      properties:
+        email:
+          type: string
+          format: email
+          maxLength: 200
+          description: Email address
+          example: john.doe@pack-solutions.com
+        landline_phone:
+          $ref: '#/components/schemas/PhoneNumber'
+          description: Landline phone number
+        mobile_phone:
+          $ref: '#/components/schemas/PhoneNumber'
+          description: Mobile phone number
+    Conflict:
+      type: object
+      title: Conflict
+      description: Conflict (409)
+      allOf:
+        - $ref: '#/components/schemas/ValidationProblemDetails'
+    ContentTooLarge:
+      type: object
+      title: Content Too Large
+      description: Content Too Large (413). Returned when the request body exceeds the maximum allowed size enforced by the API (default 250 KiB / 256000 bytes). File-upload endpoints may apply a larger, content-specific limit.
+      allOf:
+        - $ref: '#/components/schemas/ProblemDetails'
+    ControllingPerson:
+      type: object
+      title: Controlling Person
+      description: Details of the controlling person (Beneficial Owner)
+      properties:
+        shareholding_percentage:
+          $ref: '#/components/schemas/Rate'
+          description: Percentage of capital held
+        siren:
+          type: string
+          maxLength: 9
+          description: SIREN number of the controlling person
+          example: '123456789'
+          pattern: ^[0-9]{9}$
+    CountryCode:
+      type: string
+      title: Country Code
+      description: ISO 3166-1 alpha-2 country code
+      minLength: 2
+      maxLength: 2
+      example: FR
+      pattern: ^[A-Z]{2}$
+    ExistingBankAccount:
+      title: Existing BankAccount
+      description: A bank account with server-generated fields.
+      type: object
+      allOf:
+        - $ref: '#/components/schemas/BankAccount'
+        - type: object
+          properties:
+            id:
+              type: string
+              format: uuid
+              minLength: 36
+              maxLength: 36
+              readOnly: true
+              description: Server-generated unique identifier.
+              example: b2d4f6e8-1a3c-5e7f-9b1d-3f5e7a9c1b3d
+          required:
+            - id
+    ExistingIndividual:
+      type: object
+      title: ExistingIndividual
+      description: Existing individual with server-generated fields.
+      allOf:
+        - $ref: '#/components/schemas/Individual'
+        - type: object
+          required:
+            - id
+            - first_name
+            - last_name
+            - birth
+            - status
+          properties:
+            id:
+              type: string
+              format: uuid
+              minLength: 36
+              maxLength: 36
+              readOnly: true
+              description: Server-generated unique identifier.
+              example: 1f1a8119-4e24-4460-a126-c79f8ed0017f
+            status:
+              $ref: '#/components/schemas/Status'
+    FATCA:
+      title: FATCA
+      description: FATCA (Foreign Account Tax Compliance Act) specific data
+      allOf:
+        - $ref: '#/components/schemas/FiscalInformationBase'
+        - type: object
+          required:
+            - tax_identification_number
+          properties:
+            controlling_person:
+              $ref: '#/components/schemas/ControllingPerson'
+            fiscal_type:
+              type: string
+              maxLength: 30
+              const: FATCA
+            is_pre_existing_contract:
+              type: boolean
+              description: Indicates if there is a pre-existing contract
+              example: true
+            us_indicia:
+              type: array
+              maxItems: 20
+              description: |
+                A list of US indicia that may indicate a US tax status.
+
+                - `US_CITIZENSHIP_OR_GREEN_CARD`: US citizenship or green card holder.
+                - `US_BIRTH_PLACE`: Born in the USA.
+                - `US_ADDRESS`: US residence or mailing address.
+                - `US_TELEPHONE_NUMBER`: US telephone number.
+                - `US_STANDING_INSTRUCTIONS`: Standing instructions to transfer funds to an account in the US.
+                - `US_POWER_OF_ATTORNEY`: Power of attorney or signature authority granted to a person with a US address.
+                - `US_HOLD_MAIL_OR_IN_CARE_OF_ADDRESS`: An "in-care-of" or "hold mail" address in the US.
+                - `US_NATIONALITY_OR_DUAL_NATIONALITY`: US nationality or dual nationality.
+              items:
+                $ref: '#/components/schemas/UsIndiciaCode'
+              example:
+                - US_CITIZENSHIP_OR_GREEN_CARD
+                - US_NATIONALITY_OR_DUAL_NATIONALITY
+    FATCACreate:
+      type: object
+      description: Payload for creating a new FATCA.
+      title: FATCA Creation
+      unevaluatedProperties: false
+      allOf:
+        - $ref: '#/components/schemas/FATCA'
+    FATCAResource:
+      type: object
+      title: FATCA Resource
+      description: FATCA resource with HAL links
+      allOf:
+        - $ref: '#/components/schemas/FATCA'
+        - type: object
+          properties:
+            _links:
+              allOf:
+                - $ref: '#/components/schemas/HalSelfLinks'
+                - type: object
+                  description: |
+                    HAL navigation for a FATCA fiscal information.
+
+                    | Relation | Method | Always present |
+                    |---|---|---|
+                    | `self` | GET | yes |
+                    | `individual` | GET | yes |
+                  properties:
+                    individual:
+                      $ref: '#/components/schemas/HalLink'
+                      description: Link to the owning individual.
+                  required:
+                    - individual
+          required:
+            - _links
+    FamilyStatus:
+      type: string
+      title: Family Status
+      description: |
+        Family / marital situation of the individual.
+        - `SINGLE`: Applicant is not married, not in a civil partnership, and not cohabiting as declared.
+        - `MARRIED`: Applicant is legally married.
+        - `CIVIL_PARTNERSHIP`: Applicant is in a registered civil partnership (PACS).
+        - `COHABITING`: Applicant is living with a partner without being married or in a civil partnership.
+        - `DIVORCED`: Applicant was married or in a civil partnership and the union has been legally dissolved.
+        - `SEPARATED`: Applicant is legally or factually separated from a spouse or partner.
+        - `WIDOWED`: Applicant's spouse or partner is deceased.
+        - `UNKNOWN`: Family status is unknown, not provided, or cannot be determined at the time of subscription.
+      enum:
+        - SINGLE
+        - MARRIED
+        - CIVIL_PARTNERSHIP
+        - COHABITING
+        - DIVORCED
+        - SEPARATED
+        - WIDOWED
+        - UNKNOWN
+      example: SINGLE
+    CivilStatus:
+      type: string
+      title: Civil Status
+      description: |
+        Civil status (Madame or Monsieur).
+
+        - `MR`: Monsieur
+        - `MRS`: Madame
+      enum:
+        - MR
+        - MRS
+      example: MR
+    AddressType:
+      type: string
+      title: Address Type
+      description: |
+        Type of address attached to a person.
+
+        - `PRINCIPAL`: Principal residence. A person must have a `PRINCIPAL` address.
+        - `CORRESPONDENCE`: Correspondence address. If not provided, the `PRINCIPAL` address is used by default.
+        - `FISCAL`: Fiscal residence. If not provided, the `PRINCIPAL` address is used by default.
+      enum:
+        - PRINCIPAL
+        - CORRESPONDENCE
+        - FISCAL
+      example: PRINCIPAL
+    FiscalType:
+      type: string
+      title: Fiscal Type
+      description: |
+        Type of fiscal information record attached to a person.
+
+        - `FATCA`: Foreign Account Tax Compliance Act. Required for US persons or entities with US fiscal ties.
+        - `CRS`: Common Reporting Standard (OECD). Required for fiscal residents outside France for automatic exchange of information.
+        - `FRENCH_RESIDENCY`: French fiscal residency flag. Default when no fiscal information has been registered for the person.
+      enum:
+        - FATCA
+        - CRS
+        - FRENCH_RESIDENCY
+      example: FATCA
+    TaxIdentificationAbsenceReason:
+      type: string
+      title: Tax Identification Absence Reason
+      description: |
+        Reason for the absence of a Tax Identification Number (TIN), per FATCA standards.
+
+        - `REQUEST_IN_PROGRESS`: Application for TIN has been submitted (Code A).
+        - `CANNOT_OBTAIN_OTHER_REASON`: Cannot obtain for another reason (Code B; provide details in `absence_details`).
+        - `NOT_PROVIDED_REFRACTORY_CLIENT`: Not provided by client (Code C).
+        - `NOT_RESIDENT_OR_RENOUNCED_CITIZENSHIP`: Not a tax resident or has renounced citizenship (Code D).
+      enum:
+        - REQUEST_IN_PROGRESS
+        - CANNOT_OBTAIN_OTHER_REASON
+        - NOT_PROVIDED_REFRACTORY_CLIENT
+        - NOT_RESIDENT_OR_RENOUNCED_CITIZENSHIP
+      example: REQUEST_IN_PROGRESS
+    UsIndiciaCode:
+      type: string
+      title: US Indicia Code
+      description: |
+        Indicator suggesting a possible US tax status (FATCA).
+
+        - `US_CITIZENSHIP_OR_GREEN_CARD`: US citizenship or green card holder.
+        - `US_BIRTH_PLACE`: Born in the USA.
+        - `US_ADDRESS`: US residence or mailing address.
+        - `US_TELEPHONE_NUMBER`: US telephone number.
+        - `US_STANDING_INSTRUCTIONS`: Standing instructions to transfer funds to an account in the US.
+        - `US_POWER_OF_ATTORNEY`: Power of attorney or signature authority granted to a person with a US address.
+        - `US_HOLD_MAIL_OR_IN_CARE_OF_ADDRESS`: An "in-care-of" or "hold mail" address in the US.
+        - `US_NATIONALITY_OR_DUAL_NATIONALITY`: US nationality or dual nationality.
+      enum:
+        - US_CITIZENSHIP_OR_GREEN_CARD
+        - US_BIRTH_PLACE
+        - US_ADDRESS
+        - US_TELEPHONE_NUMBER
+        - US_STANDING_INSTRUCTIONS
+        - US_POWER_OF_ATTORNEY
+        - US_HOLD_MAIL_OR_IN_CARE_OF_ADDRESS
+        - US_NATIONALITY_OR_DUAL_NATIONALITY
+      example: US_CITIZENSHIP_OR_GREEN_CARD
+    FiscalInformation:
+      title: Fiscal information
+      description: Fiscal information for a person
+      oneOf:
+        - $ref: '#/components/schemas/FATCAResource'
+        - $ref: '#/components/schemas/CRSResource'
+        - $ref: '#/components/schemas/FrenchResidencyResource'
+      discriminator:
+        propertyName: fiscal_type
+        mapping:
+          FATCA: '#/components/schemas/FATCAResource'
+          CRS: '#/components/schemas/CRSResource'
+          FRENCH_RESIDENCY: '#/components/schemas/FrenchResidencyResource'
+      examples:
+        - $ref: '#/components/examples/FiscalInformation_FATCA'
+        - $ref: '#/components/examples/FiscalInformation_CRS'
+        - $ref: '#/components/examples/FiscalInformation_FrenchResidency'
+    FiscalInformationBase:
+      type: object
+      title: Fiscal Information
+      description: Fiscal information details
+      properties:
+        fiscal_type:
+          type: string
+          maxLength: 30
+          readOnly: true
+          description: |
+            The category of fiscal information being provided.
+            - `FATCA`: Foreign Account Tax Compliance Act (US standard).
+            - `CRS`: Common Reporting Standard (international standard).
+            - `FRENCH_RESIDENCY`: Specific data for French tax residency.
+        tax_identification_number:
+          $ref: '#/components/schemas/TaxIdentificationNumber'
+          description: Tax identification number or reason for absence
+      required:
+        - fiscal_type
+    FiscalInformationCreate:
+      title: Fiscal Information Create
+      description: |
+        Polymorphic create/replace payload for a single fiscal record. The
+        discriminator `fiscal_type` must match the `{fiscal_type}` path
+        parameter on the upsert endpoint; otherwise the server returns
+        `422 Unprocessable Entity`.
+      oneOf:
+        - $ref: '#/components/schemas/FATCACreate'
+        - $ref: '#/components/schemas/CRSCreate'
+        - $ref: '#/components/schemas/FrenchResidencyCreate'
+      discriminator:
+        propertyName: fiscal_type
+        mapping:
+          FATCA: '#/components/schemas/FATCACreate'
+          CRS: '#/components/schemas/CRSCreate'
+          FRENCH_RESIDENCY: '#/components/schemas/FrenchResidencyCreate'
+    FiscalInformations:
+      title: Fiscal Informations
+      description: List of fiscal and tax information for a person. Limited to a maximum of 3 records.
+      type: object
+      properties:
+        _embedded:
+          type: object
+          properties:
+            fiscal_informations:
+              type: array
+              maxItems: 3
+              items:
+                $ref: '#/components/schemas/FiscalInformation'
+          required:
+            - fiscal_informations
+        _links:
+          $ref: '#/components/schemas/HalSelfLinks'
+      required:
+        - _links
+        - _embedded
+      examples:
+        - $ref: '#/components/examples/FiscalInformations'
+    Forbidden:
+      type: object
+      title: Forbidden
+      description: Forbidden (403)
+      allOf:
+        - $ref: '#/components/schemas/ProblemDetails'
+    FrenchResidency:
+      type: object
+      title: French residency
+      description: |
+        French tax residency flag.
+
+        This record carries no business data; its mere presence indicates that
+        the person is a French fiscal resident.
+
+        French residency is the **default** fiscal information for a person:
+        if no fiscal information has been registered, the person is implicitly
+        treated as a French resident.
+      properties:
+        fiscal_type:
+          type: string
+          maxLength: 30
+          readOnly: true
+          const: FRENCH_RESIDENCY
+          description: Discriminator — always `FRENCH_RESIDENCY`.
+      required:
+        - fiscal_type
+    FrenchResidencyCreate:
+      type: object
+      description: Payload for creating a new French Residency.
+      title: French Residency Creation
+      unevaluatedProperties: false
+      allOf:
+        - $ref: '#/components/schemas/FrenchResidency'
+    FrenchResidencyResource:
+      type: object
+      title: French Residency Resource
+      description: French residency resource with HAL links
+      allOf:
+        - $ref: '#/components/schemas/FrenchResidency'
+        - type: object
+          properties:
+            _links:
+              allOf:
+                - $ref: '#/components/schemas/HalSelfLinks'
+                - type: object
+                  description: |
+                    HAL navigation for a French Residency fiscal information.
+
+                    | Relation | Method | Always present |
+                    |---|---|---|
+                    | `self` | GET | yes |
+                    | `individual` | GET | yes |
+                  properties:
+                    individual:
+                      $ref: '#/components/schemas/HalLink'
+                      description: Link to the owning individual.
+                  required:
+                    - individual
+          required:
+            - _links
+    HalLink:
+      type: object
+      title: HalLink
+      description: |
+        HAL link object. Minimal shape: an `href` (URI of the linked resource)
+        and the `method` to use when following it. Navigation and pagination
+        relations use `GET`; action relations use `POST` (or `DELETE` for
+        resource removal). The project does not use `PUT` or `PATCH`.
+      additionalProperties: false
+      required:
+        - href
+        - method
+      properties:
+        href:
+          type: string
+          format: uri-reference
+          maxLength: 2048
+          description: URI of the linked resource.
+          example: /resources/1f1a8119-4e24-4460-a126-c79f8ed0017f
+        method:
+          $ref: '#/components/schemas/HalLinkMethod'
+          description: HTTP method to use when following this link.
+    HalLinkMethod:
+      type: string
+      title: HalLinkMethod
+      description: |
+        HTTP method to use when following a HAL link. Restricted to
+        `GET` (navigation), `POST` (actions and mutations), and `DELETE`
+        (resource removal). The project does not use `PUT` or `PATCH`.
+      enum:
+        - GET
+        - POST
+        - DELETE
+      example: GET
+    HalPaginationLinks:
+      type: object
+      title: HalPaginationLinks
+      description: |
+        Pagination link relations used inside the `_links` of a collection envelope.
+        `first` and `last` are always present; `next` and `prev` are conditional on
+        page state. Compose with `HalSelfLinks` in every `*Collection._links`.
+      properties:
+        first:
+          $ref: '#/components/schemas/HalLink'
+          description: Link to the first page of the collection.
+        last:
+          $ref: '#/components/schemas/HalLink'
+          description: Link to the last page of the collection.
+        next:
+          $ref: '#/components/schemas/HalLink'
+          description: Link to the next page of the collection. Omitted on the last page.
+        prev:
+          $ref: '#/components/schemas/HalLink'
+          description: Link to the previous page of the collection. Omitted on the first page.
+      required:
+        - first
+        - last
+      example:
+        first:
+          href: /resources?page=1&size=20
+          method: GET
+        last:
+          href: /resources?page=5&size=20
+          method: GET
+        next:
+          href: /resources?page=3&size=20
+          method: GET
+        prev:
+          href: /resources?page=1&size=20
+          method: GET
+    HalSelfLinks:
+      type: object
+      title: HalSelfLinks
+      description: |
+        Base shape for every `_links` block. Guarantees that the `self` link is present
+        on every HAL Resource and Collection envelope. Compose with `HalPaginationLinks`
+        for paginated collections, or extend inline with action/navigation relations.
+      properties:
+        self:
+          $ref: '#/components/schemas/HalLink'
+          description: Link to the current resource.
+      required:
+        - self
+      example:
+        self:
+          href: /resources/1f1a8119-4e24-4460-a126-c79f8ed0017f
+          method: GET
+    Individual:
+      type: object
+      title: Individual
+      description: |
+        A natural person. 
+
+        This model captures essential identity data, including birth information.
+      allOf:
+        - $ref: '#/components/schemas/PersonBase'
+        - type: object
+          properties:
+            birth:
+              $ref: '#/components/schemas/BirthWithRequiredDate'
+            civil_status:
+              $ref: '#/components/schemas/CivilStatus'
+            external_reference:
+              type: string
+              maxLength: 50
+              description: Membership number assigned by the insurer (external reference).
+              example: '7500000'
+            family_status:
+              $ref: '#/components/schemas/FamilyStatus'
+            first_name:
+              type: string
+              maxLength: 50
+              description: Given name(s).
+              example: Marie
+            last_name:
+              type: string
+              maxLength: 60
+              description: Family name.
+              example: Dubois
+            nationalities:
+              type: array
+              maxItems: 10
+              description: List of countries where the person holds citizenship.
+              items:
+                $ref: '#/components/schemas/CountryCode'
+              example:
+                - FR
+            social_security_number:
+              type: string
+              maxLength: 15
+              description: National social security identifier.
+              example: '290022199999999'
+    IndividualCollection:
+      type: object
+      title: Individual Collection
+      description: Paginated collection of individuals with HAL links and metadata
+      properties:
+        _embedded:
+          $ref: '#/components/schemas/IndividualCollectionEmbedded'
+        _links:
+          allOf:
+            - $ref: '#/components/schemas/HalSelfLinks'
+            - $ref: '#/components/schemas/HalPaginationLinks'
+        page:
+          $ref: '#/components/schemas/PageMetadata'
+      required:
+        - _embedded
+        - _links
+        - page
+    IndividualCollectionEmbedded:
+      type: object
+      title: Individual Collection Embedded
+      description: Embedded resources for an Individual collection.
+      properties:
+        individuals:
+          type: array
+          maxItems: 100
+          description: List of individual resources.
+          items:
+            $ref: '#/components/schemas/IndividualResource'
+      required:
+        - individuals
+    IndividualCreate:
+      type: object
+      title: IndividualCreate
+      description: Payload for creating an individual. Requires first name, last name, and date of birth.
+      allOf:
+        - $ref: '#/components/schemas/Individual'
+        - type: object
+          required:
+            - first_name
+            - last_name
+            - birth
+      examples:
+        - $ref: '#/components/examples/IndividualCreate'
+    IndividualResource:
+      type: object
+      title: Individual Resource
+      description: |
+        Individual resource with HAL links.
+
+        When the latest mutation triggered one or more service requests (e.g.
+        sensitive field changes on an `ENGAGED` individual — a single update may
+        touch several fields at once), the embedded `_embedded.service_requests`
+        list navigates to each request detail. The key is absent from `_embedded`
+        when no review was triggered. The submitted values awaiting approval are
+        carried by the service request itself.
+      allOf:
+        - $ref: '#/components/schemas/ExistingIndividual'
+        - type: object
+          properties:
+            _embedded:
+              $ref: '#/components/schemas/IndividualResourceEmbedded'
+            _links:
+              allOf:
+                - $ref: '#/components/schemas/HalSelfLinks'
+                - type: object
+                  description: |
+                    HAL navigation for an individual. `submit` is exposed only
+                    when `status: DRAFT`.
+
+                    | Relation | Method | Always present | Conditional on status |
+                    |---|---|---|---|
+                    | `self` | GET | yes | — |
+                    | `addresses` | GET | yes | — |
+                    | `fiscal_informations` | GET | yes | — |
+                    | `bank_accounts` | GET | yes | — |
+                    | `service_requests` | GET | yes | Link to `GET /service-requests?target_resource_type=INDIVIDUAL&target_resource_id={id}` in the Service Request API |
+                    | `submit` | POST | no | `DRAFT` only |
+                  properties:
+                    addresses:
+                      $ref: '#/components/schemas/HalLink'
+                      description: Link to the addresses collection of this individual.
+                    bank_accounts:
+                      $ref: '#/components/schemas/HalLink'
+                      description: Link to the bank accounts collection of this individual.
+                    fiscal_informations:
+                      $ref: '#/components/schemas/HalLink'
+                      description: Link to the fiscal informations collection of this individual.
+                    service_requests:
+                      $ref: '#/components/schemas/HalLink'
+                      description: Link to service requests targeting this individual (`GET /service-requests?target_resource_type=INDIVIDUAL&target_resource_id={id}`).
+                    submit:
+                      $ref: '#/components/schemas/HalLink'
+                      description: 'Action link to submit the individual. Present only when `status: DRAFT`.'
+                  required:
+                    - addresses
+                    - fiscal_informations
+                    - bank_accounts
+                    - service_requests
+          required:
+            - _links
+      examples:
+        - $ref: '#/components/examples/IndividualResource'
+    IndividualResourceEmbedded:
+      title: Individual Resource Embedded
+      description: |
+        Embedded resources for an Individual resource. Exposes a
+        `service_requests` list when the latest mutation triggered one or more
+        manual reviews (key absent otherwise). A single update may touch several
+        fields at once (e.g. name, address and bank account) and therefore
+        trigger several reviews.
+      readOnly: true
+      additionalProperties: true
+      allOf:
+        - $ref: '#/components/schemas/WithServiceRequests'
+    IndividualUpdate:
+      type: object
+      title: IndividualUpdate
+      description: |
+        Individual update payload for partial updates. All fields are optional.
+        Uses POST on the resource with the `id` as a path parameter.
+      allOf:
+        - $ref: '#/components/schemas/PersonBase'
+        - type: object
+          properties:
+            birth:
+              $ref: '#/components/schemas/Birth'
+            civil_status:
+              $ref: '#/components/schemas/CivilStatus'
+            external_reference:
+              type: string
+              maxLength: 50
+              description: Membership number assigned by the insurer (external reference).
+              example: '7500000'
+            first_name:
+              type: string
+              maxLength: 50
+              description: Given name(s).
+              example: Marie
+            last_name:
+              type: string
+              maxLength: 60
+              description: Family name.
+              example: Dubois
+            nationalities:
+              type: array
+              maxItems: 10
+              description: List of countries where the person holds citizenship.
+              items:
+                $ref: '#/components/schemas/CountryCode'
+              example:
+                - FR
+            social_security_number:
+              type: string
+              maxLength: 15
+              description: National social security identifier.
+              example: '290022199999999'
+      examples:
+        - $ref: '#/components/examples/IndividualUpdate'
+    InternalServerError:
+      type: object
+      title: Internal Server Error
+      description: Internal Server Error (500)
+      allOf:
+        - $ref: '#/components/schemas/ProblemDetails'
+    Metadata:
+      type: object
+      title: Metadata
+      description: |
+        Set of key-value pairs that you can attach to an object.
+        This can be useful for storing additional information about the object in a structured format.
+
+        Capped at 50 entries with 64-char key names and 500-char string values to
+        prevent DoS via payload bloat.
+      maxProperties: 50
+      propertyNames:
+        maxLength: 64
+      additionalProperties:
+        type: string
+        maxLength: 500
+      example:
+        customer_segment: premium
+        internal_id: '12345'
+    NotFound:
+      type: object
+      title: Not Found
+      description: Not Found (404)
+      allOf:
+        - $ref: '#/components/schemas/ProblemDetails'
+    PageMetadata:
+      type: object
+      title: PageMetadata
+      description: Pagination metadata for collection responses.
+      properties:
+        number:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 10000
+          description: Current page number (one-based).
+          example: 1
+        size:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 100
+          description: Number of items per page.
+          example: 20
+        total_elements:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 999999999999
+          description: Total number of items across all pages.
+          example: 100
+        total_pages:
+          type: integer
+          format: int32
+          minimum: 0
+          maximum: 10000
+          description: Total number of pages.
+          example: 5
+      required:
+        - size
+        - total_elements
+        - total_pages
+        - number
+    Rate:
+      type: object
+      title: Rate
+      description: |
+        A percentage with fixed precision of 2 decimals.
+        The actual decimal percentage is computed as `value * 10^(-2)`.
+        For example, `{ "value": 1050, "scale": 2 }` represents 10.50%.
+      properties:
+        scale:
+          type: integer
+          format: int32
+          minimum: 2
+          maximum: 2
+          const: 2
+          description: Fixed number of decimal places.
+          examples:
+            - 2
+        value:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 10000
+          description: |
+            The unscaled integer value of the percentage.
+            Valid range: 0 to 10000, representing 0.00% to 100.00%.
+          examples:
+            - 0
+            - 50
+            - 1050
+            - 10000
+      required:
+        - value
+        - scale
+      additionalProperties: false
+      examples:
+        - value: 0
+          scale: 2
+        - value: 1050
+          scale: 2
+        - value: 10000
+          scale: 2
+    PersonBase:
+      type: object
+      title: PersonBase
+      description: Base properties common to all person types
+      properties:
+        communication:
+          $ref: '#/components/schemas/Communication'
+        metadata:
+          $ref: '#/components/schemas/Metadata'
+          description: Set of key-value pairs
+    PhoneNumber:
+      type: string
+      title: Phone number
+      description: Phone number in E.164 format
+      maxLength: 16
+      pattern: ^\+[1-9]\d{1,14}$
+      example: '+33612345678'
+    PlaceOfBirth:
+      type: object
+      title: Place of birth
+      description: Place of birth
+      properties:
+        city:
+          type: string
+          maxLength: 100
+          description: City of birth
+          example: Dijon
+        country_code:
+          $ref: '#/components/schemas/CountryCode'
+        postal_code:
+          type: string
+          maxLength: 20
+          description: Postal code of birth city
+          example: '21000'
+      required:
+        - city
+        - postal_code
+        - country_code
+    ProblemDetails:
+      type: object
+      title: Problem Details
+      description: A RFC 9457 compliant problem detail object
+      properties:
+        detail:
+          type: string
+          minLength: 1
+          maxLength: 1000
+          description: A human-readable explanation specific to this occurrence of the problem.
+          example: Your current balance is 30, but that costs 50.
+        instance:
+          type: string
+          format: uri-reference
+          maxLength: 2048
+          description: A URI reference that identifies the specific occurrence of the problem.
+          example: https://pack-solutions.com/accounts/12345/msgs/abc
+        status:
+          type: integer
+          format: int32
+          minimum: 100
+          maximum: 599
+          description: The HTTP status code generated by the origin server for this occurrence of the problem.
+          example: 403
+        title:
+          type: string
+          minLength: 1
+          maxLength: 255
+          description: A short, human-readable summary of the problem type.
+          example: You do not have enough credit.
+        type:
+          type: string
+          format: uri-reference
+          maxLength: 2048
+          description: A URI reference that identifies the problem type.
+          default: about:blank
+          example: https://pack-solutions.com/probs/out-of-stock
+    ValidationProblemDetails:
+      type: object
+      title: Validation Problem Details
+      description: |
+        An extension of RFC 9457 Problem Details that includes structured validation errors.
+        Used for responses where the server needs to communicate specific field-level or business-rule validation failures.
+      allOf:
+        - $ref: '#/components/schemas/ProblemDetails'
+        - type: object
+          properties:
+            errors:
+              type: array
+              maxItems: 100
+              description: A list of validation errors that occurred during request processing.
+              items:
+                $ref: '#/components/schemas/ValidationError'
+    ValidationError:
+      type: object
+      title: Validation Error
+      description: |
+        A single validation error entry describing a specific issue with the request.
+      properties:
+        code:
+          $ref: '#/components/schemas/ValidationErrorCode'
+        detail:
+          type: string
+          minLength: 1
+          maxLength: 1000
+          description: A human-readable explanation of the validation error.
+        pointer:
+          type: string
+          minLength: 1
+          maxLength: 500
+          pattern: ^/
+          description: |
+            A JSON Pointer (RFC 6901) to the field in the request body that caused the
+            error. For asynchronous validations surfaced on a service request (e.g.,
+            manual review rejections), the same convention is used in
+            `ServiceRequestRequirement.pointer` (entries with `kind=DATA_FIELD`). Consumer
+            rendering logic can therefore be shared between synchronous `422` errors and
+            asynchronous INVALID requirements.
+
+            When the offending field lives inside a HAL `_embedded` or `_links` block
+            (e.g., on a 409 conflict against a resource that exposes its sub-collections
+            via embedding), the pointer follows the **physical** structure of the HAL
+            response and includes the `_embedded`/`_links` segments — for example
+            `/_embedded/individuals/0/birth/date_of_birth`.
+      required:
+        - code
+        - detail
+    ValidationErrorCode:
+      type: string
+      title: Validation Error Code
+      description: |
+        A machine-readable error code indicating the type of validation failure.
+
+        Prefer the most specific code available. Use `UNPROCESSABLE` and `CUSTOM`
+        only as last-resort fallbacks when no specific code fits.
+
+        ### Presence (typically on 422 and 400)
+        - `MISSING`: A required resource or related entity is missing (e.g., referenced `subscriber_id` does not exist).
+        - `MISSING_FIELD`: A required field was not provided in the request body.
+
+        ### Shape (typically on 400 and 422)
+        - `INVALID`: The field value is invalid in a generic sense. Use a more specific code when applicable.
+        - `INVALID_FORMAT`: The field value does not match the expected format (e.g., not a valid IBAN, UUID, ISO-8601 date).
+        - `OUT_OF_RANGE`: The field value is well-formed but falls outside the accepted range — numeric bounds, temporal window, or string length.
+        - `INCONSISTENT`: The field is inconsistent with another field in the same payload (e.g., `allocations` rates do not sum to 100%, `date_of_end` before `date_of_start`).
+
+        ### State (typically on 409)
+        - `ALREADY_EXISTS`: The resource or value already exists and duplicates are not allowed.
+        - `INVALID_STATE`: The operation is incompatible with the current state of the resource (e.g., trying to cancel an already-executed premium, submitting a contract whose subscriber is still in `DRAFT`).
+
+        ### Business rules (typically on 422)
+        - `BUSINESS_RULE_VIOLATION`: A documented business rule is violated and no more specific code above fits (e.g., a regulatory threshold is crossed).
+
+        ### Fallbacks
+        - `UNPROCESSABLE`: Legacy generic code. **Prefer `BUSINESS_RULE_VIOLATION` or a state/shape code above.**
+        - `CUSTOM`: A custom validation error not covered by the standard codes.
+      enum:
+        - MISSING
+        - MISSING_FIELD
+        - INVALID
+        - INVALID_FORMAT
+        - OUT_OF_RANGE
+        - INCONSISTENT
+        - ALREADY_EXISTS
+        - INVALID_STATE
+        - BUSINESS_RULE_VIOLATION
+        - UNPROCESSABLE
+        - CUSTOM
+      example: MISSING_FIELD
+    CurrencyCode:
+      type: string
+      title: Currency Code
+      description: |
+        ISO 4217 currency code.
+
+        - `EUR`: Euro
+        - `USD`: US Dollar
+        - `GBP`: British Pound Sterling
+        - `CHF`: Swiss Franc
+      enum:
+        - EUR
+        - USD
+        - GBP
+        - CHF
+      example: EUR
+    ServiceRequestRequirement:
+      type: object
+      title: Service Request Requirement
+      description: |
+        A single requirement that must be fulfilled for a service request to progress.
+
+        Service requests expose a flat `requirements: ServiceRequestRequirement[]`
+        array. When no entry remains in `MISSING` or `INVALID` state, the SR
+        auto-transitions from `REQUIRES_INFORMATION` to `UNDER_REVIEW`. Business resources (Contract,
+        Premium, Individual…) do **not** carry this model; missing fields on a
+        business resource surface as synchronous `422 Unprocessable Entity` errors
+        on the mutation that needs them.
+
+        Combines a `kind` (data field vs document) with a `state` to describe precisely
+        what the partner must provide or correct. Requirements persist throughout the full
+        lifecycle of the service request; only their `state` evolves.
+
+        `state` is server-managed: it is never accepted in a request body and is
+        present only on read responses.
+
+        Document requirement lifecycle (`kind=DOCUMENT`):
+        `MISSING` → *(document attached)* → `SUBMITTED` → *(reviewer accepts)* → `VALIDATED`
+                                                         → *(reviewer rejects)* → `INVALID`
+                                          → *(new document attached)* → `SUBMITTED`
+
+        Data field requirement lifecycle (`kind=DATA_FIELD`):
+        `MISSING` → *(field posted)* → `VALIDATED`
+        `INVALID` → *(corrected value posted)* → `VALIDATED`
+
+        The six cases:
+
+        - **Missing data field** — `kind=DATA_FIELD`, `state=MISSING`. POST the value to
+          the service request endpoint; `pointer` locates the target field.
+        - **Invalid data field** — `kind=DATA_FIELD`, `state=INVALID`. POST a corrected
+          value; `pointer` locates the field and `error_code` classifies the rejection
+          programmatically.
+        - **Missing document** — `kind=DOCUMENT`, `state=MISSING`. Upload a file via the
+          service request `documents` endpoint with a `document_type` from
+          `accepted_document_types`.
+        - **Submitted document** — `kind=DOCUMENT`, `state=SUBMITTED`. A document has been
+          attached and is awaiting manual review. `document` (its `id` and `type`) identifies
+          the attached document. The requirement no longer blocks the SR from entering `UNDER_REVIEW`.
+        - **Invalid document** — `kind=DOCUMENT`, `state=INVALID`. A document was attached
+          but rejected during manual review. `document` (its `id` and `type`) identifies the
+          rejected document and `error_code` classifies the rejection. Upload a replacement
+          to transition back to `SUBMITTED`.
+        - **Validated document** — `kind=DOCUMENT`, `state=VALIDATED`. A document was
+          accepted during manual review. `document` (its `id` and `type`) identifies the
+          accepted document.
+      properties:
+        accepted_document_types:
+          type: array
+          maxItems: 20
+          description: |
+            List of document types that can satisfy this requirement.
+            Present only when `kind=DOCUMENT`. Each value is a `DocumentType`
+            from the shared catalog.
+          items:
+            $ref: '#/components/schemas/DocumentType'
+          example:
+            - PROOF_OF_ADDRESS
+        document:
+          readOnly: true
+          description: |
+            Reference (id + type) of the document attached to satisfy this requirement.
+            Present only when `kind=DOCUMENT` and a document has been attached
+            (`state` is `SUBMITTED`, `VALIDATED`, or `INVALID` following a review).
+            Absent when `state=MISSING`.
+          allOf:
+            - $ref: '#/components/schemas/DocumentReference'
+        error_code:
+          description: |
+            Machine-readable classification of why this entry is in `state=INVALID`.
+            Optional and present only when `state=INVALID`. Reuses the same enum as
+            `ValidationError.code` (synchronous `422` errors), so consumers can share
+            the same switch logic across both error channels.
+          allOf:
+            - $ref: '#/components/schemas/ValidationErrorCode'
+          example: BUSINESS_RULE_VIOLATION
+        kind:
+          $ref: '#/components/schemas/ServiceRequestRequirementKind'
+        pointer:
+          type: string
+          minLength: 1
+          maxLength: 255
+          pattern: ^/
+          description: |
+            RFC 6901 JSON Pointer to the offending field, relative to the service request
+            payload. Present when `kind=DATA_FIELD`. Same convention as
+            `ValidationError.pointer` (synchronous 422 errors), allowing consumers to share
+            rendering and field-locator logic between both error channels.
+          example: /address/postal_code
+        state:
+          allOf:
+            - $ref: '#/components/schemas/ServiceRequestRequirementState'
+          readOnly: true
+      required:
+        - kind
+        - state
+    ServiceRequestRequirementKind:
+      type: string
+      title: Service Request Requirement Kind
+      description: |
+        Nature of a service request requirement.
+
+        - `DATA_FIELD`: a missing or invalid data field on the service request payload.
+          Provide or correct the value via `POST` on the service request endpoint.
+        - `DOCUMENT`: a missing or invalid supporting document.
+          Upload or replace the file via `POST` on the service request `documents` endpoint.
+      enum:
+        - DATA_FIELD
+        - DOCUMENT
+      example: DOCUMENT
+    ServiceRequestRequirementState:
+      type: string
+      title: Service Request Requirement State
+      description: |
+        Current status of a service request requirement.
+
+        - `MISSING`: nothing has been provided yet for this entry — the partner must supply
+          the requested field value or document.
+        - `INVALID`: a value or document was provided but rejected, either by automated
+          validation (format error, business rule) or during manual review by a case handler.
+          The partner must replace it to unblock the requirement.
+        - `SUBMITTED`: a document has been attached and is awaiting manual review by a case
+          handler. Only applies to `kind=DOCUMENT` requirements. The entry no longer blocks
+          the service request from transitioning to `UNDER_REVIEW`, but `VALIDATED` is not
+          set until a reviewer explicitly accepts it.
+        - `VALIDATED`: the value or document provided for this entry was accepted — either
+          by automated validation (data fields) or during manual review by a case handler
+          (documents). A requirement in this state no longer blocks the service request from
+          progressing; it is kept in the list for auditability.
+      enum:
+        - MISSING
+        - INVALID
+        - SUBMITTED
+        - VALIDATED
+      example: MISSING
+    DocumentType:
+      title: DocumentType
+      type: string
+      description: |
+        Catalog of document types accepted by the API. Values are grouped by the
+        **business entity** the document is typically attached to (`person`,
+        `contract`, `payment_method`). Each group is further broken down by
+        functional sub-category. Owner-scoped subset enums (`PersonDocumentType`,
+        `ContractDocumentType`, `PaymentMethodDocumentType`) narrow this catalog
+        to the values that are valid for a given owner.
+
+        ### Person — Identity / Civil status
+        - `PROOF_OF_IDENTITY`: Justificatif d'identité (CNI ou passeport, en cours de validité)
+        - `BIRTH_CERTIFICATE`: Acte de naissance (< 3 mois)
+        - `MARRIAGE_CERTIFICATE`: Acte de mariage
+        - `DIVORCE_DECREE`: Jugement de divorce
+        - `PROOF_OF_ADDRESS`: Justificatif de domicile
+
+        ### Person — International taxation
+        - `CERFA_3916`: CERFA 3916 (compte bancaire à l'étranger)
+        - `CERFA_5000`: CERFA 5000 (non-résident)
+        - `W9_TAX_FORM`: Formulaire W9 (États-Unis)
+        - `W8BEN_FORM`: Formulaire W-8BEN
+
+        ### Person — AML-CFT compliance
+        - `CONFIDENTIAL_INFORMATION_SHEET`: Fiche de renseignements confidentiels (versements > 40 k€)
+        - `AML_PEP_PROOF`: Justificatif LCB-FT / PPE (Personne Politiquement Exposée)
+
+        ### Person — Legal protection
+        - `LEGAL_PROTECTION`: Protection juridique (générique)
+        - `GUARDIANSHIP_JUDGMENT`: Jugement de mise sous tutelle
+        - `CURATORSHIP_JUDGMENT`: Jugement de mise sous curatelle
+        - `JUDICIAL_PROTECTION_ORDER`: Jugement / ordonnance de sauvegarde de justice
+
+        ### Contract — Subscription / product
+        - `MEMBERSHIP_FORM`: Bulletin d'adhésion
+        - `MUTUAL_REGULATION`: Règlement mutualiste
+        - `PROFILED_MANAGEMENT_MANDATE`: Mandat de gestion profilé
+
+        ### Contract — Beneficiary clause
+        - `SIGNED_BENEFICIARY_CLAUSE_FORM`: Formulaire de clause bénéficiaire signé
+        - `ACCEPTING_BENEFICIARY`: Bénéficiaire acceptant
+
+        ### Contract — Pledge / Third-party seizure
+        - `PLEDGE_DEED`: Acte de nantissement
+        - `PLEDGE_RELEASE`: Mainlevée de nantissement
+        - `DGFIP_THIRD_PARTY_NOTICE`: ATD — Avis tiers détenteur DGFiP
+
+        ### Request / Operation — Generic formalism
+        - `SIGNED_REQUEST_FORM`: Formulaire de demande signé
+        - `SIGNED_REQUEST_LETTER`: Courrier de demande signé
+
+        ### Payment / Financial operation
+        - `PROOF_OF_FUND_ORIGIN`: Justificatif d'origine des fonds
+
+        ### Benefit / Surrender
+        - `FUND_DESTINATION_PROOF`: Justificatif de destination des fonds
+
+        ### Bank account details
+        - `SEPA_MANDATE`: Mandat SEPA
+        - `BANK_DETAILS`: RIB (Relevé d'Identité Bancaire)
+        - `FOREIGN_BANK_DETAILS`: RIB étranger
+
+        ### Catch-all
+        - `OTHER`: Autre
+      enum:
+        - PROOF_OF_IDENTITY
+        - BIRTH_CERTIFICATE
+        - MARRIAGE_CERTIFICATE
+        - DIVORCE_DECREE
+        - PROOF_OF_ADDRESS
+        - CERFA_3916
+        - CERFA_5000
+        - W9_TAX_FORM
+        - W8BEN_FORM
+        - CONFIDENTIAL_INFORMATION_SHEET
+        - AML_PEP_PROOF
+        - LEGAL_PROTECTION
+        - GUARDIANSHIP_JUDGMENT
+        - CURATORSHIP_JUDGMENT
+        - JUDICIAL_PROTECTION_ORDER
+        - MEMBERSHIP_FORM
+        - MUTUAL_REGULATION
+        - PROFILED_MANAGEMENT_MANDATE
+        - SIGNED_BENEFICIARY_CLAUSE_FORM
+        - ACCEPTING_BENEFICIARY
+        - PLEDGE_DEED
+        - PLEDGE_RELEASE
+        - DGFIP_THIRD_PARTY_NOTICE
+        - SIGNED_REQUEST_FORM
+        - SIGNED_REQUEST_LETTER
+        - PROOF_OF_FUND_ORIGIN
+        - FUND_DESTINATION_PROOF
+        - SEPA_MANDATE
+        - BANK_DETAILS
+        - FOREIGN_BANK_DETAILS
+        - OTHER
+      example: PROOF_OF_IDENTITY
+    Status:
+      type: string
+      title: Person Status
+      description: |
+        The lifecycle status of the person within the system.
+        - `DRAFT`: The person is being created. The client must validate personal data before submitting, and must set the submission prerequisites through the intermediate endpoints: a principal address, the French residency fiscal information (`FRENCH_RESIDENCY`), and at least one bank account.
+        - `SUBMITTED`: The person has been submitted to the client and can now be selected for a contract role in a subscription.
+        - `ENGAGED`: The person is engaged on a contract that has been accepted by internal managers (Contract API, via an approved `CONTRACT_SUBSCRIPTION` service request created by the partner after submission). Direct updates are no longer allowed through the Person API; changes must go through the service requests sub-resource at `/individuals/{id}/service-requests`.
+      enum:
+        - DRAFT
+        - SUBMITTED
+        - ENGAGED
+      example: DRAFT
+    TINBase:
+      type: object
+      title: TIN
+      description: Tax Identification Number details
+      properties:
+        number:
+          type: string
+          maxLength: 50
+          description: The Tax Identification Number
+        tin_type:
+          type: string
+          maxLength: 20
+          description: Discriminator for the TIN type
+      required:
+        - tin_type
+    TaxIdentificationNumber:
+      title: Tax identification number
+      description: Tax identification number or reason for absence
+      oneOf:
+        - $ref: '#/components/schemas/TaxIdentificationNumberValue'
+        - $ref: '#/components/schemas/TaxIdentificationNumberAbsence'
+      discriminator:
+        propertyName: tin_type
+        mapping:
+          NUMBER: '#/components/schemas/TaxIdentificationNumberValue'
+          ABSENCE: '#/components/schemas/TaxIdentificationNumberAbsence'
+    TaxIdentificationNumberAbsence:
+      title: Tax identification number absence
+      description: Reason and details for the absence of a Tax Identification Number (TIN).
+      allOf:
+        - $ref: '#/components/schemas/TINBase'
+        - type: object
+          properties:
+            absence_details:
+              type: string
+              maxLength: 500
+              description: Additional details if absence_reason is CANNOT_OBTAIN_OTHER_REASON
+              example: The country does not issue TINs for individuals.
+            absence_reason:
+              $ref: '#/components/schemas/TaxIdentificationAbsenceReason'
+            tin_type:
+              type: string
+              maxLength: 20
+              const: ABSENCE
+          required:
+            - tin_type
+            - absence_reason
+    TaxIdentificationNumberValue:
+      title: Tax identification number value
+      description: A Tax Identification Number (TIN) for a person.
+      allOf:
+        - $ref: '#/components/schemas/TINBase'
+        - type: object
+          properties:
+            number:
+              type: string
+              maxLength: 50
+              description: The Tax Identification Number
+              example: '123456789'
+            tin_type:
+              type: string
+              maxLength: 20
+              const: NUMBER
+          required:
+            - tin_type
+            - number
+    Unauthorized:
+      type: object
+      title: Unauthorized
+      description: Unauthorized (401)
+      allOf:
+        - $ref: '#/components/schemas/ProblemDetails'
+    UnprocessableEntity:
+      type: object
+      title: Unprocessable Entity
+      description: Unprocessable Entity (422)
+      allOf:
+        - $ref: '#/components/schemas/ValidationProblemDetails'
+    ServiceRequestType:
+      type: string
+      title: Service Request Type
+      description: |
+        The type of service request driving a manual review.
+
+        - `ADDRESS_CHANGE`: Change the policyholder's postal address.
+        - `NAME_CHANGE`: Change the policyholder's name.
+        - `FAMILY_STATUS_CHANGE`: Change the policyholder's family or marital status.
+        - `BANK_ACCOUNT_CHANGE`: Change the bank account details associated with a contract.
+        - `BENEFICIARY_CLAUSE_CHANGE`: Update a contract's beneficiary clause.
+        - `CONTRACT_SUBSCRIPTION`: Internal review of a submitted contract. Created automatically by the server on `POST /contracts/{contract_id}/submit`. Absorbs the AML review of the subscription premium.
+        - `CONTRACT_RENUNCIATION`: Withdraw a newly subscribed contract within the legal renunciation period. The only service request a partner can initiate explicitly on a contract.
+        - `PREMIUM_PAYMENT`: Review of an additional premium payment (e.g., AML check on a high amount). Created automatically by the server when the partner posts a premium that triggers a review.
+        - `SEPA_MANDATE_SIGNATURE`: Collection of the signed SEPA direct-debit mandate (mandat de prélèvement) for a newly created `SEPA_DEBIT` payment method. Created automatically by the server on `POST /individuals/{id}/payment-methods`.
+      maxLength: 30
+      minLength: 1
+      enum:
+        - ADDRESS_CHANGE
+        - NAME_CHANGE
+        - FAMILY_STATUS_CHANGE
+        - BANK_ACCOUNT_CHANGE
+        - CONTRACT_SUBSCRIPTION
+        - PREMIUM_PAYMENT
+        - BENEFICIARY_CLAUSE_CHANGE
+        - CONTRACT_RENUNCIATION
+        - SEPA_MANDATE_SIGNATURE
+      example: PREMIUM_PAYMENT
+    ServiceRequestStatus:
+      type: string
+      title: Service Request Status
+      description: |
+        Lifecycle status of a service request.
+
+        - `REQUIRES_INFORMATION`: The request needs additional information or documents before review can proceed.
+        - `UNDER_REVIEW`: The request is being reviewed by PACK Solutions.
+        - `APPROVED`: The request was approved.
+        - `REJECTED`: The request was rejected.
+        - `CANCELLED`: The request was cancelled before completion.
+        - `EXPIRED`: The request expired without resolution.
+      maxLength: 30
+      minLength: 1
+      enum:
+        - REQUIRES_INFORMATION
+        - UNDER_REVIEW
+        - APPROVED
+        - REJECTED
+        - CANCELLED
+        - EXPIRED
+      example: UNDER_REVIEW
+    ServiceRequestSummary:
+      type: object
+      title: Service Request Summary
+      description: |
+        Embedded preview of a single service request — the strict minimum needed
+        for navigation: id, type, status, and the HAL `self` link. The full request
+        detail is obtained by following `_links.self`.
+      properties:
+        _links:
+          $ref: '#/components/schemas/HalSelfLinks'
+        id:
+          type: string
+          format: uuid
+          minLength: 36
+          maxLength: 36
+          description: Unique identifier of the service request.
+          example: 5b1a8119-4e24-4460-a126-c79f8ed0017f
+        status:
+          $ref: '#/components/schemas/ServiceRequestStatus'
+        type:
+          $ref: '#/components/schemas/ServiceRequestType'
+      required:
+        - id
+        - type
+        - status
+        - _links
+    DocumentRequirement:
+      type: object
+      title: Document Requirement
+      description: |
+        A document expected to satisfy a service request. Each requirement
+        carries a machine-readable `code`, a human-readable `reason`, and the
+        list of document types accepted to fulfil it.
+      properties:
+        accepted_document_types:
+          type: array
+          maxItems: 20
+          description: |
+            List of accepted `DocumentType` values from the shared catalog.
+            Any of these can satisfy the requirement.
+          items:
+            $ref: '#/components/schemas/DocumentType'
+          example:
+            - PROOF_OF_ADDRESS
+        code:
+          type: string
+          maxLength: 255
+          minLength: 1
+          pattern: ^[A-Za-z0-9._-]+$
+          description: Machine-readable code identifying the requirement.
+          example: address-change-proof
+        reason:
+          type: string
+          maxLength: 1000
+          minLength: 1
+          description: Human-readable explanation of why the document is needed.
+          example: A supporting document is required to update the postal address.
+      required:
+        - code
+        - reason
+        - accepted_document_types
+    WithServiceRequests:
+      type: object
+      title: With Service Requests
+      description: |
+        Mixin merged (via `allOf`) into a resource's `_embedded` namespace.
+        Contributes the list of service requests created or updated by the
+        latest mutation on the parent resource. A single mutation may trigger
+        several reviews at once (e.g. an individual update touching name,
+        address and bank account), hence a list rather than a single entry.
+
+        Conventions:
+        - The key is **absent** from `_embedded` when no review is required.
+        - When present, it is a non-empty list. Each entry exposes the strict
+          minimum needed for navigation: id, type, status, and the HAL `self`
+          link. The full request detail is obtained by following `_links.self`.
+      properties:
+        service_requests:
+          type: array
+          readOnly: true
+          maxItems: 10
+          description: |
+            Embedded previews of the service requests created or updated by the
+            latest mutation on the parent resource. Absent from `_embedded`
+            when no review is required; otherwise a non-empty list.
+          items:
+            $ref: '#/components/schemas/ServiceRequestSummary'
+    ServiceRequestResource:
+      type: object
+      title: Service Request Resource
+      description: |
+        Partner-facing read model for a service request. Returned by
+        `GET /{parent}/{parent_id}/service-requests/{service_request_id}` on the
+        Contract and Person APIs.
+
+        Type-specific fields (e.g. `beneficiary_clause_draft`, `fund_origin`)
+        are carried by per-API extensions composed via `allOf`.
+      properties:
+        _links:
+          allOf:
+            - $ref: '#/components/schemas/HalSelfLinks'
+            - type: object
+              description: HAL navigation links.
+              properties:
+                parent:
+                  $ref: '#/components/schemas/HalLink'
+        documents:
+          type: array
+          maxItems: 50
+          readOnly: true
+          description: Documents already attached to the service request.
+          items:
+            $ref: '#/components/schemas/AttachedDocument'
+        id:
+          type: string
+          format: uuid
+          minLength: 36
+          maxLength: 36
+          readOnly: true
+          description: Unique identifier of the service request.
+          example: 5b1a8119-4e24-4460-a126-c79f8ed0017f
+        previous_outcome:
+          oneOf:
+            - $ref: '#/components/schemas/PreviousOutcome'
+            - type: 'null'
+          readOnly: true
+          description: |
+            Outcome of the previous version of the service request when the
+            current one is the result of a `resubmit` action. `null` on the
+            first submission.
+        rejection_reasons:
+          type: array
+          maxItems: 50
+          readOnly: true
+          description: |
+            Human-readable reasons returned when the service request is
+            `REJECTED`. Empty array when not rejected.
+          items:
+            $ref: '#/components/schemas/RejectionReason'
+        required_documents:
+          type: array
+          maxItems: 50
+          readOnly: true
+          description: Documents expected to fulfil the request.
+          items:
+            $ref: '#/components/schemas/DocumentRequirement'
+        status:
+          allOf:
+            - $ref: '#/components/schemas/ServiceRequestStatus'
+          readOnly: true
+        type:
+          allOf:
+            - $ref: '#/components/schemas/ServiceRequestType'
+          readOnly: true
+        version:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 1000
+          readOnly: true
+          description: |
+            Incremented every time the service request is resubmitted after a
+            rejection. The original submission is version `1`.
+          example: 1
+      required:
+        - id
+        - type
+        - status
+        - version
+        - required_documents
+        - documents
+        - rejection_reasons
+        - _links
+    AttachedDocument:
+      type: object
+      title: Attached Document
+      description: |
+        A document already attached to a service request, with its type and the HAL
+        `self` link to the document resource in the Document API.
+      properties:
+        _links:
+          $ref: '#/components/schemas/HalSelfLinks'
+        document_type:
+          type: string
+          maxLength: 100
+          minLength: 1
+          pattern: ^[A-Z][A-Z0-9_]*$
+          description: Document type as declared on upload.
+          example: PROOF_OF_ADDRESS
+        id:
+          type: string
+          format: uuid
+          minLength: 36
+          maxLength: 36
+          description: Identifier of the attached document (Document API).
+          example: 6f1a6b9d-3f3f-4f31-a2d7-8d8dc2e90b55
+      required:
+        - id
+        - document_type
+    RejectionReason:
+      type: object
+      title: Rejection Reason
+      description: |
+        A single human-readable reason returned when a service request is `REJECTED`,
+        paired with a machine-readable code.
+      properties:
+        code:
+          type: string
+          maxLength: 255
+          minLength: 1
+          pattern: ^[A-Z][A-Z0-9_]*$
+          description: Machine-readable reason code.
+          example: PROOF_OF_ADDRESS_ILLEGIBLE
+        message:
+          type: string
+          maxLength: 1000
+          minLength: 1
+          description: Human-readable explanation.
+          example: The submitted proof of address is illegible.
+      required:
+        - code
+        - message
+    PreviousOutcome:
+      type: string
+      title: Previous Outcome
+      description: |
+        Terminal outcome of the previous version of a service request before it
+        was resubmitted. Only non-approved terminal states are tracked here —
+        an approved request is never resubmitted.
+
+        - `REJECTED`: The previous version was rejected by the reviewer.
+        - `EXPIRED`: The previous version expired without resolution.
+      enum:
+        - REJECTED
+        - EXPIRED
+      example: REJECTED
+    DocumentReference:
+      type: object
+      title: Document Reference
+      description: |
+        Lightweight reference to a document: its identifier plus its type.
+      properties:
+        id:
+          type: string
+          format: uuid
+          minLength: 36
+          maxLength: 36
+          description: Identifier of the referenced document.
+          example: 6f1a6b9d-7c23-4f11-ae82-90b3c5d8e14a
+        type:
+          description: Type of the referenced document, from the shared `DocumentType` catalog.
+          allOf:
+            - $ref: '#/components/schemas/DocumentType'
+          example: PROOF_OF_ADDRESS
+      required:
+        - id
+        - type
+  examples:
+    AddressResource:
+      summary: Address resource, no review in flight
+      value:
+        address_type: PRINCIPAL
+        line1: 10 Main Street
+        line2: Building A, Apartment 42, 3rd floor
+        city: New York
+        state: NY
+        postal_code: '10001'
+        country_code: US
+        _links:
+          self:
+            href: /individuals/1f1a8119-4e24-4460-a126-c79f8ed0017f/addresses/PRINCIPAL
+            method: GET
+          individual:
+            href: /individuals/1f1a8119-4e24-4460-a126-c79f8ed0017f
+            method: GET
+    AddressUnderReview:
+      summary: Address resource with a pending ADDRESS_CHANGE service request
+      description: |
+        Response of `POST /individuals/{person_id}/addresses/{address_type}`
+        when the partner upserts an address on an `ENGAGED` individual. The
+        address listed in the response still reflects the value approved
+        prior to the upsert; the submitted address is held under the
+        auto-created `ADDRESS_CHANGE` service request, exposed as an entry in
+        `_embedded.service_requests` (follow `_links.self.href`).
+      value:
+        address_type: PRINCIPAL
+        line1: 10 Main Street
+        line2: Building A, Apartment 42, 3rd floor
+        city: New York
+        state: NY
+        postal_code: '10001'
+        country_code: US
+        _embedded:
+          service_requests:
+            - id: 7d2c9f63-3e72-46e5-bd1c-5d3f7494f210
+              type: ADDRESS_CHANGE
+              status: REQUIRES_INFORMATION
+              _links:
+                self:
+                  href: /service-requests/7d2c9f63-3e72-46e5-bd1c-5d3f7494f210
+                  method: GET
+        _links:
+          self:
+            href: /individuals/1f1a8119-4e24-4460-a126-c79f8ed0017f/addresses/PRINCIPAL
+            method: GET
+          individual:
+            href: /individuals/1f1a8119-4e24-4460-a126-c79f8ed0017f
+            method: GET
+    Addresses:
+      value:
+        _embedded:
+          addresses:
+            - address_type: PRINCIPAL
+              line1: 10 Main Street
+              line2: Building A, Apartment 42, 3rd floor
+              line3: Suite 200
+              line4: PO Box 12345
+              city: New York
+              state: NY
+              postal_code: '10001'
+              country_code: US
+              _links:
+                self:
+                  href: /individuals/1f1a8119-4e24-4460-a126-c79f8ed0017f/addresses/PRINCIPAL
+                  method: GET
+                individual:
+                  href: /individuals/1f1a8119-4e24-4460-a126-c79f8ed0017f
+                  method: GET
+            - address_type: FISCAL
+              line1: 25 Baker Street
+              line2: Floor 5, Office 12
+              city: London
+              state: Greater London
+              postal_code: W1U 8EW
+              country_code: GB
+              _links:
+                self:
+                  href: /individuals/1f1a8119-4e24-4460-a126-c79f8ed0017f/addresses/FISCAL
+                  method: GET
+                individual:
+                  href: /individuals/1f1a8119-4e24-4460-a126-c79f8ed0017f
+                  method: GET
+            - address_type: CORRESPONDENCE
+              line1: 3 Königstrasse
+              city: Berlin
+              state: Berlin
+              postal_code: '10115'
+              country_code: DE
+              _links:
+                self:
+                  href: /individuals/1f1a8119-4e24-4460-a126-c79f8ed0017f/addresses/CORRESPONDENCE
+                  method: GET
+                individual:
+                  href: /individuals/1f1a8119-4e24-4460-a126-c79f8ed0017f
+                  method: GET
+        _links:
+          self:
+            href: /individuals/1f1a8119-4e24-4460-a126-c79f8ed0017f/addresses
+            method: GET
+    BankAccountCollection:
+      summary: Bank Account collection example
+      value:
+        _embedded:
+          bank_accounts:
+            - id: b2d4f6e8-1a3c-5e7f-9b1d-3f5e7a9c1b3d
+              account_holder_name: Jean Dupont
+              iban: FR7630006000011234567890189
+              bic: BNPAFRPPXXX
+              currency: EUR
+              label: Compte courant principal
+              valid_from: 2025-01-15
+              valid_until: null
+              is_direct_debit_authorized: true
+              is_bank_transfer_authorized: true
+              change_reason_code: null
+              closure_reason_code: null
+              _links:
+                self:
+                  href: /individuals/1f1a8119-4e24-4460-a126-c79f8ed0017f/bank-accounts/b2d4f6e8-1a3c-5e7f-9b1d-3f5e7a9c1b3d
+                  method: GET
+                individual:
+                  href: /individuals/1f1a8119-4e24-4460-a126-c79f8ed0017f
+                  method: GET
+                collection:
+                  href: /individuals/1f1a8119-4e24-4460-a126-c79f8ed0017f/bank-accounts
+                  method: GET
+        _links:
+          self:
+            href: /individuals/1f1a8119-4e24-4460-a126-c79f8ed0017f/bank-accounts
+            method: GET
+    BankAccountCreate:
+      summary: Bank Account creation example
+      value:
+        account_holder_name: Jean Dupont
+        iban: FR7630006000011234567890189
+        bic: BNPAFRPPXXX
+        currency: EUR
+        label: Compte courant principal
+        valid_from: 2025-01-15
+        is_direct_debit_authorized: true
+        is_bank_transfer_authorized: true
+    BankAccountResource:
+      summary: Bank Account resource example
+      value:
+        id: b2d4f6e8-1a3c-5e7f-9b1d-3f5e7a9c1b3d
+        account_holder_name: Jean Dupont
+        iban: FR7630006000011234567890189
+        bic: BNPAFRPPXXX
+        currency: EUR
+        label: Compte courant principal
+        valid_from: 2025-01-15
+        valid_until: null
+        is_direct_debit_authorized: true
+        is_bank_transfer_authorized: true
+        change_reason_code: null
+        closure_reason_code: null
+        _links:
+          self:
+            href: /individuals/1f1a8119-4e24-4460-a126-c79f8ed0017f/bank-accounts/b2d4f6e8-1a3c-5e7f-9b1d-3f5e7a9c1b3d
+            method: GET
+          individual:
+            href: /individuals/1f1a8119-4e24-4460-a126-c79f8ed0017f
+            method: GET
+          collection:
+            href: /individuals/1f1a8119-4e24-4460-a126-c79f8ed0017f/bank-accounts
+            method: GET
+    BankAccountUnderReview:
+      summary: Bank account with a pending BANK_ACCOUNT_CHANGE service request
+      description: |
+        Response of `POST /individuals/{person_id}/bank-accounts` (create) or
+        `POST /individuals/{person_id}/bank-accounts/{bank_account_id}`
+        (update) when the partner submits a bank-account change on an
+        `ENGAGED` individual. The submitted account fields are persisted with
+        the resource and the auto-created `BANK_ACCOUNT_CHANGE` service
+        request is exposed as an entry in `_embedded.service_requests`
+        (follow `_links.self.href`).
+      value:
+        id: b2d4f6e8-1a3c-5e7f-9b1d-3f5e7a9c1b3d
+        account_holder_name: Marie Martin
+        iban: FR7630006000011234567890189
+        bic: AGRIFRPP
+        currency: EUR
+        label: Compte courant principal
+        valid_from: 2026-05-01
+        valid_until: null
+        is_direct_debit_authorized: true
+        is_bank_transfer_authorized: true
+        change_reason_code: null
+        closure_reason_code: null
+        _embedded:
+          service_requests:
+            - id: a05f2196-61a5-49b8-ef4f-805ba727b543
+              type: BANK_ACCOUNT_CHANGE
+              status: REQUIRES_INFORMATION
+              _links:
+                self:
+                  href: /service-requests/a05f2196-61a5-49b8-ef4f-805ba727b543
+                  method: GET
+        _links:
+          self:
+            href: /individuals/1f1a8119-4e24-4460-a126-c79f8ed0017f/bank-accounts/b2d4f6e8-1a3c-5e7f-9b1d-3f5e7a9c1b3d
+            method: GET
+          individual:
+            href: /individuals/1f1a8119-4e24-4460-a126-c79f8ed0017f
+            method: GET
+          collection:
+            href: /individuals/1f1a8119-4e24-4460-a126-c79f8ed0017f/bank-accounts
+            method: GET
+    DuplicatePersonConflict:
+      value:
+        type: https://pack-solutions.com/probs/duplicate-person
+        title: Duplicate Individual detected
+        status: 409
+        detail: An individual with the same first name, last name and date of birth already exists.
+        instance: /individuals
+        person_id: 1f1a8119-4e24-4460-a126-c79f8ed0017f
+        errors:
+          - code: ALREADY_EXISTS
+            detail: An individual with the same first name, last name and date of birth already exists.
+            pointer: /last_name
+        _links:
+          self:
+            href: /individuals/1f1a8119-4e24-4460-a126-c79f8ed0017f
+            method: GET
+    ConflictIncompatibleStatus:
+      value:
+        type: https://pack-solutions.com/probs/conflict
+        title: Operation not allowed for current person status
+        status: 409
+        detail: The individual is in `SUBMITTED` status. Only individuals in `DRAFT` can be submitted; individuals already submitted or engaged in a subscription cannot transition through this endpoint.
+        instance: /individuals/1f1a8119-4e24-4460-a126-c79f8ed0017f
+        errors:
+          - code: INVALID_STATE
+            detail: Person status `SUBMITTED` does not permit this operation.
+    ConflictPersonEngaged:
+      value:
+        type: https://pack-solutions.com/probs/conflict
+        title: Individual engaged in a contract
+        status: 409
+        detail: The individual is in `ENGAGED` status and is currently engaged in a contract. Engaged individuals cannot be archived; cancel or end the related contracts before retrying.
+        instance: /individuals/1f1a8119-4e24-4460-a126-c79f8ed0017f
+        errors:
+          - code: INVALID_STATE
+            detail: Person status `ENGAGED` does not permit archival.
+    FiscalInformation_CRS:
+      value:
+        fiscal_type: CRS
+        tax_identification_number:
+          tin_type: NUMBER
+          number: CRS-123456789
+        is_self_certification_present: true
+        date_of_self_certification: 2023-01-01
+        controlling_person:
+          siren: '987654321'
+          shareholding_percentage:
+            value: 1050
+            scale: 2
+        _links:
+          self:
+            href: /individuals/1f1a8119-4e24-4460-a126-c79f8ed0017f/fiscal-informations/CRS
+            method: GET
+          individual:
+            href: /individuals/1f1a8119-4e24-4460-a126-c79f8ed0017f
+            method: GET
+    FiscalInformation_FATCA:
+      value:
+        fiscal_type: FATCA
+        tax_identification_number:
+          tin_type: NUMBER
+          number: '123456789'
+        is_pre_existing_contract: true
+        controlling_person:
+          siren: '123456789'
+          shareholding_percentage:
+            value: 2550
+            scale: 2
+        us_indicia:
+          - US_CITIZENSHIP_OR_GREEN_CARD
+          - US_NATIONALITY_OR_DUAL_NATIONALITY
+        _links:
+          self:
+            href: /individuals/1f1a8119-4e24-4460-a126-c79f8ed0017f/fiscal-informations/FATCA
+            method: GET
+          individual:
+            href: /individuals/1f1a8119-4e24-4460-a126-c79f8ed0017f
+            method: GET
+    FiscalInformation_FrenchResidency:
+      value:
+        fiscal_type: FRENCH_RESIDENCY
+        _links:
+          self:
+            href: /individuals/1f1a8119-4e24-4460-a126-c79f8ed0017f/fiscal-informations/FRENCH_RESIDENCY
+            method: GET
+          individual:
+            href: /individuals/1f1a8119-4e24-4460-a126-c79f8ed0017f
+            method: GET
+    FiscalInformationCreate_FATCA:
+      summary: FATCA fiscal-information create payload
+      description: |
+        Request body for `POST /individuals/{person_id}/fiscal-informations/FATCA`.
+        The body's `fiscal_type` must match the `FATCA` value in the path.
+      value:
+        fiscal_type: FATCA
+        tax_identification_number:
+          tin_type: NUMBER
+          number: '123456789'
+        is_pre_existing_contract: true
+        controlling_person:
+          siren: '123456789'
+          shareholding_percentage:
+            value: 2550
+            scale: 2
+        us_indicia:
+          - US_CITIZENSHIP_OR_GREEN_CARD
+          - US_NATIONALITY_OR_DUAL_NATIONALITY
+    FiscalInformationCreate_CRS:
+      summary: CRS fiscal-information create payload
+      description: |
+        Request body for `POST /individuals/{person_id}/fiscal-informations/CRS`.
+        The body's `fiscal_type` must match the `CRS` value in the path.
+      value:
+        fiscal_type: CRS
+        tax_identification_number:
+          tin_type: NUMBER
+          number: CRS-123456789
+        is_self_certification_present: true
+        date_of_self_certification: 2023-01-01
+        controlling_person:
+          siren: '987654321'
+          shareholding_percentage:
+            value: 1050
+            scale: 2
+    FiscalInformationCreate_FrenchResidency:
+      summary: French residency fiscal-information create payload
+      description: |
+        Request body for `POST /individuals/{person_id}/fiscal-informations/FRENCH_RESIDENCY`.
+        The body's `fiscal_type` must match the `FRENCH_RESIDENCY` value in the path.
+        French residency carries no business data — the flag itself is the entire payload.
+      value:
+        fiscal_type: FRENCH_RESIDENCY
+    FiscalInformations:
+      value:
+        _links:
+          self:
+            href: /individuals/1f1a8119-4e24-4460-a126-c79f8ed0017f/fiscal-informations
+            method: GET
+        _embedded:
+          fiscal_informations:
+            - fiscal_type: FATCA
+              tax_identification_number:
+                tin_type: NUMBER
+                number: '123456789'
+              _links:
+                self:
+                  href: /individuals/1f1a8119-4e24-4460-a126-c79f8ed0017f/fiscal-informations/FATCA
+                  method: GET
+                individual:
+                  href: /individuals/1f1a8119-4e24-4460-a126-c79f8ed0017f
+                  method: GET
+            - fiscal_type: CRS
+              tax_identification_number:
+                tin_type: NUMBER
+                number: '987654321'
+              _links:
+                self:
+                  href: /individuals/1f1a8119-4e24-4460-a126-c79f8ed0017f/fiscal-informations/CRS
+                  method: GET
+                individual:
+                  href: /individuals/1f1a8119-4e24-4460-a126-c79f8ed0017f
+                  method: GET
+    IndividualCollection:
+      value:
+        _embedded:
+          individuals:
+            - id: 1f1a8119-4e24-4460-a126-c79f8ed0017f
+              first_name: Marie
+              last_name: Dubois
+              birth:
+                date_of_birth: 1990-02-03
+              civil_status: MRS
+              family_status: MARRIED
+              status: SUBMITTED
+              _links:
+                self:
+                  href: /individuals/1f1a8119-4e24-4460-a126-c79f8ed0017f
+                  method: GET
+                addresses:
+                  href: /individuals/1f1a8119-4e24-4460-a126-c79f8ed0017f/addresses
+                  method: GET
+                fiscal_informations:
+                  href: /individuals/1f1a8119-4e24-4460-a126-c79f8ed0017f/fiscal-informations
+                  method: GET
+                bank_accounts:
+                  href: /individuals/1f1a8119-4e24-4460-a126-c79f8ed0017f/bank-accounts
+                  method: GET
+                service_requests:
+                  href: /individuals/1f1a8119-4e24-4460-a126-c79f8ed0017f/service-requests
+                  method: GET
+            - id: 8e2a8119-4e24-4460-a126-c79f8ed0017f
+              first_name: Jean
+              last_name: Dupont
+              birth:
+                date_of_birth: 1985-05-15
+              status: DRAFT
+              _links:
+                self:
+                  href: /individuals/8e2a8119-4e24-4460-a126-c79f8ed0017f
+                  method: GET
+                addresses:
+                  href: /individuals/8e2a8119-4e24-4460-a126-c79f8ed0017f/addresses
+                  method: GET
+                fiscal_informations:
+                  href: /individuals/8e2a8119-4e24-4460-a126-c79f8ed0017f/fiscal-informations
+                  method: GET
+                bank_accounts:
+                  href: /individuals/8e2a8119-4e24-4460-a126-c79f8ed0017f/bank-accounts
+                  method: GET
+                service_requests:
+                  href: /individuals/8e2a8119-4e24-4460-a126-c79f8ed0017f/service-requests
+                  method: GET
+                submit:
+                  href: /individuals/8e2a8119-4e24-4460-a126-c79f8ed0017f/submit
+                  method: POST
+        _links:
+          self:
+            href: /individuals?page=1&limit=20
+            method: GET
+          first:
+            href: /individuals?page=1&limit=20
+            method: GET
+          last:
+            href: /individuals?page=1&limit=20
+            method: GET
+        page:
+          size: 20
+          total_elements: 2
+          total_pages: 1
+          number: 1
+    IndividualCreate:
+      value:
+        first_name: Marie
+        last_name: Dubois
+        birth:
+          birth_name: Dubois
+          date_of_birth: 1990-02-03
+          place_of_birth:
+            city: Dijon
+            postal_code: '21000'
+            country_code: FR
+        civil_status: MRS
+        family_status: MARRIED
+    IndividualResource:
+      value:
+        id: 1f1a8119-4e24-4460-a126-c79f8ed0017f
+        first_name: Marie
+        last_name: Dubois
+        birth:
+          birth_name: Dubois
+          date_of_birth: 1990-02-03
+          place_of_birth:
+            city: Dijon
+            postal_code: '21000'
+            country_code: FR
+        civil_status: MRS
+        family_status: CIVIL_PARTNERSHIP
+        social_security_number: '290022199999999'
+        external_reference: '7500000'
+        nationalities:
+          - FR
+        status: SUBMITTED
+        communication:
+          email: marie.dubois@gmail.com
+          mobile_phone: '+33678563476'
+        metadata:
+          customer_segment: healthcare_professional
+        _links:
+          self:
+            href: /individuals/IND-12345
+            method: GET
+          addresses:
+            href: /individuals/IND-12345/addresses
+            method: GET
+          fiscal_informations:
+            href: /individuals/IND-12345/fiscal-informations
+            method: GET
+          bank_accounts:
+            href: /individuals/IND-12345/bank-accounts
+            method: GET
+          service_requests:
+            href: /service-requests?target_resource_type=INDIVIDUAL&target_resource_id=IND-12345
+            method: GET
+    IndividualDraft:
+      summary: A newly created individual in DRAFT status
+      description: |
+        Response of `POST /individuals` or `GET /individuals/{person_id}` for
+        a fresh draft. Required fields (`first_name`, `last_name`,
+        `birth.date_of_birth`) are present; optional fields may still be
+        missing. The `submit` action link is exposed because the individual
+        is in `DRAFT`.
+      value:
+        id: 8e2a8119-4e24-4460-a126-c79f8ed0017f
+        first_name: Jean
+        last_name: Dupont
+        birth:
+          date_of_birth: 1985-05-15
+        status: DRAFT
+        _links:
+          self:
+            href: /individuals/8e2a8119-4e24-4460-a126-c79f8ed0017f
+            method: GET
+          addresses:
+            href: /individuals/8e2a8119-4e24-4460-a126-c79f8ed0017f/addresses
+            method: GET
+          fiscal_informations:
+            href: /individuals/8e2a8119-4e24-4460-a126-c79f8ed0017f/fiscal-informations
+            method: GET
+          bank_accounts:
+            href: /individuals/8e2a8119-4e24-4460-a126-c79f8ed0017f/bank-accounts
+            method: GET
+          service_requests:
+            href: /service-requests?target_resource_type=INDIVIDUAL&target_resource_id=8e2a8119-4e24-4460-a126-c79f8ed0017f
+            method: GET
+          submit:
+            href: /individuals/8e2a8119-4e24-4460-a126-c79f8ed0017f/submit
+            method: POST
+    IndividualEngaged:
+      summary: An individual ENGAGED on an accepted contract
+      description: |
+        Response of `GET /individuals/{person_id}` after a related contract
+        has been accepted. The individual is in `ENGAGED` (sticky — not
+        rolled back if the contract is later cancelled). The `submit` action
+        link is absent. Any mutation on a sensitive field triggers one or more
+        server-driven service requests, surfaced under
+        `_embedded.service_requests`.
+      value:
+        id: 1f1a8119-4e24-4460-a126-c79f8ed0017f
+        first_name: Marie
+        last_name: Dubois
+        birth:
+          birth_name: Dubois
+          date_of_birth: 1990-02-03
+          place_of_birth:
+            city: Dijon
+            postal_code: '21000'
+            country_code: FR
+        civil_status: MRS
+        family_status: CIVIL_PARTNERSHIP
+        social_security_number: '290022199999999'
+        external_reference: '7500000'
+        nationalities:
+          - FR
+        status: ENGAGED
+        communication:
+          email: marie.dubois@gmail.com
+          mobile_phone: '+33678563476'
+        metadata:
+          customer_segment: healthcare_professional
+        _links:
+          self:
+            href: /individuals/1f1a8119-4e24-4460-a126-c79f8ed0017f
+            method: GET
+          addresses:
+            href: /individuals/1f1a8119-4e24-4460-a126-c79f8ed0017f/addresses
+            method: GET
+          fiscal_informations:
+            href: /individuals/1f1a8119-4e24-4460-a126-c79f8ed0017f/fiscal-informations
+            method: GET
+          bank_accounts:
+            href: /individuals/1f1a8119-4e24-4460-a126-c79f8ed0017f/bank-accounts
+            method: GET
+          service_requests:
+            href: /service-requests?target_resource_type=INDIVIDUAL&target_resource_id=1f1a8119-4e24-4460-a126-c79f8ed0017f
+            method: GET
+    IndividualUnderReview:
+      summary: Engaged individual updated through several service requests
+      description: |
+        Response of `POST /individuals/{person_id}` when the partner submits a
+        payload touching several sensitive fields (here a `last_name` and an
+        `address`) on an `ENGAGED` individual. The server auto-creates one
+        service request per reviewed change — a `NAME_CHANGE` and an
+        `ADDRESS_CHANGE` — and exposes them as entries in
+        `_embedded.service_requests`; each entry's `_links.self.href` navigates
+        to the request detail, which carries the submitted values awaiting
+        approval. Direct field updates that did not need a review (e.g.
+        `email`) are applied immediately to the resource.
+      value:
+        id: 1f1a8119-4e24-4460-a126-c79f8ed0017f
+        first_name: Marie
+        last_name: Dubois
+        birth:
+          birth_name: Dubois
+          date_of_birth: 1990-02-03
+          place_of_birth:
+            city: Dijon
+            postal_code: '21000'
+            country_code: FR
+        civil_status: MRS
+        family_status: CIVIL_PARTNERSHIP
+        social_security_number: '290022199999999'
+        external_reference: '7500000'
+        nationalities:
+          - FR
+        status: ENGAGED
+        communication:
+          email: marie.martin@gmail.com
+          mobile_phone: '+33678563476'
+        metadata:
+          customer_segment: healthcare_professional
+        _embedded:
+          service_requests:
+            - id: 8e3d0f74-4f83-47f6-ce2d-6e4f8505f321
+              type: NAME_CHANGE
+              status: REQUIRES_INFORMATION
+              _links:
+                self:
+                  href: /individuals/1f1a8119-4e24-4460-a126-c79f8ed0017f/service-requests/8e3d0f74-4f83-47f6-ce2d-6e4f8505f321
+                  method: GET
+            - id: 7d2c9f63-3e72-46e5-bd1c-5d3f7494f210
+              type: ADDRESS_CHANGE
+              status: REQUIRES_INFORMATION
+              _links:
+                self:
+                  href: /individuals/1f1a8119-4e24-4460-a126-c79f8ed0017f/service-requests/7d2c9f63-3e72-46e5-bd1c-5d3f7494f210
+                  method: GET
+        _links:
+          self:
+            href: /individuals/1f1a8119-4e24-4460-a126-c79f8ed0017f
+            method: GET
+          addresses:
+            href: /individuals/1f1a8119-4e24-4460-a126-c79f8ed0017f/addresses
+            method: GET
+          fiscal_informations:
+            href: /individuals/1f1a8119-4e24-4460-a126-c79f8ed0017f/fiscal-informations
+            method: GET
+          bank_accounts:
+            href: /individuals/1f1a8119-4e24-4460-a126-c79f8ed0017f/bank-accounts
+            method: GET
+          service_requests:
+            href: /individuals/1f1a8119-4e24-4460-a126-c79f8ed0017f/service-requests
+            method: GET
+    IndividualUnderAddressReview:
+      summary: Engaged individual with a pending ADDRESS_CHANGE service request
+      description: |
+        Response of `POST /individuals/{person_id}` when the partner submits a
+        new principal address on an `ENGAGED` individual. The server creates
+        the auto-created `ADDRESS_CHANGE` service request and exposes it as an
+        entry in `_embedded.service_requests` (follow `_links.self.href`); the
+        submitted address awaiting approval is carried by that service request.
+      value:
+        id: 1f1a8119-4e24-4460-a126-c79f8ed0017f
+        first_name: Marie
+        last_name: Dubois
+        birth:
+          birth_name: Dubois
+          date_of_birth: 1990-02-03
+          place_of_birth:
+            city: Dijon
+            postal_code: '21000'
+            country_code: FR
+        civil_status: MRS
+        family_status: CIVIL_PARTNERSHIP
+        social_security_number: '290022199999999'
+        external_reference: '7500000'
+        nationalities:
+          - FR
+        status: ENGAGED
+        communication:
+          email: marie.martin@gmail.com
+          mobile_phone: '+33678563476'
+        metadata:
+          customer_segment: healthcare_professional
+        _embedded:
+          service_requests:
+            - id: 7d2c9f63-3e72-46e5-bd1c-5d3f7494f210
+              type: ADDRESS_CHANGE
+              status: REQUIRES_INFORMATION
+              _links:
+                self:
+                  href: /individuals/1f1a8119-4e24-4460-a126-c79f8ed0017f/service-requests/7d2c9f63-3e72-46e5-bd1c-5d3f7494f210
+                  method: GET
+        _links:
+          self:
+            href: /individuals/1f1a8119-4e24-4460-a126-c79f8ed0017f
+            method: GET
+          addresses:
+            href: /individuals/1f1a8119-4e24-4460-a126-c79f8ed0017f/addresses
+            method: GET
+          fiscal_informations:
+            href: /individuals/1f1a8119-4e24-4460-a126-c79f8ed0017f/fiscal-informations
+            method: GET
+          bank_accounts:
+            href: /individuals/1f1a8119-4e24-4460-a126-c79f8ed0017f/bank-accounts
+            method: GET
+          service_requests:
+            href: /individuals/1f1a8119-4e24-4460-a126-c79f8ed0017f/service-requests
+            method: GET
+    IndividualUnderFamilyStatusReview:
+      summary: Engaged individual with a pending FAMILY_STATUS_CHANGE service request
+      description: |
+        Response of `POST /individuals/{person_id}` when the partner submits a
+        `family_status` change (here from `CIVIL_PARTNERSHIP` to `MARRIED`) on
+        an `ENGAGED` individual. The server creates the auto-created
+        `FAMILY_STATUS_CHANGE` service request and exposes it as an entry in
+        `_embedded.service_requests` (follow `_links.self.href`); the submitted
+        value awaiting approval is carried by that service request.
+      value:
+        id: 1f1a8119-4e24-4460-a126-c79f8ed0017f
+        first_name: Marie
+        last_name: Dubois
+        birth:
+          birth_name: Dubois
+          date_of_birth: 1990-02-03
+          place_of_birth:
+            city: Dijon
+            postal_code: '21000'
+            country_code: FR
+        civil_status: MRS
+        family_status: CIVIL_PARTNERSHIP
+        social_security_number: '290022199999999'
+        external_reference: '7500000'
+        nationalities:
+          - FR
+        status: ENGAGED
+        communication:
+          email: marie.martin@gmail.com
+          mobile_phone: '+33678563476'
+        metadata:
+          customer_segment: healthcare_professional
+        _embedded:
+          service_requests:
+            - id: 9f4e1085-5094-48a7-df3e-7f5a9616a432
+              type: FAMILY_STATUS_CHANGE
+              status: REQUIRES_INFORMATION
+              _links:
+                self:
+                  href: /individuals/1f1a8119-4e24-4460-a126-c79f8ed0017f/service-requests/9f4e1085-5094-48a7-df3e-7f5a9616a432
+                  method: GET
+        _links:
+          self:
+            href: /individuals/1f1a8119-4e24-4460-a126-c79f8ed0017f
+            method: GET
+          addresses:
+            href: /individuals/1f1a8119-4e24-4460-a126-c79f8ed0017f/addresses
+            method: GET
+          fiscal_informations:
+            href: /individuals/1f1a8119-4e24-4460-a126-c79f8ed0017f/fiscal-informations
+            method: GET
+          bank_accounts:
+            href: /individuals/1f1a8119-4e24-4460-a126-c79f8ed0017f/bank-accounts
+            method: GET
+          service_requests:
+            href: /individuals/1f1a8119-4e24-4460-a126-c79f8ed0017f/service-requests
+            method: GET
+    IndividualUnderBankAccountReview:
+      summary: Engaged individual with a pending BANK_ACCOUNT_CHANGE service request
+      description: |
+        Response of `POST /individuals/{person_id}` when the partner submits a
+        new bank account on an `ENGAGED` individual. The server creates the
+        auto-created `BANK_ACCOUNT_CHANGE` service request and exposes it as
+        an entry in `_embedded.service_requests` (follow `_links.self.href`);
+        the submitted account awaiting approval is carried by that service
+        request. The SR
+        UUID is the same one used in
+        `PersonServiceRequestResourceBankAccountChange.yaml`, so following
+        `_links.self` lands on a coherent SR detail example.
+      value:
+        id: 1f1a8119-4e24-4460-a126-c79f8ed0017f
+        first_name: Marie
+        last_name: Dubois
+        birth:
+          birth_name: Dubois
+          date_of_birth: 1990-02-03
+          place_of_birth:
+            city: Dijon
+            postal_code: '21000'
+            country_code: FR
+        civil_status: MRS
+        family_status: CIVIL_PARTNERSHIP
+        social_security_number: '290022199999999'
+        external_reference: '7500000'
+        nationalities:
+          - FR
+        status: ENGAGED
+        communication:
+          email: marie.martin@gmail.com
+          mobile_phone: '+33678563476'
+        metadata:
+          customer_segment: healthcare_professional
+        _embedded:
+          service_requests:
+            - id: a05f2196-61a5-49b8-ef4f-805ba727b543
+              type: BANK_ACCOUNT_CHANGE
+              status: REQUIRES_INFORMATION
+              _links:
+                self:
+                  href: /individuals/1f1a8119-4e24-4460-a126-c79f8ed0017f/service-requests/a05f2196-61a5-49b8-ef4f-805ba727b543
+                  method: GET
+        _links:
+          self:
+            href: /individuals/1f1a8119-4e24-4460-a126-c79f8ed0017f
+            method: GET
+          addresses:
+            href: /individuals/1f1a8119-4e24-4460-a126-c79f8ed0017f/addresses
+            method: GET
+          fiscal_informations:
+            href: /individuals/1f1a8119-4e24-4460-a126-c79f8ed0017f/fiscal-informations
+            method: GET
+          bank_accounts:
+            href: /individuals/1f1a8119-4e24-4460-a126-c79f8ed0017f/bank-accounts
+            method: GET
+          service_requests:
+            href: /individuals/1f1a8119-4e24-4460-a126-c79f8ed0017f/service-requests
+            method: GET
+    IndividualUpdate:
+      value:
+        first_name: Marie-Sophie
+    UnprocessableSubmitMissingPrerequisites:
+      summary: Submit blocked — required sub-resources missing on the individual
+      value:
+        type: https://pack-solutions.com/probs/unprocessable-entity
+        title: Unprocessable Entity
+        status: 422
+        detail: The individual cannot be submitted because required data is missing. Provide the missing sub-resources via their intermediate endpoints and retry.
+        instance: /individuals/1f1a8119-4e24-4460-a126-c79f8ed0017f/submit
+        errors:
+          - code: MISSING
+            detail: A principal address is required before submission. Set it via `POST /individuals/{person_id}/addresses/PRINCIPAL`.
+          - code: MISSING
+            detail: The French residency fiscal information (`FRENCH_RESIDENCY`) is required before submission. Set it via `POST /individuals/{person_id}/fiscal-informations/FRENCH_RESIDENCY`.
+          - code: MISSING
+            detail: At least one bank account is required before submission. Create one via `POST /individuals/{person_id}/bank-accounts`.
+    UnprocessableSubmitMissingBankAccount:
+      summary: Submit blocked — no bank account registered on the individual
+      value:
+        type: https://pack-solutions.com/probs/unprocessable-entity
+        title: Unprocessable Entity
+        status: 422
+        detail: The individual cannot be submitted because no bank account is registered. Create one via `POST /individuals/{person_id}/bank-accounts` and retry.
+        instance: /individuals/1f1a8119-4e24-4460-a126-c79f8ed0017f/submit
+        errors:
+          - code: MISSING
+            detail: At least one bank account is required before submission. Create one via `POST /individuals/{person_id}/bank-accounts`.
+  parameters:
+    BankAccountId:
+      name: bank_account_id
+      in: path
+      description: Unique identifier of the bank account.
+      required: true
+      schema:
+        type: string
+        format: uuid
+        minLength: 36
+        maxLength: 36
+        example: b2d4f6e8-1a3c-5e7f-9b1d-3f5e7a9c1b3d
+    AddressType:
+      name: address_type
+      in: path
+      required: true
+      description: |
+        The type of address to create, retrieve, update, or delete.
+
+        - `PRINCIPAL`: Principal residence. A person must have a PRINCIPAL address.
+        - `CORRESPONDENCE`: Correspondence address. If not provided, the PRINCIPAL address is used by default.
+        - `FISCAL`: Fiscal residence. If not provided, the PRINCIPAL address is used by default.
+
+          enum:
+            - PRINCIPAL
+            - CORRESPONDENCE
+            - FISCAL
+          example: PRINCIPAL
+      schema:
+        $ref: '#/components/schemas/AddressType'
+    FiscalType:
+      name: fiscal_type
+      in: path
+      description: |
+        Type of fiscal information.
+
+        - `FATCA`: Foreign Account Tax Compliance Act. Required for US persons or entities with US fiscal ties.
+        - `CRS`: Common Reporting Standard (OECD). Required for fiscal residents outside France for automatic exchange of information.
+        - `FRENCH_RESIDENCY`: French fiscal residency flag. Default when no fiscal information has been registered for the person.
+      required: true
+      schema:
+        $ref: '#/components/schemas/FiscalType'
+    Limit:
+      name: limit
+      in: query
+      required: false
+      schema:
+        type: integer
+        format: int32
+        default: 20
+        minimum: 1
+        maximum: 100
+        example: 20
+      description: Maximum number of items per page.
+    Page:
+      name: page
+      in: query
+      required: false
+      schema:
+        type: integer
+        format: int32
+        default: 1
+        minimum: 1
+        maximum: 10000
+        example: 1
+      description: Page number (one-based).
+    PersonId:
+      name: person_id
+      in: path
+      description: Unique identifier of the person
+      required: true
+      schema:
+        type: string
+        format: uuid
+        minLength: 36
+        maxLength: 36
+        example: 1f1a8119-4e24-4460-a126-c79f8ed0017f
+  responses:
+    BadRequest:
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/BadRequest'
+          example:
+            value:
+              type: https://pack-solutions.com/probs/bad-request
+              title: Bad Request
+              status: 400
+              detail: The request body contains invalid or malformed fields.
+              errors:
+                - code: INVALID
+                  detail: The value provided is not a valid date format. Expected YYYY-MM-DD.
+                  pointer: /birth/date_of_birth
+                - code: INVALID
+                  detail: The value provided is not a valid email address.
+                  pointer: /communication/email
+                - code: MISSING_FIELD
+                  detail: The last_name field is required.
+                  pointer: /last_name
+      description: Bad Request
+    ContentTooLarge:
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ContentTooLarge'
+          example:
+            value:
+              type: https://pack-solutions.com/probs/content-too-large
+              title: Content Too Large
+              status: 413
+              detail: The request body exceeds the maximum allowed size of 256000 bytes.
+      description: Content Too Large
+    Forbidden:
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Forbidden'
+          example:
+            value:
+              type: https://pack-solutions.com/probs/forbidden
+              title: Forbidden
+              status: 403
+              detail: The server understood the request, but is refusing to fulfill it.
+      description: Forbidden
+    InternalServerError:
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/InternalServerError'
+          example:
+            value:
+              type: https://pack-solutions.com/probs/internal-server-error
+              title: Internal Server Error
+              status: 500
+              detail: The server encountered an unexpected condition which prevented it from fulfilling the request.
+      description: Internal Server Error
+    NoContent:
+      description: No Content
+    NotFound:
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/NotFound'
+          example:
+            value:
+              type: https://pack-solutions.com/probs/not-found
+              title: Not Found
+              status: 404
+              detail: The server has not found anything matching the Request-URI.
+      description: Not Found
+    Unauthorized:
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Unauthorized'
+          example:
+            value:
+              type: https://pack-solutions.com/probs/unauthorized
+              title: Unauthorized
+              status: 401
+              detail: The request requires user authentication.
+      description: Unauthorized
+    UnprocessableEntity:
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/UnprocessableEntity'
+          example:
+            value:
+              type: https://pack-solutions.com/probs/unprocessable-entity
+              title: Unprocessable Entity
+              status: 422
+              detail: The request was well-formed but was unable to be followed due to semantic errors.
+              errors:
+                - code: BUSINESS_RULE_VIOLATION
+                  detail: The individual cannot be submitted because required fields are missing.
+                  pointer: /status
+                - code: MISSING_FIELD
+                  detail: The date of birth is required before submission.
+                  pointer: /birth/date_of_birth
+      description: Unprocessable Entity
+  securitySchemes:
+    oauth2:
+      type: oauth2
+      flows:
+        clientCredentials:
+          tokenUrl: https://iam.pack-solutions.com/oauth/token
+          scopes:
+            persons:read: read access to persons
+            persons:write: write access to persons

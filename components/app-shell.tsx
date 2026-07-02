@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useSearchParams } from "next/navigation";
 import {
   FolderOpen,
   Menu,
@@ -29,6 +29,8 @@ import {
 } from "@/components/ui/tooltip";
 import ThemeToggle from "@/components/ThemeToggle";
 import { apiTheme } from "@/lib/design";
+import { listApiSummaries, SPECS_CHANGED_EVENT } from "@/lib/specs";
+import { copySpecs } from "@/lib/sync";
 import { cn } from "@/lib/utils";
 
 export interface NavApiSummary {
@@ -36,27 +38,34 @@ export interface NavApiSummary {
   title: string;
 }
 
-interface Props {
-  apis: NavApiSummary[];
-  children: React.ReactNode;
-}
-
 // Two-tier shell:
 //   • sticky top bar     — brand, global actions (sync, theme), mobile hamburger
 //   • desktop sidebar    — APIs + Tools navigation
-// On mobile the sidebar collapses behind the hamburger; the top bar keeps
-// brand + theme visible. Tuned for the professional B2B look — no
-// gradients on chrome, low-chroma surfaces.
-export function AppShell({ apis, children }: Props) {
+// The API list is loaded client-side from the spec store and refreshed on
+// SPECS_CHANGED_EVENT (fired after any sync busts the cache).
+export function AppShell({ children }: { children: React.ReactNode }) {
   const [open, setOpen] = React.useState(false);
+  const [apis, setApis] = React.useState<NavApiSummary[]>([]);
+
+  React.useEffect(() => {
+    let cancelled = false;
+    const load = () => {
+      listApiSummaries().then((list) => {
+        if (!cancelled) setApis(list.map((a) => ({ id: a.id, title: a.title })));
+      });
+    };
+    load();
+    window.addEventListener(SPECS_CHANGED_EVENT, load);
+    return () => {
+      cancelled = true;
+      window.removeEventListener(SPECS_CHANGED_EVENT, load);
+    };
+  }, []);
+
   return (
     <TooltipProvider delayDuration={200}>
       <div className="flex min-h-screen flex-col">
-        <TopBar
-          apis={apis}
-          mobileOpen={open}
-          onMobileOpenChange={setOpen}
-        />
+        <TopBar apis={apis} mobileOpen={open} onMobileOpenChange={setOpen} />
         <div className="flex flex-1 flex-col md:flex-row">
           <aside className="bg-sidebar text-sidebar-foreground border-sidebar-border hidden w-64 shrink-0 flex-col border-r md:flex">
             <NavBody apis={apis} />
@@ -134,20 +143,17 @@ function SyncButton() {
     if (busy) return;
     setBusy(true);
     try {
-      const res = await fetch("/api/sync-specs", { method: "POST" });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        toast.error("Synchronisation échouée", {
-          description: data?.error_description ?? `HTTP ${res.status}`,
+      const result = await copySpecs();
+      if (result.missing) {
+        toast.error("Synchronisation impossible", {
+          description:
+            "Aucun dossier source configuré. Renseignez-le dans Paramètres.",
         });
         return;
       }
-      const count =
-        typeof data?.copied === "number"
-          ? `${data.copied} spec${data.copied > 1 ? "s" : ""}`
-          : "Specs";
-      toast.success(`${count} synchronisée(s)`, {
-        description: data?.source ?? undefined,
+      const n = result.copied.length;
+      toast.success(`${n} spec${n > 1 ? "s" : ""} synchronisée(s)`, {
+        description: result.source || undefined,
       });
     } catch (e) {
       toast.error("Synchronisation échouée", {
@@ -182,14 +188,27 @@ function NavBody({
   apis: NavApiSummary[];
   onNavigate?: () => void;
 }) {
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
+  // An API is "active" while viewing its endpoint list or one of its endpoints.
+  const activeApiId =
+    pathname === "/api-view"
+      ? searchParams.get("id")
+      : pathname === "/endpoint"
+        ? searchParams.get("api")
+        : null;
+
   return (
     <div className="flex h-full flex-col">
       <ScrollArea className="flex-1 px-3 pt-4 pb-3">
         <Section title="APIs">
           {apis.length === 0 ? (
             <p className="text-muted-foreground px-2 py-1 text-xs">
-              Aucune spec trouvée. Lancez{" "}
-              <code className="bg-muted rounded px-1">npm run sync-specs</code>.
+              Aucune spec trouvée. Utilisez le bouton de synchronisation ou{" "}
+              <Link href="/settings" className="underline">
+                Paramètres
+              </Link>
+              .
             </p>
           ) : (
             apis.map((api) => {
@@ -197,10 +216,11 @@ function NavBody({
               return (
                 <NavLink
                   key={api.id}
-                  href={`/${api.id}`}
+                  href={`/api-view?id=${encodeURIComponent(api.id)}`}
                   label={api.title}
                   icon={theme.icon}
                   iconBg={cn(theme.bg, theme.text)}
+                  active={activeApiId === api.id}
                   onNavigate={onNavigate}
                 />
               );
@@ -213,12 +233,14 @@ function NavBody({
             href="/collections"
             label="Import Bruno"
             icon={FolderOpen}
+            active={pathname === "/collections"}
             onNavigate={onNavigate}
           />
           <NavLink
             href="/settings"
             label="Paramètres"
             icon={SettingsIcon}
+            active={pathname === "/settings"}
             onNavigate={onNavigate}
           />
         </Section>
@@ -291,16 +313,16 @@ function NavLink({
   label,
   icon: Icon,
   iconBg,
+  active,
   onNavigate,
 }: {
   href: string;
   label: string;
   icon: LucideIcon;
   iconBg?: string;
+  active: boolean;
   onNavigate?: () => void;
 }) {
-  const pathname = usePathname();
-  const active = pathname === href || pathname.startsWith(href + "/");
   return (
     <Tooltip>
       <TooltipTrigger asChild>

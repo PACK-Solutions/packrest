@@ -1,0 +1,2726 @@
+openapi: 3.1.2
+info:
+  x-internal: true
+  title: Service Request API
+  description: |
+    # Overview
+    The Service Request API is an **internal** API used exclusively by
+    the manager PACK back-office. It is **not exposed to partner
+    integrators**; partner-facing endpoints for service requests are
+    nested under the Contract and Person APIs.
+
+    Partner integrations interact with service requests implicitly:
+    public mutations on Contract, Person and Premium resources return
+    `200`/`201`/`202` with an embedded `service_requests` preview list when
+    one or more reviews are triggered. The full lifecycle (decision,
+    cancellation, document attachment) is then handled either by the
+    reviewer through this API or by the partner through the
+    appropriate Contract/Person sub-resource (`…/service-requests/{id}`).
+
+    ## Core Concepts
+
+    ### What is a Service Request?
+    A service request is a **workflow object** that materializes a request for a business operation that
+    cannot be applied immediately. It carries:
+    - The **intent** (type of operation and proposed changes)
+    - The **target resource** (individual, contract, premium, etc.)
+    - The **requirements** (missing documents or information)
+    - The **decision** (approval or rejection by a reviewer)
+    - A full **audit trail** of events
+
+    A service request does **not** modify the target resource directly. Once approved, the change is
+    applied to the target resource.
+
+    ### Lifecycle and Status
+    Every service request follows a defined lifecycle. The `status` field is server-computed and
+    cannot be set manually.
+
+    Possible statuses:
+    - `REQUIRES_INFORMATION`: Missing documents or information from the requester.
+    - `UNDER_REVIEW`: All required information provided, awaiting decision.
+    - `APPROVED`: Approved by a reviewer. The change can now be applied to the target resource.
+    - `REJECTED`: Rejected by a reviewer.
+    - `CANCELLED`: Cancelled by the requester or a reviewer.
+    - `EXPIRED`: Expired due to inactivity while in `REQUIRES_INFORMATION` status.
+
+    ### Lifecycle Transitions
+    - *(creation)* → `REQUIRES_INFORMATION`: When the caller-supplied `requirements[]` is non-empty at creation time.
+    - *(creation)* → `UNDER_REVIEW`: When the caller-supplied `requirements[]` is empty at creation time.
+    - `REQUIRES_INFORMATION` → `UNDER_REVIEW`: When all `requirements[]` entries are satisfied.
+    - `UNDER_REVIEW` → `REQUIRES_INFORMATION`: Via `POST /service-requests/{id}/decisions` with `outcome: RETURNED_FOR_INFORMATION` and one or more new `requirements[]` entries (rejected document, inconsistent field, additional document requested). Non-terminal: no `Resolution` is recorded; the reviewer may decide again later.
+    - `UNDER_REVIEW` → `APPROVED`: Via `POST /service-requests/{id}/decisions` with `outcome: APPROVED`. Terminal; `Resolution` populated.
+    - `UNDER_REVIEW` → `REJECTED`: Via `POST /service-requests/{id}/decisions` with `outcome: REJECTED` and at least one `rejection_reason`. Terminal; `Resolution` populated.
+    - `REQUIRES_INFORMATION` or `UNDER_REVIEW` → `CANCELLED`: Via `POST /service-requests/{id}/cancel`.
+    - `REQUIRES_INFORMATION` → `EXPIRED`: Automatic after a configurable inactivity period.
+
+    ### Separation of Approval and Application
+    **Approval does not equal application.** An approved service request means the change has been validated,
+    but applying it to the target resource is a distinct step recorded separately from the approval.
+
+    This separation ensures:
+    - All standard business validations are applied during the modification
+    - Full traceability of the approval decision
+    - Resilience: if application fails, the approval remains valid
+
+    ### Requirements
+    When a service request is in `REQUIRES_INFORMATION` status, the `requirements[]` array lists
+    everything still needed or to correct. The SR stays in `REQUIRES_INFORMATION` while the array is
+    non-empty and transitions to `UNDER_REVIEW` automatically when the last entry is satisfied.
+
+    Each entry combines a `kind` (`DATA_FIELD` or `DOCUMENT`) with a `state` (`MISSING` or `INVALID`),
+    giving four cases:
+
+    - **Missing data field** (`kind=DATA_FIELD`, `state=MISSING`) — the field was never set. POST the
+      value to the service request endpoint (`POST /service-requests/{id}` on this API, or the
+      partner-facing equivalent); `pointer` locates the target field.
+    - **Invalid data field** (`kind=DATA_FIELD`, `state=INVALID`) — the submitted value was rejected.
+      POST a corrected value; `pointer` locates the field and `error_code` classifies the rejection.
+    - **Missing document** (`kind=DOCUMENT`, `state=MISSING`) — no document has been uploaded yet.
+      Attach an existing document via `POST /service-requests/{id}/documents` (or the partner-facing
+      equivalent) with a type from `accepted_document_types`.
+    - **Invalid document** (`kind=DOCUMENT`, `state=INVALID`) — the document was rejected (by
+      automated validation or manual review). Attach a replacement; `error_code` classifies the rejection.
+
+    `state` is server-managed and appears only on read responses (never in a request body). The matching
+    entry is cleared automatically once the new field value or document is accepted.
+
+    `requirements[]` is **exclusive** to service request responses. Public
+    business resources (`Contract`, `Premium`, `PeriodicPremium`, `Individual`)
+    do not carry this array; their own missing-data conditions surface as
+    synchronous `422 Unprocessable Entity` errors on the mutation that needs them.
+
+    ## Creating a Service Request
+
+    Service requests can be created in two complementary ways:
+
+    1. **Explicitly** via `POST /service-requests` on this API. The caller
+       supplies the SR `type`, a `target_resource` (kind + id), the
+       initial `requirements[]` set (may be empty), and any
+       business-specific data inside the opaque `payload` object. The
+       server validates the type/target pairing, does **not** interpret
+       or validate `payload`, and persists the SR. Initial status is
+       derived from `requirements[]`: `REQUIRES_INFORMATION` when
+       non-empty, `UNDER_REVIEW` otherwise. Documents are attached after
+       creation via `POST /service-requests/{id}/documents` (attaching a
+       document auto-clears a matching `DOCUMENT` requirement).
+    2. **As a side effect** of standard mutations on the public APIs
+       (`contract`, `individual`, `premium`). For ergonomic reasons,
+       certain partner-facing mutations auto-create the matching SR — for
+       example:
+       - `POST /contracts/{contract_id}/submit` → `CONTRACT_SUBSCRIPTION`
+       - `POST /contracts/{contract_id}/one-time-premiums` (AML-triggered) → `PREMIUM_PAYMENT`
+       - `POST /contracts/{contract_id}` on an `ACCEPTED` contract with sensitive fields → `BENEFICIARY_CLAUSE_CHANGE`
+       - `POST /individuals/{person_id}` on an `ENGAGED` individual with sensitive fields → `ADDRESS_CHANGE` / `NAME_CHANGE` / …
+       - `POST /contracts/{contract_id}/service-requests` with type `CONTRACT_RENUNCIATION` (the only SR type a partner can initiate via the public Contract API)
+
+    Both paths produce SRs with the same shape and lifecycle: only the
+    entry point differs.
+
+    ### Canonical flow
+
+    1. A service request is created either explicitly via `POST /service-requests` or as a side effect of a mutation on a public resource (Contract, Person, Premium).
+    2. When the SR is spawned by a public-API mutation, the server applies the change directly when allowed; otherwise it exposes the SR preview as an entry in the returned resource's `_embedded.service_requests` list.
+    3. The partner uploads required documents via the dedicated SR sub-endpoint
+       (e.g. `POST /contracts/{contract_id}/service-requests/{service_request_id}/documents`); the
+       service request automatically clears matching entries in `requirements[]` when documents are
+       uploaded.
+    4. Reviewers track and decide service requests via this API (`GET /service-requests/{id}`,
+       `POST /service-requests/{id}/decisions`).
+    5. Once approved, the server applies the change to the target resource and emits the relevant
+       webhook events on the public catalog (`contract.accepted`, `premium-review.approved`, …).
+
+    ### Two views of the same request
+    The same service request exists under two representations:
+
+    | View | Endpoint | Audience | Payload |
+    |------|----------|----------|---------|
+    | Partner-facing | `/{resource}/{id}/service-requests/{sr_id}` | Partner / partner | Business-specific fields at top level, business document types |
+    | Reviewer-facing | `/service-requests/{id}` | Back-office reviewer | Opaque `payload` carrying the business-specific data, generic document types |
+
+    The reviewer-facing view exposes `payload` as-is — this internal API
+    does not interpret or validate it.
+
+    ## Applying an Approved Change
+
+    Once a service request is approved, the change is applied via the standard business endpoint.
+    The request body must include a `service_request_id` field referencing the approved service request.
+
+    The server validates that:
+    - The caller has the required role (reviewer)
+    - The referenced service request exists and is `APPROVED`
+    - The service request targets the same resource
+    - The submitted data matches the approved change
+
+    If the service request is not yet approved, the API returns `409 Conflict` with type
+    `service-request-not-approved`.
+
+    ## Security and Authentication
+    The API is secured using **OAuth 2.0** (Client Credentials flow).
+
+    ### Scopes
+    - `service-requests:read`: Read access to service requests, documents, and events.
+    - `service-requests:write`: Attach documents to service requests.
+    - `service-requests:admin`: Create service requests, cancel them, and record decisions (back-office only).
+
+    ## Navigation & HAL
+    This API follows **HAL (Hypertext Application Language)** principles. Resources include a `_links`
+    object for programmatic navigation. Available links depend on the current status of the service request.
+  version: 0.0.59
+  contact:
+    email: support@pack-solutions.com
+    name: Pack Solutions Support
+  license:
+    name: Proprietary
+    url: https://pack-solutions.com/license
+security:
+  - oauth2:
+      - service-requests:read
+      - service-requests:write
+tags:
+  - name: service-request
+    description: |
+      Operations for listing and retrieving service requests.
+      These endpoints are accessible to partner integrators and back-office reviewers.
+  - name: service-request-document
+    description: |
+      Operations for consulting and attaching documents on a service request.
+      Includes listing documents, retrieving an individual attachment, and
+      attaching an existing document (by reference) to the service request.
+  - name: service-request-event
+    description: |
+      Read-only operations for consulting the audit trail of a service request.
+      Events are immutable, system-generated, and ordered chronologically.
+  - name: service-request-admin
+    description: |
+      **INTERNAL — Back-office admin operations.**
+
+      These endpoints require the `service-requests:admin` scope and are
+      restricted to reviewer back-office tooling. They are **not exposed to
+      partner integrators**.
+paths:
+  /service-requests:
+    get:
+      operationId: listServiceRequests
+      summary: List service requests
+      description: |
+        Retrieve a paginated list of service requests.
+
+        This endpoint provides the **reviewer-facing** view of all service requests across all target resources.
+        It supports filtering by type, status, and target resource to support back-office workflows.
+      tags:
+        - service-request
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/ServiceRequestTypeQuery'
+        - $ref: '#/components/parameters/ServiceRequestStatusQuery'
+        - $ref: '#/components/parameters/TargetResourceTypeQuery'
+        - $ref: '#/components/parameters/TargetResourceIdQuery'
+      responses:
+        '200':
+          description: A paginated list of service requests.
+          content:
+            application/hal+json:
+              schema:
+                $ref: '#/components/schemas/ServiceRequestCollection'
+              examples:
+                serviceRequestCollection:
+                  $ref: '#/components/examples/ServiceRequestCollection'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+    post:
+      operationId: createServiceRequest
+      summary: Create a service request
+      description: |
+        Create a service request explicitly.
+
+        The body carries the SR `type`, the `target_resource` (kind + id),
+        the initial `requirements[]` set (may be empty), and any
+        business-specific data inside the opaque `payload` object. The
+        server does not interpret or validate `payload`; it stores and
+        returns it as-is. Initial status is derived from `requirements[]`:
+        `REQUIRES_INFORMATION` when non-empty, `UNDER_REVIEW` otherwise.
+
+        Service requests are also auto-created server-side as a side effect
+        of certain mutations on the public APIs (`contract`, `individual`,
+        `premium`) — this explicit endpoint and the auto-spawn path produce
+        SRs with the same shape and lifecycle.
+
+        Documents are attached after creation via
+        `POST /service-requests/{id}/documents`.
+
+        ### Restrictions
+        - `target_resource.type` must be compatible with the SR type
+          (`ADDRESS_CHANGE`/`NAME_CHANGE`/`FAMILY_STATUS_CHANGE`/
+          `BANK_ACCOUNT_CHANGE` → `INDIVIDUAL`;
+          `BENEFICIARY_CLAUSE_CHANGE`/`CONTRACT_SUBSCRIPTION`/
+          `CONTRACT_RENUNCIATION` → `CONTRACT`;
+          `PREMIUM_PAYMENT` → `PREMIUM` or `PERIODIC_PREMIUM`). Other
+          combinations return `422 Unprocessable Entity`.
+        - The referenced target resource must exist; otherwise `404 Not Found`.
+      tags:
+        - service-request-admin
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ServiceRequestCreate'
+            examples:
+              address_change:
+                $ref: '#/components/examples/ServiceRequestCreateAddressChange'
+              contract_renunciation:
+                $ref: '#/components/examples/ServiceRequestCreateContractRenunciation'
+              contract_subscription:
+                $ref: '#/components/examples/ServiceRequestCreateContractSubscription'
+              premium_payment_subscription:
+                $ref: '#/components/examples/ServiceRequestCreatePremiumPaymentSubscription'
+      responses:
+        '201':
+          description: Service request created successfully.
+          headers:
+            Location:
+              schema:
+                type: string
+                format: uri-reference
+                maxLength: 2048
+              description: URI of the newly created service request.
+          content:
+            application/hal+json:
+              schema:
+                $ref: '#/components/schemas/ServiceRequestResource'
+              examples:
+                serviceRequestResource:
+                  $ref: '#/components/examples/ServiceRequestResource'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '413':
+          $ref: '#/components/responses/ContentTooLarge'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+      security:
+        - oauth2:
+            - service-requests:admin
+  /service-requests/{service_request_id}:
+    get:
+      operationId: getServiceRequestById
+      summary: Retrieve a service request by id
+      description: |
+        Retrieve detailed information about a specific service request using its unique identifier.
+
+        This endpoint provides the **reviewer-facing** view, including:
+        - The full `target_resource` reference (type, id, href)
+        - The current `status` and `requirements[]` (when non-terminal)
+        - The opaque `payload` with the business-specific data of the request
+        - The `rejections[]` array (populated once the SR is `REJECTED`, empty otherwise)
+        - HAL navigation links to the `target_resource`, `documents`, `events`, `decisions`, `attach_document`, and `cancel` (action) relations
+      tags:
+        - service-request
+      parameters:
+        - $ref: '#/components/parameters/ServiceRequestId'
+      responses:
+        '200':
+          description: Service request details retrieved successfully.
+          content:
+            application/hal+json:
+              schema:
+                $ref: '#/components/schemas/ServiceRequestResource'
+              examples:
+                serviceRequestResource:
+                  $ref: '#/components/examples/ServiceRequestResource'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+  /service-requests/{service_request_id}/decisions:
+    post:
+      operationId: decideServiceRequest
+      summary: Record a decision on a service request
+      description: |
+        Approve, reject, or return a service request for additional information.
+        The request body is polymorphic and selected by the `outcome`
+        discriminator — three variants share this endpoint:
+
+        - **Approve** (`DecisionApprove`, `outcome=APPROVED`) — closes the SR.
+          Transitions to `APPROVED`; `rejections[]` stays empty.
+          The approved change is then applied to the target resource.
+        - **Reject** (`DecisionReject`, `outcome=REJECTED`) — closes the SR
+          with one or more structured `rejection_reasons`. Transitions to
+          `REJECTED`; `rejections[]` on the SR is populated with the provided
+          reasons.
+        - **Return for information**
+          (`DecisionReturn`, `outcome=RETURNED_FOR_INFORMATION`) — sends the
+          SR back to the partner with new `requirements[]` entries (rejected
+          document, inconsistent field, additional document requested).
+          **Non-terminal**: transitions back to `REQUIRES_INFORMATION`,
+          `rejections[]` stays empty, the SR may later be approved or
+          rejected. Fires `individual.review-information-required` /
+          `premium-review.information-required` webhooks (depending on the
+          target resource type) so the partner is notified to address the
+          new requirements.
+
+        In all three cases the response is the updated `ServiceRequestResource`
+        so the caller can observe the new status, requirements, and (when
+        applicable) rejections.
+
+        When the service request was created with a `callback_url`, the server
+        uses that host-less relative path to call back the owning business API
+        and update the targeted business object as part of recording the
+        decision. The `callback_url` is an internal routing detail and is never
+        returned on the SR resource.
+
+        ### Prerequisites
+        - The service request must be in `UNDER_REVIEW` status.
+        - The caller must have the `service-requests:admin` scope.
+
+        ### Restrictions
+        - Only service requests in `UNDER_REVIEW` status can receive a
+          decision (including a `RETURNED_FOR_INFORMATION` return).
+        - Calling this on a resolved service request (`APPROVED`, `REJECTED`,
+          `CANCELLED`, `EXPIRED`) returns `409 Conflict`.
+      tags:
+        - service-request-admin
+      parameters:
+        - $ref: '#/components/parameters/ServiceRequestId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DecisionCreate'
+            examples:
+              approved:
+                $ref: '#/components/examples/DecisionApproved'
+              rejected:
+                $ref: '#/components/examples/DecisionRejected'
+              returned:
+                $ref: '#/components/examples/DecisionReturned'
+      responses:
+        '200':
+          description: Decision recorded successfully. Returns the updated service request.
+          content:
+            application/hal+json:
+              schema:
+                $ref: '#/components/schemas/ServiceRequestResource'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/ContentTooLarge'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+      security:
+        - oauth2:
+            - service-requests:admin
+  /service-requests/{service_request_id}/cancel:
+    post:
+      operationId: cancelServiceRequest
+      summary: Cancel a service request
+      description: |
+        Cancel a service request that has not yet been resolved.
+
+        ### Prerequisites
+        The service request must be in `REQUIRES_INFORMATION` or `UNDER_REVIEW` status.
+
+        ### Behavior
+        The service request transitions to `CANCELLED` status. This action is irreversible.
+
+        ### Restrictions
+        - Only service requests in `REQUIRES_INFORMATION` or `UNDER_REVIEW` status can be cancelled.
+        - Calling this on a resolved service request (`APPROVED`, `REJECTED`, `CANCELLED`, `EXPIRED`)
+          will result in a `409 Conflict` error.
+      tags:
+        - service-request-admin
+      parameters:
+        - $ref: '#/components/parameters/ServiceRequestId'
+      responses:
+        '200':
+          description: Service request cancelled successfully. Returns the updated service request.
+          content:
+            application/hal+json:
+              schema:
+                $ref: '#/components/schemas/ServiceRequestResource'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+      security:
+        - oauth2:
+            - service-requests:admin
+  /service-requests/{service_request_id}/documents:
+    get:
+      operationId: listServiceRequestDocuments
+      summary: List documents of a service request
+      description: |
+        Retrieve the list of documents currently attached to a specific service request.
+      tags:
+        - service-request-document
+      parameters:
+        - $ref: '#/components/parameters/ServiceRequestId'
+      responses:
+        '200':
+          description: List of documents attached to the service request.
+          content:
+            application/hal+json:
+              schema:
+                $ref: '#/components/schemas/ServiceRequestDocuments'
+              examples:
+                documents:
+                  $ref: '#/components/examples/ServiceRequestDocuments'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+    post:
+      operationId: attachServiceRequestDocument
+      summary: Attach a document to a service request
+      description: |
+        Attach an **existing** document (from the Document API) to a service
+        request by reference. The binary content is not transferred here — the
+        request carries the `document_id` and the document `type`.
+
+        Attaching a document transitions a matching `DOCUMENT` entry in
+        `requirements[]` (matched on document `type`) from `MISSING` or
+        `INVALID` to `SUBMITTED`, and sets its `document_id`. The requirement
+        entry is never removed — its `state` evolves through the lifecycle.
+        When no requirement remains in `MISSING` or `INVALID` state, the
+        service request transitions from `REQUIRES_INFORMATION` to
+        `UNDER_REVIEW`.
+
+        Allowed only while the service request is in a non-terminal status
+        (`REQUIRES_INFORMATION` or `UNDER_REVIEW`).
+      tags:
+        - service-request-document
+      parameters:
+        - $ref: '#/components/parameters/ServiceRequestId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ServiceRequestDocumentAttach'
+            examples:
+              attachDocument:
+                $ref: '#/components/examples/ServiceRequestDocumentAttachRequest'
+      responses:
+        '201':
+          description: Document attached successfully.
+          headers:
+            Location:
+              schema:
+                type: string
+                format: uri-reference
+                maxLength: 2048
+              description: URI of the newly attached document.
+          content:
+            application/hal+json:
+              schema:
+                $ref: '#/components/schemas/ServiceRequestDocumentResource'
+              examples:
+                documentResource:
+                  $ref: '#/components/examples/ServiceRequestDocumentResource'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/ContentTooLarge'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+      security:
+        - oauth2:
+            - service-requests:write
+  /service-requests/{service_request_id}/events:
+    get:
+      operationId: listServiceRequestEvents
+      summary: List events of a service request
+      description: |
+        Retrieve the immutable audit trail of events for a specific service request.
+
+        Events are ordered chronologically and include all state transitions, document additions/removals,
+        and decisions. This endpoint is useful for auditing and troubleshooting.
+      tags:
+        - service-request-event
+      parameters:
+        - $ref: '#/components/parameters/ServiceRequestId'
+      responses:
+        '200':
+          description: List of events for the service request.
+          content:
+            application/hal+json:
+              schema:
+                $ref: '#/components/schemas/ServiceRequestEvents'
+              examples:
+                events:
+                  $ref: '#/components/examples/ServiceRequestEvents'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+components:
+  schemas:
+    HalLink:
+      type: object
+      title: HalLink
+      description: |
+        HAL link object. Minimal shape: an `href` (URI of the linked resource)
+        and the `method` to use when following it. Navigation and pagination
+        relations use `GET`; action relations use `POST` (or `DELETE` for
+        resource removal). The project does not use `PUT` or `PATCH`.
+      additionalProperties: false
+      required:
+        - href
+        - method
+      properties:
+        href:
+          type: string
+          format: uri-reference
+          maxLength: 2048
+          description: URI of the linked resource.
+          example: /resources/1f1a8119-4e24-4460-a126-c79f8ed0017f
+        method:
+          $ref: '#/components/schemas/HalLinkMethod'
+          description: HTTP method to use when following this link.
+    HalLinkMethod:
+      type: string
+      title: HalLinkMethod
+      description: |
+        HTTP method to use when following a HAL link. Restricted to
+        `GET` (navigation), `POST` (actions and mutations), and `DELETE`
+        (resource removal). The project does not use `PUT` or `PATCH`.
+      enum:
+        - GET
+        - POST
+        - DELETE
+      example: GET
+    HalPaginationLinks:
+      type: object
+      title: HalPaginationLinks
+      description: |
+        Pagination link relations used inside the `_links` of a collection envelope.
+        `first` and `last` are always present; `next` and `prev` are conditional on
+        page state. Compose with `HalSelfLinks` in every `*Collection._links`.
+      properties:
+        first:
+          $ref: '#/components/schemas/HalLink'
+          description: Link to the first page of the collection.
+        last:
+          $ref: '#/components/schemas/HalLink'
+          description: Link to the last page of the collection.
+        next:
+          $ref: '#/components/schemas/HalLink'
+          description: Link to the next page of the collection. Omitted on the last page.
+        prev:
+          $ref: '#/components/schemas/HalLink'
+          description: Link to the previous page of the collection. Omitted on the first page.
+      required:
+        - first
+        - last
+      example:
+        first:
+          href: /resources?page=1&size=20
+          method: GET
+        last:
+          href: /resources?page=5&size=20
+          method: GET
+        next:
+          href: /resources?page=3&size=20
+          method: GET
+        prev:
+          href: /resources?page=1&size=20
+          method: GET
+    HalSelfLinks:
+      type: object
+      title: HalSelfLinks
+      description: |
+        Base shape for every `_links` block. Guarantees that the `self` link is present
+        on every HAL Resource and Collection envelope. Compose with `HalPaginationLinks`
+        for paginated collections, or extend inline with action/navigation relations.
+      properties:
+        self:
+          $ref: '#/components/schemas/HalLink'
+          description: Link to the current resource.
+      required:
+        - self
+      example:
+        self:
+          href: /resources/1f1a8119-4e24-4460-a126-c79f8ed0017f
+          method: GET
+    PageMetadata:
+      type: object
+      title: PageMetadata
+      description: Pagination metadata for collection responses.
+      properties:
+        number:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 10000
+          description: Current page number (one-based).
+          example: 1
+        size:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 100
+          description: Number of items per page.
+          example: 20
+        total_elements:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 999999999999
+          description: Total number of items across all pages.
+          example: 100
+        total_pages:
+          type: integer
+          format: int32
+          minimum: 0
+          maximum: 10000
+          description: Total number of pages.
+          example: 5
+      required:
+        - size
+        - total_elements
+        - total_pages
+        - number
+    ProblemDetails:
+      type: object
+      title: Problem Details
+      description: A RFC 9457 compliant problem detail object
+      properties:
+        detail:
+          type: string
+          minLength: 1
+          maxLength: 1000
+          description: A human-readable explanation specific to this occurrence of the problem.
+          example: Your current balance is 30, but that costs 50.
+        instance:
+          type: string
+          format: uri-reference
+          maxLength: 2048
+          description: A URI reference that identifies the specific occurrence of the problem.
+          example: https://pack-solutions.com/accounts/12345/msgs/abc
+        status:
+          type: integer
+          format: int32
+          minimum: 100
+          maximum: 599
+          description: The HTTP status code generated by the origin server for this occurrence of the problem.
+          example: 403
+        title:
+          type: string
+          minLength: 1
+          maxLength: 255
+          description: A short, human-readable summary of the problem type.
+          example: You do not have enough credit.
+        type:
+          type: string
+          format: uri-reference
+          maxLength: 2048
+          description: A URI reference that identifies the problem type.
+          default: about:blank
+          example: https://pack-solutions.com/probs/out-of-stock
+    ValidationProblemDetails:
+      type: object
+      title: Validation Problem Details
+      description: |
+        An extension of RFC 9457 Problem Details that includes structured validation errors.
+        Used for responses where the server needs to communicate specific field-level or business-rule validation failures.
+      allOf:
+        - $ref: '#/components/schemas/ProblemDetails'
+        - type: object
+          properties:
+            errors:
+              type: array
+              maxItems: 100
+              description: A list of validation errors that occurred during request processing.
+              items:
+                $ref: '#/components/schemas/ValidationError'
+    ValidationError:
+      type: object
+      title: Validation Error
+      description: |
+        A single validation error entry describing a specific issue with the request.
+      properties:
+        code:
+          $ref: '#/components/schemas/ValidationErrorCode'
+        detail:
+          type: string
+          minLength: 1
+          maxLength: 1000
+          description: A human-readable explanation of the validation error.
+        pointer:
+          type: string
+          minLength: 1
+          maxLength: 500
+          pattern: ^/
+          description: |
+            A JSON Pointer (RFC 6901) to the field in the request body that caused the
+            error. For asynchronous validations surfaced on a service request (e.g.,
+            manual review rejections), the same convention is used in
+            `ServiceRequestRequirement.pointer` (entries with `kind=DATA_FIELD`). Consumer
+            rendering logic can therefore be shared between synchronous `422` errors and
+            asynchronous INVALID requirements.
+
+            When the offending field lives inside a HAL `_embedded` or `_links` block
+            (e.g., on a 409 conflict against a resource that exposes its sub-collections
+            via embedding), the pointer follows the **physical** structure of the HAL
+            response and includes the `_embedded`/`_links` segments — for example
+            `/_embedded/individuals/0/birth/date_of_birth`.
+      required:
+        - code
+        - detail
+    ValidationErrorCode:
+      type: string
+      title: Validation Error Code
+      description: |
+        A machine-readable error code indicating the type of validation failure.
+
+        Prefer the most specific code available. Use `UNPROCESSABLE` and `CUSTOM`
+        only as last-resort fallbacks when no specific code fits.
+
+        ### Presence (typically on 422 and 400)
+        - `MISSING`: A required resource or related entity is missing (e.g., referenced `subscriber_id` does not exist).
+        - `MISSING_FIELD`: A required field was not provided in the request body.
+
+        ### Shape (typically on 400 and 422)
+        - `INVALID`: The field value is invalid in a generic sense. Use a more specific code when applicable.
+        - `INVALID_FORMAT`: The field value does not match the expected format (e.g., not a valid IBAN, UUID, ISO-8601 date).
+        - `OUT_OF_RANGE`: The field value is well-formed but falls outside the accepted range — numeric bounds, temporal window, or string length.
+        - `INCONSISTENT`: The field is inconsistent with another field in the same payload (e.g., `allocations` rates do not sum to 100%, `date_of_end` before `date_of_start`).
+
+        ### State (typically on 409)
+        - `ALREADY_EXISTS`: The resource or value already exists and duplicates are not allowed.
+        - `INVALID_STATE`: The operation is incompatible with the current state of the resource (e.g., trying to cancel an already-executed premium, submitting a contract whose subscriber is still in `DRAFT`).
+
+        ### Business rules (typically on 422)
+        - `BUSINESS_RULE_VIOLATION`: A documented business rule is violated and no more specific code above fits (e.g., a regulatory threshold is crossed).
+
+        ### Fallbacks
+        - `UNPROCESSABLE`: Legacy generic code. **Prefer `BUSINESS_RULE_VIOLATION` or a state/shape code above.**
+        - `CUSTOM`: A custom validation error not covered by the standard codes.
+      enum:
+        - MISSING
+        - MISSING_FIELD
+        - INVALID
+        - INVALID_FORMAT
+        - OUT_OF_RANGE
+        - INCONSISTENT
+        - ALREADY_EXISTS
+        - INVALID_STATE
+        - BUSINESS_RULE_VIOLATION
+        - UNPROCESSABLE
+        - CUSTOM
+      example: MISSING_FIELD
+    BadRequest:
+      type: object
+      title: Bad Request
+      description: Bad Request (400)
+      allOf:
+        - $ref: '#/components/schemas/ValidationProblemDetails'
+    Unauthorized:
+      type: object
+      title: Unauthorized
+      description: Unauthorized (401)
+      allOf:
+        - $ref: '#/components/schemas/ProblemDetails'
+    Forbidden:
+      type: object
+      title: Forbidden
+      description: Forbidden (403)
+      allOf:
+        - $ref: '#/components/schemas/ProblemDetails'
+    NotFound:
+      type: object
+      title: Not Found
+      description: Not Found (404)
+      allOf:
+        - $ref: '#/components/schemas/ProblemDetails'
+    Conflict:
+      type: object
+      title: Conflict
+      description: Conflict (409)
+      allOf:
+        - $ref: '#/components/schemas/ValidationProblemDetails'
+    ContentTooLarge:
+      type: object
+      title: Content Too Large
+      description: Content Too Large (413). Returned when the request body exceeds the maximum allowed size enforced by the API (default 250 KiB / 256000 bytes). File-upload endpoints may apply a larger, content-specific limit.
+      allOf:
+        - $ref: '#/components/schemas/ProblemDetails'
+    UnprocessableEntity:
+      type: object
+      title: Unprocessable Entity
+      description: Unprocessable Entity (422)
+      allOf:
+        - $ref: '#/components/schemas/ValidationProblemDetails'
+    InternalServerError:
+      type: object
+      title: Internal Server Error
+      description: Internal Server Error (500)
+      allOf:
+        - $ref: '#/components/schemas/ProblemDetails'
+    CountryCode:
+      type: string
+      title: Country Code
+      description: ISO 3166-1 alpha-2 country code
+      minLength: 2
+      maxLength: 2
+      example: FR
+      pattern: ^[A-Z]{2}$
+    ServiceRequestRequirement:
+      type: object
+      title: Service Request Requirement
+      description: |
+        A single requirement that must be fulfilled for a service request to progress.
+
+        Service requests expose a flat `requirements: ServiceRequestRequirement[]`
+        array. When no entry remains in `MISSING` or `INVALID` state, the SR
+        auto-transitions from `REQUIRES_INFORMATION` to `UNDER_REVIEW`. Business resources (Contract,
+        Premium, Individual…) do **not** carry this model; missing fields on a
+        business resource surface as synchronous `422 Unprocessable Entity` errors
+        on the mutation that needs them.
+
+        Combines a `kind` (data field vs document) with a `state` to describe precisely
+        what the partner must provide or correct. Requirements persist throughout the full
+        lifecycle of the service request; only their `state` evolves.
+
+        `state` is server-managed: it is never accepted in a request body and is
+        present only on read responses.
+
+        Document requirement lifecycle (`kind=DOCUMENT`):
+        `MISSING` → *(document attached)* → `SUBMITTED` → *(reviewer accepts)* → `VALIDATED`
+                                                         → *(reviewer rejects)* → `INVALID`
+                                          → *(new document attached)* → `SUBMITTED`
+
+        Data field requirement lifecycle (`kind=DATA_FIELD`):
+        `MISSING` → *(field posted)* → `VALIDATED`
+        `INVALID` → *(corrected value posted)* → `VALIDATED`
+
+        The six cases:
+
+        - **Missing data field** — `kind=DATA_FIELD`, `state=MISSING`. POST the value to
+          the service request endpoint; `pointer` locates the target field.
+        - **Invalid data field** — `kind=DATA_FIELD`, `state=INVALID`. POST a corrected
+          value; `pointer` locates the field and `error_code` classifies the rejection
+          programmatically.
+        - **Missing document** — `kind=DOCUMENT`, `state=MISSING`. Upload a file via the
+          service request `documents` endpoint with a `document_type` from
+          `accepted_document_types`.
+        - **Submitted document** — `kind=DOCUMENT`, `state=SUBMITTED`. A document has been
+          attached and is awaiting manual review. `document` (its `id` and `type`) identifies
+          the attached document. The requirement no longer blocks the SR from entering `UNDER_REVIEW`.
+        - **Invalid document** — `kind=DOCUMENT`, `state=INVALID`. A document was attached
+          but rejected during manual review. `document` (its `id` and `type`) identifies the
+          rejected document and `error_code` classifies the rejection. Upload a replacement
+          to transition back to `SUBMITTED`.
+        - **Validated document** — `kind=DOCUMENT`, `state=VALIDATED`. A document was
+          accepted during manual review. `document` (its `id` and `type`) identifies the
+          accepted document.
+      properties:
+        accepted_document_types:
+          type: array
+          maxItems: 20
+          description: |
+            List of document types that can satisfy this requirement.
+            Present only when `kind=DOCUMENT`. Each value is a `DocumentType`
+            from the shared catalog.
+          items:
+            $ref: '#/components/schemas/DocumentType'
+          example:
+            - PROOF_OF_ADDRESS
+        document:
+          readOnly: true
+          description: |
+            Reference (id + type) of the document attached to satisfy this requirement.
+            Present only when `kind=DOCUMENT` and a document has been attached
+            (`state` is `SUBMITTED`, `VALIDATED`, or `INVALID` following a review).
+            Absent when `state=MISSING`.
+          allOf:
+            - $ref: '#/components/schemas/DocumentReference'
+        error_code:
+          description: |
+            Machine-readable classification of why this entry is in `state=INVALID`.
+            Optional and present only when `state=INVALID`. Reuses the same enum as
+            `ValidationError.code` (synchronous `422` errors), so consumers can share
+            the same switch logic across both error channels.
+          allOf:
+            - $ref: '#/components/schemas/ValidationErrorCode'
+          example: BUSINESS_RULE_VIOLATION
+        kind:
+          $ref: '#/components/schemas/ServiceRequestRequirementKind'
+        pointer:
+          type: string
+          minLength: 1
+          maxLength: 255
+          pattern: ^/
+          description: |
+            RFC 6901 JSON Pointer to the offending field, relative to the service request
+            payload. Present when `kind=DATA_FIELD`. Same convention as
+            `ValidationError.pointer` (synchronous 422 errors), allowing consumers to share
+            rendering and field-locator logic between both error channels.
+          example: /address/postal_code
+        state:
+          allOf:
+            - $ref: '#/components/schemas/ServiceRequestRequirementState'
+          readOnly: true
+      required:
+        - kind
+        - state
+    ServiceRequestRequirementCreate:
+      type: object
+      title: Service Request Requirement Create
+      description: |
+        Caller-supplied initial requirement entry on service-request creation.
+        Write-side projection of `ServiceRequestRequirement`: only declares what the
+        caller provides. `state`, `document` and `error_code` are server-managed and
+        are never accepted here — they surface only on read responses.
+      properties:
+        accepted_document_types:
+          type: array
+          maxItems: 20
+          description: |
+            Document types that can satisfy this requirement. Provide when `kind=DOCUMENT`.
+          items:
+            $ref: '#/components/schemas/DocumentType'
+          example:
+            - PROOF_OF_ADDRESS
+        kind:
+          $ref: '#/components/schemas/ServiceRequestRequirementKind'
+        pointer:
+          type: string
+          minLength: 1
+          maxLength: 255
+          pattern: ^/
+          description: |
+            RFC 6901 JSON Pointer to the target field, relative to the service request
+            payload. Provide when `kind=DATA_FIELD`.
+          example: /address/postal_code
+      required:
+        - kind
+    DecisionRequirement:
+      type: object
+      title: Decision Requirement
+      description: |
+        A single requirement entry supplied by the reviewer when sending a service
+        request back to the partner (`DecisionReturn`, outcome
+        `RETURNED_FOR_INFORMATION`). Each entry is appended to the SR's
+        `requirements[]`.
+
+        Combines a `kind` (data field vs document) with a `state` to describe precisely
+        what the partner must provide or correct, plus a machine-readable `code` and a
+        human-readable `reason`. This is the full reviewer-facing model; the
+        partner-facing read model (`ServiceRequestRequirement`) is a simplified
+        projection of it.
+
+        Document requirement lifecycle (`kind=DOCUMENT`):
+        `MISSING` → *(document attached)* → `SUBMITTED` → *(reviewer accepts)* → `VALIDATED`
+                                                         → *(reviewer rejects)* → `INVALID`
+                                          → *(new document attached)* → `SUBMITTED`
+
+        Data field requirement lifecycle (`kind=DATA_FIELD`):
+        `MISSING` → *(field posted)* → `VALIDATED`
+        `INVALID` → *(corrected value posted)* → `VALIDATED`
+
+        The six cases:
+
+        - **Missing data field** — `kind=DATA_FIELD`, `state=MISSING`. POST the value to
+          the service request endpoint; `pointer` locates the target field.
+        - **Invalid data field** — `kind=DATA_FIELD`, `state=INVALID`. POST a corrected
+          value; `pointer` locates the field, `reason` explains the problem in plain
+          language, and `error_code` classifies the rejection programmatically.
+        - **Missing document** — `kind=DOCUMENT`, `state=MISSING`. Upload a file via the
+          service request `documents` endpoint with a `document_type` from
+          `accepted_document_types`.
+        - **Submitted document** — `kind=DOCUMENT`, `state=SUBMITTED`. A document has been
+          attached and is awaiting manual review. `document` (its `id` and `type`) identifies
+          the attached document. The requirement no longer blocks the SR from entering `UNDER_REVIEW`.
+        - **Invalid document** — `kind=DOCUMENT`, `state=INVALID`. A document was attached
+          but rejected during manual review. `document` (its `id` and `type`) identifies the
+          rejected document. `reason` explains why and `error_code` classifies the rejection.
+          Upload a replacement to transition back to `SUBMITTED`.
+        - **Validated document** — `kind=DOCUMENT`, `state=VALIDATED`. A document was
+          accepted during manual review. `document` (its `id` and `type`) identifies the
+          accepted document.
+      properties:
+        accepted_document_types:
+          type: array
+          maxItems: 20
+          description: |
+            List of document types that can satisfy this requirement.
+            Present only when `kind=DOCUMENT`. Each value is a `DocumentType`
+            from the shared catalog.
+          items:
+            $ref: '#/components/schemas/DocumentType'
+          example:
+            - PROOF_OF_ADDRESS
+        code:
+          type: string
+          minLength: 1
+          maxLength: 255
+          pattern: ^[A-Za-z0-9._-]+$
+          description: |
+            Machine-readable code identifying the requirement.
+
+            Naming convention:
+            - **Data field requirements** (`kind=DATA_FIELD`): dotted JSON path mirroring
+              `pointer` without the leading slash (e.g., `address.postal_code`,
+              `beneficiary_clause`). This keeps `code` and `pointer` aligned.
+            - **Document requirements** (`kind=DOCUMENT`): kebab-case business identifier
+              (e.g., `address-change-proof`, `beneficiary-clause-form`).
+
+            Codes are stable per service request type and can be used as switch keys.
+            The exhaustive set is documented per SR type rather than as an OpenAPI enum
+            to allow new requirements to be introduced without breaking partners.
+          example: address-change-proof
+        document:
+          readOnly: true
+          description: |
+            Reference (id + type) of the document attached to satisfy this requirement.
+            Present only when `kind=DOCUMENT` and a document has been attached
+            (`state` is `SUBMITTED`, `VALIDATED`, or `INVALID` following a review).
+            Absent when `state=MISSING`.
+          allOf:
+            - $ref: '#/components/schemas/DocumentReference'
+        error_code:
+          description: |
+            Machine-readable classification of why this entry is in `state=INVALID`.
+            Optional and present only when `state=INVALID`. Reuses the same enum as
+            `ValidationError.code` (synchronous `422` errors), so consumers can share
+            the same switch logic across both error channels.
+          allOf:
+            - $ref: '#/components/schemas/ValidationErrorCode'
+          example: BUSINESS_RULE_VIOLATION
+        kind:
+          $ref: '#/components/schemas/ServiceRequestRequirementKind'
+        pointer:
+          type: string
+          minLength: 1
+          maxLength: 255
+          pattern: ^/
+          description: |
+            RFC 6901 JSON Pointer to the offending field, relative to the service request
+            payload. Present when `kind=DATA_FIELD`. Same convention as
+            `ValidationError.pointer` (synchronous 422 errors), allowing consumers to share
+            rendering and field-locator logic between both error channels.
+          example: /address/postal_code
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 1000
+          description: A human-readable message explaining the requirement or why it was rejected.
+          example: A supporting document is required to change the address of a person engaged in a contract.
+        state:
+          $ref: '#/components/schemas/ServiceRequestRequirementState'
+      required:
+        - code
+        - reason
+        - kind
+        - state
+    ServiceRequestRequirementKind:
+      type: string
+      title: Service Request Requirement Kind
+      description: |
+        Nature of a service request requirement.
+
+        - `DATA_FIELD`: a missing or invalid data field on the service request payload.
+          Provide or correct the value via `POST` on the service request endpoint.
+        - `DOCUMENT`: a missing or invalid supporting document.
+          Upload or replace the file via `POST` on the service request `documents` endpoint.
+      enum:
+        - DATA_FIELD
+        - DOCUMENT
+      example: DOCUMENT
+    ServiceRequestRequirementState:
+      type: string
+      title: Service Request Requirement State
+      description: |
+        Current status of a service request requirement.
+
+        - `MISSING`: nothing has been provided yet for this entry — the partner must supply
+          the requested field value or document.
+        - `INVALID`: a value or document was provided but rejected, either by automated
+          validation (format error, business rule) or during manual review by a case handler.
+          The partner must replace it to unblock the requirement.
+        - `SUBMITTED`: a document has been attached and is awaiting manual review by a case
+          handler. Only applies to `kind=DOCUMENT` requirements. The entry no longer blocks
+          the service request from transitioning to `UNDER_REVIEW`, but `VALIDATED` is not
+          set until a reviewer explicitly accepts it.
+        - `VALIDATED`: the value or document provided for this entry was accepted — either
+          by automated validation (data fields) or during manual review by a case handler
+          (documents). A requirement in this state no longer blocks the service request from
+          progressing; it is kept in the list for auditability.
+      enum:
+        - MISSING
+        - INVALID
+        - SUBMITTED
+        - VALIDATED
+      example: MISSING
+    DocumentType:
+      title: DocumentType
+      type: string
+      description: |
+        Catalog of document types accepted by the API. Values are grouped by the
+        **business entity** the document is typically attached to (`person`,
+        `contract`, `payment_method`). Each group is further broken down by
+        functional sub-category. Owner-scoped subset enums (`PersonDocumentType`,
+        `ContractDocumentType`, `PaymentMethodDocumentType`) narrow this catalog
+        to the values that are valid for a given owner.
+
+        ### Person — Identity / Civil status
+        - `PROOF_OF_IDENTITY`: Justificatif d'identité (CNI ou passeport, en cours de validité)
+        - `BIRTH_CERTIFICATE`: Acte de naissance (< 3 mois)
+        - `MARRIAGE_CERTIFICATE`: Acte de mariage
+        - `DIVORCE_DECREE`: Jugement de divorce
+        - `PROOF_OF_ADDRESS`: Justificatif de domicile
+
+        ### Person — International taxation
+        - `CERFA_3916`: CERFA 3916 (compte bancaire à l'étranger)
+        - `CERFA_5000`: CERFA 5000 (non-résident)
+        - `W9_TAX_FORM`: Formulaire W9 (États-Unis)
+        - `W8BEN_FORM`: Formulaire W-8BEN
+
+        ### Person — AML-CFT compliance
+        - `CONFIDENTIAL_INFORMATION_SHEET`: Fiche de renseignements confidentiels (versements > 40 k€)
+        - `AML_PEP_PROOF`: Justificatif LCB-FT / PPE (Personne Politiquement Exposée)
+
+        ### Person — Legal protection
+        - `LEGAL_PROTECTION`: Protection juridique (générique)
+        - `GUARDIANSHIP_JUDGMENT`: Jugement de mise sous tutelle
+        - `CURATORSHIP_JUDGMENT`: Jugement de mise sous curatelle
+        - `JUDICIAL_PROTECTION_ORDER`: Jugement / ordonnance de sauvegarde de justice
+
+        ### Contract — Subscription / product
+        - `MEMBERSHIP_FORM`: Bulletin d'adhésion
+        - `MUTUAL_REGULATION`: Règlement mutualiste
+        - `PROFILED_MANAGEMENT_MANDATE`: Mandat de gestion profilé
+
+        ### Contract — Beneficiary clause
+        - `SIGNED_BENEFICIARY_CLAUSE_FORM`: Formulaire de clause bénéficiaire signé
+        - `ACCEPTING_BENEFICIARY`: Bénéficiaire acceptant
+
+        ### Contract — Pledge / Third-party seizure
+        - `PLEDGE_DEED`: Acte de nantissement
+        - `PLEDGE_RELEASE`: Mainlevée de nantissement
+        - `DGFIP_THIRD_PARTY_NOTICE`: ATD — Avis tiers détenteur DGFiP
+
+        ### Request / Operation — Generic formalism
+        - `SIGNED_REQUEST_FORM`: Formulaire de demande signé
+        - `SIGNED_REQUEST_LETTER`: Courrier de demande signé
+
+        ### Payment / Financial operation
+        - `PROOF_OF_FUND_ORIGIN`: Justificatif d'origine des fonds
+
+        ### Benefit / Surrender
+        - `FUND_DESTINATION_PROOF`: Justificatif de destination des fonds
+
+        ### Bank account details
+        - `SEPA_MANDATE`: Mandat SEPA
+        - `BANK_DETAILS`: RIB (Relevé d'Identité Bancaire)
+        - `FOREIGN_BANK_DETAILS`: RIB étranger
+
+        ### Catch-all
+        - `OTHER`: Autre
+      enum:
+        - PROOF_OF_IDENTITY
+        - BIRTH_CERTIFICATE
+        - MARRIAGE_CERTIFICATE
+        - DIVORCE_DECREE
+        - PROOF_OF_ADDRESS
+        - CERFA_3916
+        - CERFA_5000
+        - W9_TAX_FORM
+        - W8BEN_FORM
+        - CONFIDENTIAL_INFORMATION_SHEET
+        - AML_PEP_PROOF
+        - LEGAL_PROTECTION
+        - GUARDIANSHIP_JUDGMENT
+        - CURATORSHIP_JUDGMENT
+        - JUDICIAL_PROTECTION_ORDER
+        - MEMBERSHIP_FORM
+        - MUTUAL_REGULATION
+        - PROFILED_MANAGEMENT_MANDATE
+        - SIGNED_BENEFICIARY_CLAUSE_FORM
+        - ACCEPTING_BENEFICIARY
+        - PLEDGE_DEED
+        - PLEDGE_RELEASE
+        - DGFIP_THIRD_PARTY_NOTICE
+        - SIGNED_REQUEST_FORM
+        - SIGNED_REQUEST_LETTER
+        - PROOF_OF_FUND_ORIGIN
+        - FUND_DESTINATION_PROOF
+        - SEPA_MANDATE
+        - BANK_DETAILS
+        - FOREIGN_BANK_DETAILS
+        - OTHER
+      example: PROOF_OF_IDENTITY
+    ServiceRequestBase:
+      type: object
+      title: Service Request Base
+      description: Shared domain properties for a service request.
+      properties:
+        payload:
+          type: object
+          maxProperties: 100
+          propertyNames:
+            maxLength: 128
+          additionalProperties: true
+          description: |
+            Opaque, caller-defined payload carrying the business-specific data of the
+            service request (e.g. the new address for an `ADDRESS_CHANGE`, the new
+            bank account details for a `BANK_ACCOUNT_CHANGE`, etc.).
+
+            This API stores and returns `payload` as-is without validation or
+            interpretation. The semantics of the fields it contains are owned by the
+            public business APIs that ultimately apply the approved change.
+
+            Bounded against DOS via `maxProperties` (100 keys) and a 128-char
+            cap on key names. Values can be of any JSON type.
+          example:
+            address:
+              line1: 12 rue de Paris
+              postal_code: '75008'
+              city: Paris
+              country_code: FR
+        reason:
+          type: string
+          maxLength: 2000
+          minLength: 1
+          description: A human-readable description explaining the reason for this service request.
+          example: Client has relocated to a new residence.
+        type:
+          $ref: '#/components/schemas/ServiceRequestType'
+      required:
+        - type
+    ServiceRequestType:
+      type: string
+      title: Service Request Type
+      description: |
+        The type of service request driving a manual review.
+
+        - `ADDRESS_CHANGE`: Change the policyholder's postal address.
+        - `NAME_CHANGE`: Change the policyholder's name.
+        - `FAMILY_STATUS_CHANGE`: Change the policyholder's family or marital status.
+        - `BANK_ACCOUNT_CHANGE`: Change the bank account details associated with a contract.
+        - `BENEFICIARY_CLAUSE_CHANGE`: Update a contract's beneficiary clause.
+        - `CONTRACT_SUBSCRIPTION`: Internal review of a submitted contract. Created automatically by the server on `POST /contracts/{contract_id}/submit`. Absorbs the AML review of the subscription premium.
+        - `CONTRACT_RENUNCIATION`: Withdraw a newly subscribed contract within the legal renunciation period. The only service request a partner can initiate explicitly on a contract.
+        - `PREMIUM_PAYMENT`: Review of an additional premium payment (e.g., AML check on a high amount). Created automatically by the server when the partner posts a premium that triggers a review.
+        - `SEPA_MANDATE_SIGNATURE`: Collection of the signed SEPA direct-debit mandate (mandat de prélèvement) for a newly created `SEPA_DEBIT` payment method. Created automatically by the server on `POST /individuals/{id}/payment-methods`.
+      maxLength: 30
+      minLength: 1
+      enum:
+        - ADDRESS_CHANGE
+        - NAME_CHANGE
+        - FAMILY_STATUS_CHANGE
+        - BANK_ACCOUNT_CHANGE
+        - CONTRACT_SUBSCRIPTION
+        - PREMIUM_PAYMENT
+        - BENEFICIARY_CLAUSE_CHANGE
+        - CONTRACT_RENUNCIATION
+        - SEPA_MANDATE_SIGNATURE
+      example: PREMIUM_PAYMENT
+    ServiceRequestStatus:
+      type: string
+      title: Service Request Status
+      description: |
+        Lifecycle status of a service request.
+
+        - `REQUIRES_INFORMATION`: The request needs additional information or documents before review can proceed.
+        - `UNDER_REVIEW`: The request is being reviewed by PACK Solutions.
+        - `APPROVED`: The request was approved.
+        - `REJECTED`: The request was rejected.
+        - `CANCELLED`: The request was cancelled before completion.
+        - `EXPIRED`: The request expired without resolution.
+      maxLength: 30
+      minLength: 1
+      enum:
+        - REQUIRES_INFORMATION
+        - UNDER_REVIEW
+        - APPROVED
+        - REJECTED
+        - CANCELLED
+        - EXPIRED
+      example: UNDER_REVIEW
+    ServiceRequest:
+      title: Service Request
+      description: |
+        Reviewer-facing service request. Carries the SR `type`, an opaque
+        `payload` with the business-specific data, and the server-managed
+        read-only fields layered on top by `ServiceRequestResponse`.
+      allOf:
+        - $ref: '#/components/schemas/ServiceRequestBase'
+    ServiceRequestCreate:
+      title: Service Request Create
+      description: |
+        Body for creating a service request. The caller supplies the SR `type`,
+        the `target_resource` (kind + id), the initial `requirements[]` set
+        (may be empty), and any business-specific data inside the opaque
+        `payload` object.
+
+        The server does not interpret or validate `payload`; it stores and
+        returns it as-is. The compatibility between `type` and
+        `target_resource.type` remains a runtime validation (e.g.,
+        `ADDRESS_CHANGE` requires `INDIVIDUAL`). Initial status is derived
+        from `requirements[]`: `REQUIRES_INFORMATION` when non-empty,
+        `UNDER_REVIEW` otherwise.
+
+        The optional `callback_url` lets the caller declare the host-less
+        relative path of the business API the decision endpoint will call back
+        to update the targeted business object once a decision is recorded. It
+        is supplied on creation only and is never returned on any read response.
+      allOf:
+        - $ref: '#/components/schemas/ServiceRequestCreateBase'
+        - type: object
+          properties:
+            callback_url:
+              type: string
+              format: uri-reference
+              minLength: 1
+              maxLength: 2048
+              description: |
+                Relative path (the Host is omitted) of the business API endpoint
+                the decision endpoint will call back to update the business
+                object targeted by this service request once a decision is
+                recorded. Must be a host-less
+                relative reference starting with a single `/`. Provided by the
+                caller at creation only and **never** returned on any GET / read
+                response — it is an internal routing detail.
+              example: /individuals/1f1a8119-4e24-4460-a126-c79f8ed0017f/address
+            requirements:
+              type: array
+              maxItems: 100
+              description: |
+                Initial set of data and document requirements. May be empty.
+                When non-empty, the SR starts in `REQUIRES_INFORMATION`; when
+                empty, it starts in `UNDER_REVIEW`. The server clears entries
+                as data is supplied and documents are attached.
+
+                Each entry declares its `kind` (plus `pointer` or
+                `accepted_document_types`). Server-managed fields (`state`,
+                `document`, `error_code`) are not accepted here — they are assigned
+                server-side and surface only on read responses.
+              items:
+                $ref: '#/components/schemas/ServiceRequestRequirementCreate'
+          required:
+            - requirements
+    ServiceRequestCreateBase:
+      title: Service Request Create Base
+      description: |
+        Shared properties for creating a service request. Builds on
+        `ServiceRequestBase` and adds the required `target_resource` reference
+        (the `href` of the target is computed by the server and returned on the
+        response, not provided by the caller). Business-specific data of the
+        service request travels in the generic `payload` field inherited from
+        `ServiceRequestBase`.
+      allOf:
+        - $ref: '#/components/schemas/ServiceRequestBase'
+        - type: object
+          properties:
+            target_resource:
+              type: object
+              description: |
+                Identifies the business resource the service request targets.
+                Only `type` and `id` are accepted on creation; the server
+                computes the navigable `href` for the response.
+              properties:
+                id:
+                  type: string
+                  format: uuid
+                  minLength: 36
+                  maxLength: 36
+                  description: Unique identifier of the target resource.
+                  example: 1f1a8119-4e24-4460-a126-c79f8ed0017f
+                type:
+                  $ref: '#/components/schemas/TargetResourceType'
+              required:
+                - type
+                - id
+          required:
+            - target_resource
+    ServiceRequestResponse:
+      title: Service Request Response
+      description: Service request response including server-managed read-only fields.
+      allOf:
+        - $ref: '#/components/schemas/ServiceRequest'
+        - type: object
+          required:
+            - id
+            - status
+            - target_resource
+            - requirements
+            - rejections
+            - date_of_creation
+          properties:
+            date_of_creation:
+              description: Timestamp when the service request was created.
+              type: string
+              format: date-time
+              minLength: 20
+              maxLength: 35
+              readOnly: true
+              example: 2026-04-23T10:15:30Z
+            id:
+              description: Unique identifier of the service request.
+              type: string
+              format: uuid
+              minLength: 36
+              maxLength: 36
+              readOnly: true
+              example: 7d2c9f63-3e72-46e5-bd1c-5d3f7494f210
+            rejections:
+              type: array
+              readOnly: true
+              description: |
+                Structured rejection reasons. Empty when the service request is pending or
+                approved. Populated once the SR status is `REJECTED`.
+
+                Each entry combines a machine-readable `code` with a human-readable `message`
+                visible to the partner.
+              items:
+                $ref: '#/components/schemas/RejectionReason'
+            requirements:
+              type: array
+              maxItems: 100
+              description: |
+                Requirements for the service request. Entries persist throughout the full
+                lifecycle — they are never removed, only their `state` changes.
+
+                Also accepted on create (caller-supplied initial set, may be empty). When
+                non-empty at creation, the SR starts in `REQUIRES_INFORMATION`; when empty,
+                it starts in `UNDER_REVIEW`.
+
+                The SR transitions from `REQUIRES_INFORMATION` to `UNDER_REVIEW` when no
+                entry remains in `MISSING` or `INVALID` state (entries in `SUBMITTED` or
+                `VALIDATED` no longer block progression).
+
+                Each entry combines a `kind` (DATA_FIELD or DOCUMENT) with a `state`
+                (MISSING, INVALID, SUBMITTED, or VALIDATED):
+                - Missing data field — POST the value to the service request endpoint.
+                - Invalid data field — POST a corrected value; `pointer` locates the field.
+                - Missing document — upload via the documents endpoint with a type from
+                  `accepted_document_types`.
+                - Submitted document — document attached, awaiting manual review;
+                  `document` (its `id` and `type`) identifies it.
+                - Invalid document — upload a replacement; `error_code` and `document`
+                  explain what was rejected.
+                - Validated document — accepted by a reviewer; `document` identifies it.
+              items:
+                $ref: '#/components/schemas/ServiceRequestRequirement'
+            status:
+              allOf:
+                - $ref: '#/components/schemas/ServiceRequestStatus'
+              readOnly: true
+            target_resource:
+              $ref: '#/components/schemas/TargetReference'
+    ServiceRequestResource:
+      type: object
+      title: Service Request Resource
+      description: Service request resource with HAL links.
+      allOf:
+        - $ref: '#/components/schemas/ServiceRequestResponse'
+        - type: object
+          properties:
+            _links:
+              allOf:
+                - $ref: '#/components/schemas/HalSelfLinks'
+                - type: object
+                  description: |
+                    HAL navigation for a service request.
+
+                    | Relation | Method | Always present | Conditional on status |
+                    |---|---|---|---|
+                    | `self` | GET | yes | — |
+                    | `target_resource` | GET | yes | — |
+                    | `documents` | GET | yes | — |
+                    | `events` | GET | yes | — |
+                    | `decisions` | POST | no | `UNDER_REVIEW` only |
+                    | `attach_document` | POST | no | non-terminal status (`REQUIRES_INFORMATION` or `UNDER_REVIEW`) |
+                    | `cancel` | POST | no | not in a terminal status (`APPROVED`/`REJECTED`/`CANCELLED`/`EXPIRED`) |
+                  properties:
+                    attach_document:
+                      $ref: '#/components/schemas/HalLink'
+                      description: |
+                        Action link to attach a document to this service request by
+                        reference. Present only while the SR is in a non-terminal status
+                        (`REQUIRES_INFORMATION` or `UNDER_REVIEW`).
+                    cancel:
+                      $ref: '#/components/schemas/HalLink'
+                      description: Action link to cancel this service request. Absent in terminal statuses.
+                    decisions:
+                      $ref: '#/components/schemas/HalLink'
+                      description: |
+                        Action link to record a decision (approve, reject, or return for
+                        information) on this service request. Present only while the SR is
+                        in `UNDER_REVIEW`.
+                    documents:
+                      $ref: '#/components/schemas/HalLink'
+                      description: Link to the documents attached to this service request.
+                    events:
+                      $ref: '#/components/schemas/HalLink'
+                      description: Link to the immutable audit trail of this service request.
+                    target_resource:
+                      $ref: '#/components/schemas/HalLink'
+                      description: Link to the resource targeted by this service request.
+                  required:
+                    - target_resource
+                    - documents
+                    - events
+          required:
+            - _links
+    ServiceRequestCollection:
+      type: object
+      title: Service Request Collection
+      description: Paginated collection of service request resources.
+      properties:
+        _embedded:
+          $ref: '#/components/schemas/ServiceRequestCollectionEmbedded'
+        _links:
+          allOf:
+            - $ref: '#/components/schemas/HalSelfLinks'
+            - $ref: '#/components/schemas/HalPaginationLinks'
+        page:
+          $ref: '#/components/schemas/PageMetadata'
+      required:
+        - _embedded
+        - _links
+        - page
+    ServiceRequestCollectionEmbedded:
+      type: object
+      title: Service Request Collection Embedded
+      description: Embedded container for service request resources in a collection response.
+      properties:
+        service_requests:
+          type: array
+          maxItems: 100
+          items:
+            $ref: '#/components/schemas/ServiceRequestResource'
+      required:
+        - service_requests
+    TargetReference:
+      type: object
+      title: Target Reference
+      description: |
+        Identifies the business resource targeted by a service request.
+        Provides the resource type, unique identifier, and a navigable link.
+      properties:
+        href:
+          type: string
+          format: uri-reference
+          maxLength: 2048
+          description: URI of the target resource for navigation.
+          example: /individuals/1f1a8119-4e24-4460-a126-c79f8ed0017f
+        id:
+          type: string
+          format: uuid
+          minLength: 36
+          maxLength: 36
+          description: Unique identifier of the target resource.
+          example: 1f1a8119-4e24-4460-a126-c79f8ed0017f
+        type:
+          $ref: '#/components/schemas/TargetResourceType'
+      required:
+        - type
+        - id
+        - href
+    TargetResourceType:
+      type: string
+      title: Target Resource Type
+      description: |
+        The type of business resource targeted by a service request.
+
+        - `INDIVIDUAL`: A person managed by the Person API.
+        - `CONTRACT`: A contract managed by the Contract API.
+        - `PREMIUM`: A one-time premium on a contract.
+        - `PERIODIC_PREMIUM`: A periodic premium on a contract.
+      enum:
+        - INDIVIDUAL
+        - CONTRACT
+        - PREMIUM
+        - PERIODIC_PREMIUM
+      example: INDIVIDUAL
+    DecisionCreate:
+      title: Decision Create
+      description: |
+        Reviewer action on a service request currently in `UNDER_REVIEW`. The
+        variant is selected by the `outcome` discriminator. Three variants:
+
+        - `DecisionApprove` (`outcome=APPROVED`): close the SR as approved.
+        - `DecisionReject` (`outcome=REJECTED`): close the SR as rejected with
+          structured rejection reasons.
+        - `DecisionReturn` (`outcome=RETURNED_FOR_INFORMATION`): send the SR
+          back to the partner with new `requirements[]` to address.
+          **Non-terminal** — the SR reopens in `REQUIRES_INFORMATION` and the
+          reviewer keeps the option to approve or reject after the partner
+          replies.
+
+        `APPROVED` and `REJECTED` are terminal; `RETURNED_FOR_INFORMATION` is
+        non-terminal and leaves `rejections[]` empty.
+      oneOf:
+        - $ref: '#/components/schemas/DecisionApprove'
+        - $ref: '#/components/schemas/DecisionReject'
+        - $ref: '#/components/schemas/DecisionReturn'
+      discriminator:
+        propertyName: outcome
+        mapping:
+          APPROVED: '#/components/schemas/DecisionApprove'
+          REJECTED: '#/components/schemas/DecisionReject'
+          RETURNED_FOR_INFORMATION: '#/components/schemas/DecisionReturn'
+    DecisionApprove:
+      type: object
+      title: Decision Approve
+      description: |
+        Close the service request as approved. **Terminal** outcome: the SR
+        transitions from `UNDER_REVIEW` to `APPROVED`; `rejections[]` stays empty.
+      properties:
+        outcome:
+          type: string
+          maxLength: 30
+          minLength: 1
+          const: APPROVED
+      required:
+        - outcome
+    DecisionReject:
+      type: object
+      title: Decision Reject
+      description: |
+        Close the service request as rejected. **Terminal** outcome: the SR
+        transitions from `UNDER_REVIEW` to `REJECTED`; the provided reasons
+        populate `rejections[]` on the SR.
+
+        At least one structured `rejection_reason` is required so the partner
+        understands why the whole SR was rejected. To send the SR back to the
+        partner without closing it (e.g., reject a single document while
+        keeping the SR open), use `DecisionReturn` instead.
+      properties:
+        outcome:
+          type: string
+          maxLength: 30
+          minLength: 1
+          const: REJECTED
+        rejection_reasons:
+          type: array
+          minItems: 1
+          maxItems: 50
+          description: |
+            Structured reasons for the rejection. Stored in `rejections[]` on
+            the SR and visible to the partner.
+          items:
+            $ref: '#/components/schemas/RejectionReason'
+      required:
+        - outcome
+        - rejection_reasons
+    DecisionReturn:
+      type: object
+      title: Decision Return For Information
+      description: |
+        Send the service request back to the partner with new `requirements[]`
+        to address. **Non-terminal** outcome: the SR transitions from
+        `UNDER_REVIEW` back to `REQUIRES_INFORMATION`, the new entries are
+        appended to `requirements[]`, and `rejections[]` stays empty (the SR
+        is not closed and may later be approved or rejected).
+
+        Use this when a case handler:
+        - rejects a single document during manual review
+          (`kind=DOCUMENT, state=INVALID`),
+        - notices an inconsistent field that requires correction
+          (`kind=DATA_FIELD, state=INVALID, pointer=<field>`),
+        - asks for an additional document not initially required
+          (`kind=DOCUMENT, state=MISSING`).
+
+        The same `kind × state` model is used as on the partner-facing view,
+        so the reviewer and the partner share the same requirements vocabulary
+        and rendering logic.
+      properties:
+        outcome:
+          type: string
+          maxLength: 30
+          minLength: 1
+          const: RETURNED_FOR_INFORMATION
+        requirements:
+          type: array
+          minItems: 1
+          maxItems: 100
+          description: |
+            One or more requirement entries to append to the SR's
+            `requirements[]`. Each entry follows the same `kind × state` model
+            partners already consume on the partner-facing SR resource.
+          items:
+            $ref: '#/components/schemas/DecisionRequirement'
+        review_note:
+          type: string
+          minLength: 1
+          maxLength: 1000
+          description: |
+            Optional free-form note from the reviewer. Captured on the
+            `RETURNED_FOR_INFORMATION` audit event only — **not** surfaced on
+            the partner-facing SR resource. The partner-visible message lives
+            on each `requirements[].reason`.
+      required:
+        - outcome
+        - requirements
+    ResolutionOutcome:
+      type: string
+      title: Resolution Outcome
+      description: |
+        Outcome recorded on a service request's `Resolution`. Restricted to the
+        **terminal** subset of `DecisionOutcome` — `RETURNED_FOR_INFORMATION`
+        does not close the SR and therefore does not produce a `Resolution`.
+
+        - `APPROVED`: the SR was approved; `Resolution.date_of_approval` is set.
+        - `REJECTED`: the SR was rejected; `Resolution.date_of_rejection` and
+          `Resolution.rejection_reasons` are set.
+      enum:
+        - APPROVED
+        - REJECTED
+      example: APPROVED
+    RejectionReason:
+      type: object
+      title: Rejection Reason
+      description: A structured reason for rejecting a service request.
+      properties:
+        code:
+          $ref: '#/components/schemas/RejectionReasonCode'
+        message:
+          type: string
+          minLength: 1
+          maxLength: 1000
+          description: A human-readable message explaining the rejection reason.
+          example: The proof of address document provided is not legible and cannot be verified.
+      required:
+        - code
+        - message
+    RejectionReasonCode:
+      type: string
+      title: Rejection Reason Code
+      description: |
+        Machine-readable code identifying a service-request rejection reason.
+        - `INADEQUATE_DOCUMENT`: A supporting document is inadequate.
+        - `REGULATORY_NON_COMPLIANCE`: The request does not meet regulatory requirements.
+        - `INCONSISTENT_DATA`: The data provided is inconsistent with existing records.
+        - `FRAUD_SUSPICION`: The request is flagged for potential fraud.
+        - `POLICY_VIOLATION`: The request violates an applicable policy.
+        - `BUSINESS_RULE_VIOLATION`: The request does not satisfy a business rule.
+        - `UNREADABLE_DOCUMENT`: A supporting document is not legible and cannot be verified.
+        - `EXPIRED_DOCUMENT`: A supporting document has expired (e.g., birth certificate older than 3 months).
+        - `MISSING_SIGNATURE`: A required signature is missing from a document or form.
+      enum:
+        - INADEQUATE_DOCUMENT
+        - REGULATORY_NON_COMPLIANCE
+        - INCONSISTENT_DATA
+        - FRAUD_SUSPICION
+        - POLICY_VIOLATION
+        - BUSINESS_RULE_VIOLATION
+        - UNREADABLE_DOCUMENT
+        - EXPIRED_DOCUMENT
+        - MISSING_SIGNATURE
+      example: INADEQUATE_DOCUMENT
+    ServiceRequestDocumentAttach:
+      type: object
+      title: Service Request Document Attach
+      description: |
+        JSON body for attaching an **existing** document to a service request
+        (`POST /service-requests/{id}/documents` and its partner-facing
+        equivalents on the Contract and Person APIs).
+
+        The binary content is not transferred here — only the `document_id`
+        (returned by `POST /documents` on the Document API) and the document
+        `type` backing the requirement.
+
+        Any matching `DOCUMENT` entry in `requirements[]` is automatically
+        cleared once the attachment is accepted (or moved to `state=INVALID`
+        if the document is later rejected during manual review).
+      properties:
+        document_id:
+          type: string
+          format: uuid
+          minLength: 36
+          maxLength: 36
+          description: |
+            Unique identifier of an existing document from the Document API.
+            The document is linked by reference — its binary content is not
+            transferred here.
+          example: 4f1a8119-4e24-4460-a126-c79f8ed0017f
+        type:
+          type: string
+          minLength: 1
+          maxLength: 100
+          pattern: ^[A-Z][A-Z0-9_]*$
+          description: Document type from the `DocumentType` catalog (e.g. `PROOF_OF_ADDRESS`).
+          example: PROOF_OF_ADDRESS
+      required:
+        - document_id
+        - type
+    ServiceRequestDocumentResponse:
+      title: Service Request Document Response
+      description: Service request document response including server-managed read-only fields.
+      allOf:
+        - $ref: '#/components/schemas/ServiceRequestDocumentAttach'
+        - type: object
+          required:
+            - id
+          properties:
+            id:
+              description: Unique identifier of the service request to which the document was attached.
+              type: string
+              format: uuid
+              minLength: 36
+              maxLength: 36
+              readOnly: true
+              example: 7d2c9f63-3e72-46e5-bd1c-5d3f7494f210
+    ServiceRequestDocumentResource:
+      type: object
+      title: Service Request Document Resource
+      description: Service request document resource with HAL links.
+      allOf:
+        - $ref: '#/components/schemas/ServiceRequestDocumentResponse'
+        - type: object
+          properties:
+            _links:
+              $ref: '#/components/schemas/HalSelfLinks'
+          required:
+            - _links
+    ServiceRequestDocuments:
+      type: object
+      title: Service Request Documents
+      description: Collection of documents attached to a service request.
+      properties:
+        _embedded:
+          $ref: '#/components/schemas/ServiceRequestDocumentsEmbedded'
+        _links:
+          $ref: '#/components/schemas/HalSelfLinks'
+      required:
+        - _embedded
+        - _links
+    ServiceRequestDocumentsEmbedded:
+      type: object
+      title: Service Request Documents Embedded
+      description: Embedded container for service request document resources.
+      properties:
+        documents:
+          type: array
+          maxItems: 50
+          items:
+            $ref: '#/components/schemas/ServiceRequestDocumentResource'
+      required:
+        - documents
+    ServiceRequestEventResponse:
+      type: object
+      title: Service Request Event Response
+      description: |
+        An immutable event in the service request audit trail.
+        Events are created automatically by the system when state changes occur.
+      properties:
+        actor:
+          type: string
+          minLength: 1
+          maxLength: 255
+          description: Identifier of the user or system that triggered the event.
+          readOnly: true
+          example: reviewer@pack-solutions.com
+        date_of_occurrence:
+          description: Timestamp when the event occurred.
+          type: string
+          format: date-time
+          minLength: 20
+          maxLength: 35
+          readOnly: true
+          example: 2026-04-23T14:30:00Z
+        details:
+          type: object
+          maxProperties: 100
+          propertyNames:
+            maxLength: 128
+          description: |
+            Additional details about the event. Structure depends on the event type.
+            For `STATUS_CHANGED`, contains `previous_status` and `new_status`.
+            For `DOCUMENT_ADDED` / `DOCUMENT_REMOVED`, contains `document_id` and `document_type`.
+            For `DECISION_MADE`, contains `outcome`.
+
+            Bounded against DOS via `maxProperties` (100) and a 128-char cap on
+            key names.
+          additionalProperties: true
+          readOnly: true
+        id:
+          description: Unique identifier of the event.
+          type: string
+          format: uuid
+          minLength: 36
+          maxLength: 36
+          readOnly: true
+          example: e1f2a3b4-5678-90ab-cdef-1234567890ab
+        type:
+          allOf:
+            - $ref: '#/components/schemas/ServiceRequestEventType'
+          readOnly: true
+      required:
+        - id
+        - type
+        - date_of_occurrence
+        - actor
+    ServiceRequestEventType:
+      type: string
+      title: Service Request Event Type
+      description: |
+        Type of event recorded in a service-request audit trail.
+
+        - `CREATED`: The service request was created.
+        - `STATUS_CHANGED`: The service request status changed.
+        - `DOCUMENT_ADDED`: A document was attached.
+        - `DOCUMENT_REMOVED`: A document was removed.
+        - `DECISION_MADE`: A **terminal** decision (`APPROVED` or `REJECTED`)
+          was recorded.
+        - `RETURNED_FOR_INFORMATION`: A reviewer sent the SR back from
+          `UNDER_REVIEW` to `REQUIRES_INFORMATION` with new `requirements[]`
+          (rejected document, invalid field, additional document requested).
+          Distinct from `DECISION_MADE`, which stays reserved for terminal
+          outcomes.
+        - `CANCELLED`: The service request was cancelled.
+        - `EXPIRED`: The service request expired.
+      enum:
+        - CREATED
+        - STATUS_CHANGED
+        - DOCUMENT_ADDED
+        - DOCUMENT_REMOVED
+        - DECISION_MADE
+        - RETURNED_FOR_INFORMATION
+        - CANCELLED
+        - EXPIRED
+      example: STATUS_CHANGED
+    ServiceRequestEventResource:
+      type: object
+      title: Service Request Event Resource
+      description: Service request event resource with HAL links.
+      allOf:
+        - $ref: '#/components/schemas/ServiceRequestEventResponse'
+        - type: object
+          properties:
+            _links:
+              $ref: '#/components/schemas/HalSelfLinks'
+          required:
+            - _links
+    ServiceRequestEvents:
+      type: object
+      title: Service Request Events
+      description: Audit trail of events for a service request.
+      properties:
+        _embedded:
+          $ref: '#/components/schemas/ServiceRequestEventsEmbedded'
+        _links:
+          $ref: '#/components/schemas/HalSelfLinks'
+      required:
+        - _embedded
+        - _links
+    ServiceRequestEventsEmbedded:
+      type: object
+      title: Service Request Events Embedded
+      description: Embedded container for service request event resources.
+      properties:
+        events:
+          type: array
+          maxItems: 100
+          items:
+            $ref: '#/components/schemas/ServiceRequestEventResource'
+      required:
+        - events
+    DocumentReference:
+      type: object
+      title: Document Reference
+      description: |
+        Lightweight reference to a document: its identifier plus its type.
+      properties:
+        id:
+          type: string
+          format: uuid
+          minLength: 36
+          maxLength: 36
+          description: Identifier of the referenced document.
+          example: 6f1a6b9d-7c23-4f11-ae82-90b3c5d8e14a
+        type:
+          description: Type of the referenced document, from the shared `DocumentType` catalog.
+          allOf:
+            - $ref: '#/components/schemas/DocumentType'
+          example: PROOF_OF_ADDRESS
+      required:
+        - id
+        - type
+  examples:
+    ServiceRequestResource:
+      summary: A service request resource (reviewer-facing view)
+      description: |
+        Canonical reviewer-facing service request resource carrying its
+        business data inside the opaque `payload`. The SR is in
+        `UNDER_REVIEW`, so HAL surfaces `decisions`, `attach_document`, and
+        `cancel` action links alongside the navigation links.
+      value:
+        id: 7d2c9f63-3e72-46e5-bd1c-5d3f7494f210
+        type: ADDRESS_CHANGE
+        status: UNDER_REVIEW
+        reason: Client has relocated to a new residence.
+        target_resource:
+          type: INDIVIDUAL
+          id: 1f1a8119-4e24-4460-a126-c79f8ed0017f
+          href: /individuals/1f1a8119-4e24-4460-a126-c79f8ed0017f
+        requirements:
+          - kind: DOCUMENT
+            state: SUBMITTED
+            accepted_document_types:
+              - PROOF_OF_ADDRESS
+            document:
+              id: 6f1a6b9d-7c23-4f11-ae82-90b3c5d8e14a
+              type: PROOF_OF_ADDRESS
+        payload:
+          address:
+            line1: 12 rue de Paris
+            postal_code: '75008'
+            city: Paris
+            country_code: FR
+        rejections: []
+        date_of_creation: 2026-04-23T10:15:30Z
+        _links:
+          self:
+            href: /service-requests/7d2c9f63-3e72-46e5-bd1c-5d3f7494f210
+            method: GET
+          target_resource:
+            href: /individuals/1f1a8119-4e24-4460-a126-c79f8ed0017f
+            method: GET
+          documents:
+            href: /service-requests/7d2c9f63-3e72-46e5-bd1c-5d3f7494f210/documents
+            method: GET
+          events:
+            href: /service-requests/7d2c9f63-3e72-46e5-bd1c-5d3f7494f210/events
+            method: GET
+          decisions:
+            href: /service-requests/7d2c9f63-3e72-46e5-bd1c-5d3f7494f210/decisions
+            method: POST
+          attach_document:
+            href: /service-requests/7d2c9f63-3e72-46e5-bd1c-5d3f7494f210/documents
+            method: POST
+          cancel:
+            href: /service-requests/7d2c9f63-3e72-46e5-bd1c-5d3f7494f210/cancel
+            method: POST
+    ServiceRequestCollection:
+      summary: A paginated collection of service requests
+      value:
+        _embedded:
+          service_requests:
+            - id: 7d2c9f63-3e72-46e5-bd1c-5d3f7494f210
+              type: ADDRESS_CHANGE
+              status: UNDER_REVIEW
+              reason: Client has relocated to a new residence.
+              target_resource:
+                type: INDIVIDUAL
+                id: 1f1a8119-4e24-4460-a126-c79f8ed0017f
+                href: /individuals/1f1a8119-4e24-4460-a126-c79f8ed0017f
+              requirements:
+                - kind: DOCUMENT
+                  state: SUBMITTED
+                  accepted_document_types:
+                    - PROOF_OF_ADDRESS
+                  document:
+                    id: 6f1a6b9d-7c23-4f11-ae82-90b3c5d8e14a
+                    type: PROOF_OF_ADDRESS
+              payload:
+                address:
+                  line1: 12 rue de Paris
+                  postal_code: '75008'
+                  city: Paris
+                  country_code: FR
+              rejections: []
+              date_of_creation: 2026-04-23T10:15:30Z
+              _links:
+                self:
+                  href: /service-requests/7d2c9f63-3e72-46e5-bd1c-5d3f7494f210
+                  method: GET
+                target_resource:
+                  href: /individuals/1f1a8119-4e24-4460-a126-c79f8ed0017f
+                  method: GET
+                documents:
+                  href: /service-requests/7d2c9f63-3e72-46e5-bd1c-5d3f7494f210/documents
+                  method: GET
+                events:
+                  href: /service-requests/7d2c9f63-3e72-46e5-bd1c-5d3f7494f210/events
+                  method: GET
+                decisions:
+                  href: /service-requests/7d2c9f63-3e72-46e5-bd1c-5d3f7494f210/decisions
+                  method: POST
+                attach_document:
+                  href: /service-requests/7d2c9f63-3e72-46e5-bd1c-5d3f7494f210/documents
+                  method: POST
+                cancel:
+                  href: /service-requests/7d2c9f63-3e72-46e5-bd1c-5d3f7494f210/cancel
+                  method: POST
+        _links:
+          self:
+            href: /service-requests?page=1&limit=20
+            method: GET
+          first:
+            href: /service-requests?page=1&limit=20
+            method: GET
+          last:
+            href: /service-requests?page=1&limit=20
+            method: GET
+        page:
+          size: 20
+          total_elements: 1
+          total_pages: 1
+          number: 1
+    ServiceRequestCreateAddressChange:
+      summary: Create an address-change service request
+      description: |
+        Address-change SR carrying its business data inside the opaque
+        `payload`. One open `DOCUMENT` requirement is supplied, so the SR
+        will start in `REQUIRES_INFORMATION`.
+      value:
+        type: ADDRESS_CHANGE
+        reason: Client has relocated to a new residence.
+        callback_url: /individuals/1f1a8119-4e24-4460-a126-c79f8ed0017f/address
+        target_resource:
+          type: INDIVIDUAL
+          id: 1f1a8119-4e24-4460-a126-c79f8ed0017f
+        requirements:
+          - kind: DOCUMENT
+            accepted_document_types:
+              - PROOF_OF_ADDRESS
+        payload:
+          address:
+            line1: 12 rue de Paris
+            postal_code: '75008'
+            city: Paris
+            country_code: FR
+    ServiceRequestCreateContractRenunciation:
+      summary: Create a contract-renunciation service request (no open requirements)
+      description: |
+        Renunciation SR with an empty `requirements[]` and a minimal
+        `payload`. With no open requirements, the SR starts directly in
+        `UNDER_REVIEW`.
+      value:
+        type: CONTRACT_RENUNCIATION
+        reason: Client exercises legal right of renunciation within the 30-day window.
+        callback_url: /contracts/9c4a9e3a-2b9c-4f0e-9c4d-2a3b4c5d6e7f/renunciation
+        target_resource:
+          type: CONTRACT
+          id: 9c4a9e3a-2b9c-4f0e-9c4d-2a3b4c5d6e7f
+        requirements: []
+        payload:
+          date_of_effect: 2026-04-22
+    ServiceRequestCreateContractSubscription:
+      summary: Create a contract-subscription service request
+      description: |
+        Contract-subscription SR auto-created when a `DRAFT` contract is submitted
+        (`POST /contracts/{contract_id}/submit`). The opaque `payload` carries a
+        snapshot of the submitted contract data (subscriber, product, financial
+        terms, first premium). `requirements[]` lists the supporting documents the
+        subscription file must collect, so the SR starts in `REQUIRES_INFORMATION`.
+        This API treats `payload` as opaque.
+      value:
+        type: CONTRACT_SUBSCRIPTION
+        reason: New contract submitted — subscription file review and document collection.
+        callback_url: /contracts/9c4a9e3a-2b9c-4f0e-9c4d-2a3b4c5d6e7f
+        target_resource:
+          type: CONTRACT
+          id: 9c4a9e3a-2b9c-4f0e-9c4d-2a3b4c5d6e7f
+        requirements:
+          - kind: DOCUMENT
+            accepted_document_types:
+              - MEMBERSHIP_FORM
+          - kind: DOCUMENT
+            accepted_document_types:
+              - PROFILED_MANAGEMENT_MANDATE
+          - kind: DOCUMENT
+            accepted_document_types:
+              - MUTUAL_REGULATION
+          - kind: DOCUMENT
+            accepted_document_types:
+              - PROOF_OF_IDENTITY
+          - kind: DOCUMENT
+            accepted_document_types:
+              - BIRTH_CERTIFICATE
+          - kind: DOCUMENT
+            accepted_document_types:
+              - SEPA_MANDATE
+          - kind: DOCUMENT
+            accepted_document_types:
+              - BANK_DETAILS
+          - kind: DOCUMENT
+            accepted_document_types:
+              - PROOF_OF_ADDRESS
+          - kind: DOCUMENT
+            accepted_document_types:
+              - PROOF_OF_FUND_ORIGIN
+          - kind: DOCUMENT
+            accepted_document_types:
+              - CERFA_3916
+          - kind: DOCUMENT
+            accepted_document_types:
+              - W8BEN_FORM
+          - kind: DOCUMENT
+            accepted_document_types:
+              - SIGNED_BENEFICIARY_CLAUSE_FORM
+        payload:
+          contract_number: CONTRACT_2026_000123
+          subscriber_id: 1f1a8119-4e24-4460-a126-c79f8ed0017f
+          product_id: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+          date_of_effect: 2026-04-01
+          beneficiary_clause: My legal heirs in equal parts
+          optional_covers:
+            - EXEMPTION_GUARANTEE
+            - FLOOR_GUARANTEE
+          fee_waivers:
+            - fee_waiver_type: FINITE
+              date_of_start: 2026-04-01
+              date_of_end: 2027-04-01
+              rate:
+                value: 5000
+                scale: 2
+          one_time_premiums:
+            - type_of_fund_source: OWN_FUNDS
+              amount:
+                value: 5000000
+                scale: 2
+                currency: EUR
+              payment_method_id: 7d3f1c2e-9a4b-4c8d-8e1f-2a3b4c5d6e7f
+              allocations:
+                funds:
+                  - fund_id: b8e1d2c3-4f5a-6b7c-8d9e-0f1a2b3c4d5e
+                    allocation_rate:
+                      value: 10000
+                      scale: 4
+    ServiceRequestCreatePremiumPaymentSubscription:
+      summary: Create a premium-payment service request (subscription kind)
+      description: |
+        Premium-payment SR for a one-time premium attached to a contract
+        subscription. Former server-computed fields (`kind: SUBSCRIPTION`,
+        `subscription_service_request_id`) are surfaced inside the opaque
+        `payload`, alongside the business data (`amount`, `fund_origin`).
+        This API treats all of those as opaque.
+      value:
+        type: PREMIUM_PAYMENT
+        reason: Large one-time premium — AML review required.
+        callback_url: /contracts/9c4a9e3a-2b9c-4f0e-9c4d-2a3b4c5d6e7f/one-time-premiums/b2c3d4e5-6f7a-8b9c-0d1e-2f3a4b5c6d7e
+        target_resource:
+          type: PREMIUM
+          id: b2c3d4e5-6f7a-8b9c-0d1e-2f3a4b5c6d7e
+        requirements:
+          - kind: DOCUMENT
+            accepted_document_types:
+              - PROOF_OF_FUND_ORIGIN
+        payload:
+          amount:
+            value: 150000000
+            scale: 2
+            currency: EUR
+          fund_origin: Sale of primary residence
+          kind: SUBSCRIPTION
+          subscription_service_request_id: c69df33e-8bff-76a5-d89a-3f35e6f70813
+    ServiceRequestDocumentAttachRequest:
+      summary: Attach an existing document to a service request
+      description: |
+        Request body for `POST /service-requests/{id}/documents`. The
+        document is linked by reference — only its `document_id` (from the
+        Document API) and `type` are transferred.
+      value:
+        document_id: d1e2f3a4-5678-90ab-cdef-1234567890ab
+        type: PROOF_OF_ADDRESS
+    DecisionApproved:
+      summary: Approve a service request
+      value:
+        outcome: APPROVED
+    DecisionRejected:
+      summary: Reject a service request with multiple motives
+      value:
+        outcome: REJECTED
+        rejection_reasons:
+          - code: UNREADABLE_DOCUMENT
+            message: The provided proof of address is unreadable.
+          - code: INADEQUATE_DOCUMENT
+            message: A valid proof of identity is also required to corroborate the address change.
+    DecisionReturned:
+      summary: Send a service request back to the partner with new requirements
+      description: |
+        Reviewer is examining the ADDRESS_CHANGE SR `7d2c9f63-...` on individual
+        `1f1a8119-...` and identifies two problems during manual review:
+        1. The submitted proof of address is older than three months (the previously
+           accepted document `6f1a6b9d-...` must be replaced by a recent one).
+        2. The address line 1 does not match the address on the proof document.
+
+        The reviewer also explicitly validates the postal code field, which was
+        correct and requires no further action from the partner.
+
+        Returning the SR with this mixed requirements list lets the partner fix
+        the two blocking issues while clearly seeing what has already been accepted.
+        The SR reopens in `REQUIRES_INFORMATION`; `rejections[]` stays empty.
+      value:
+        outcome: RETURNED_FOR_INFORMATION
+        requirements:
+          - code: address-change-proof
+            kind: DOCUMENT
+            state: INVALID
+            error_code: BUSINESS_RULE_VIOLATION
+            reason: 'Document rejected during manual review: the proof is older than three months.'
+            accepted_document_types:
+              - PROOF_OF_ADDRESS
+            document:
+              id: 6f1a6b9d-7c23-4f11-ae82-90b3c5d8e14a
+              type: PROOF_OF_ADDRESS
+          - code: address.line1
+            kind: DATA_FIELD
+            state: INVALID
+            error_code: INCONSISTENT
+            reason: The street address does not match the address shown on the submitted proof document. Adjust either the address or upload a matching proof.
+            pointer: /address/line1
+          - code: address.postal_code
+            kind: DATA_FIELD
+            state: VALIDATED
+            reason: Postal code has been verified and matches the declared city.
+            pointer: /address/postal_code
+        review_note: Replacement proof of address must be dated within the last 3 months and match the declared street address.
+    ServiceRequestDocumentResource:
+      summary: A document attached to a service request
+      description: |
+        `id` identifies the service request to which the document was attached, while
+        `document_id` references the underlying document in the Document API
+        (which carries the binary content and full metadata).
+      value:
+        id: 7d2c9f63-3e72-46e5-bd1c-5d3f7494f210
+        document_id: d1e2f3a4-5678-90ab-cdef-1234567890ab
+        type: PROOF_OF_ADDRESS
+        _links:
+          self:
+            href: /service-requests/7d2c9f63-3e72-46e5-bd1c-5d3f7494f210/documents/a8c5e4d3-2b1f-4d6e-9f0a-7c8b9d0e1f2a
+            method: GET
+    ServiceRequestEvents:
+      summary: Audit trail events for a service request
+      value:
+        _embedded:
+          events:
+            - id: e1f2a3b4-0001-90ab-cdef-1234567890ab
+              type: CREATED
+              date_of_occurrence: 2026-04-23T10:15:30Z
+              actor: partner@partner.com
+              details:
+                initial_status: REQUIRES_INFORMATION
+              _links:
+                self:
+                  href: /service-requests/7d2c9f63-3e72-46e5-bd1c-5d3f7494f210/events/e1f2a3b4-0001-90ab-cdef-1234567890ab
+                  method: GET
+            - id: e1f2a3b4-0002-90ab-cdef-1234567890ab
+              type: DOCUMENT_ADDED
+              date_of_occurrence: 2026-04-23T11:00:00Z
+              actor: partner@partner.com
+              details:
+                document_id: d1e2f3a4-5678-90ab-cdef-1234567890ab
+                document_type: PROOF_OF_ADDRESS
+              _links:
+                self:
+                  href: /service-requests/7d2c9f63-3e72-46e5-bd1c-5d3f7494f210/events/e1f2a3b4-0002-90ab-cdef-1234567890ab
+                  method: GET
+            - id: e1f2a3b4-0003-90ab-cdef-1234567890ab
+              type: STATUS_CHANGED
+              date_of_occurrence: 2026-04-23T14:30:00Z
+              actor: system
+              details:
+                previous_status: REQUIRES_INFORMATION
+                new_status: UNDER_REVIEW
+              _links:
+                self:
+                  href: /service-requests/7d2c9f63-3e72-46e5-bd1c-5d3f7494f210/events/e1f2a3b4-0003-90ab-cdef-1234567890ab
+                  method: GET
+            - id: e1f2a3b4-0004-90ab-cdef-1234567890ab
+              type: DECISION_MADE
+              date_of_occurrence: 2026-04-24T09:00:00Z
+              actor: reviewer@pack-solutions.com
+              details:
+                outcome: APPROVED
+              _links:
+                self:
+                  href: /service-requests/7d2c9f63-3e72-46e5-bd1c-5d3f7494f210/events/e1f2a3b4-0004-90ab-cdef-1234567890ab
+                  method: GET
+        _links:
+          self:
+            href: /service-requests/7d2c9f63-3e72-46e5-bd1c-5d3f7494f210/events
+            method: GET
+    ServiceRequestDocuments:
+      summary: Documents attached to a service request
+      value:
+        _embedded:
+          documents:
+            - id: 7d2c9f63-3e72-46e5-bd1c-5d3f7494f210
+              document_id: 4f1a8119-4e24-4460-a126-c79f8ed0017f
+              type: PROOF_OF_ADDRESS
+              _links:
+                self:
+                  href: /service-requests/7d2c9f63-3e72-46e5-bd1c-5d3f7494f210/documents/a8c5e4d3-2b1f-4d6e-9f0a-7c8b9d0e1f2a
+                  method: GET
+            - id: 7d2c9f63-3e72-46e5-bd1c-5d3f7494f210
+              document_id: d1e2f3a4-5678-90ab-cdef-1234567890ab
+              type: PROOF_OF_IDENTITY
+              _links:
+                self:
+                  href: /service-requests/7d2c9f63-3e72-46e5-bd1c-5d3f7494f210/documents/b9d6f5e4-3c2a-4e7f-0a1b-8d9e0f1a2b3c
+                  method: GET
+        _links:
+          self:
+            href: /service-requests/7d2c9f63-3e72-46e5-bd1c-5d3f7494f210/documents
+            method: GET
+  parameters:
+    Page:
+      name: page
+      in: query
+      required: false
+      schema:
+        type: integer
+        format: int32
+        default: 1
+        minimum: 1
+        maximum: 10000
+        example: 1
+      description: Page number (one-based).
+    Limit:
+      name: limit
+      in: query
+      required: false
+      schema:
+        type: integer
+        format: int32
+        default: 20
+        minimum: 1
+        maximum: 100
+        example: 20
+      description: Maximum number of items per page.
+    ServiceRequestId:
+      name: service_request_id
+      in: path
+      required: true
+      description: The unique identifier of the service request.
+      schema:
+        type: string
+        format: uuid
+        minLength: 36
+        maxLength: 36
+        example: 7d2c9f63-3e72-46e5-bd1c-5d3f7494f210
+    ServiceRequestTypeQuery:
+      name: type
+      in: query
+      required: false
+      description: Filter service requests by type.
+      schema:
+        $ref: '#/components/schemas/ServiceRequestType'
+    ServiceRequestStatusQuery:
+      name: status
+      in: query
+      required: false
+      description: |
+        Filter service requests by current status. Repeat the parameter to filter on
+        several statuses at once (e.g. `?status=CANCELLED&status=APPROVED`); a service
+        request matches when its status equals any of the supplied values. An unknown
+        status value is rejected with `400 Bad Request`. When the parameter is omitted,
+        service requests are returned regardless of status (no status filter applied).
+      style: form
+      explode: true
+      schema:
+        type: array
+        items:
+          $ref: '#/components/schemas/ServiceRequestStatus'
+      example:
+        - CANCELLED
+        - APPROVED
+    TargetResourceTypeQuery:
+      name: target_resource_type
+      in: query
+      required: false
+      description: Filter service requests by target resource type.
+      schema:
+        $ref: '#/components/schemas/TargetResourceType'
+    TargetResourceIdQuery:
+      name: target_resource_id
+      in: query
+      required: false
+      description: Filter service requests by the target resource identifier.
+      schema:
+        type: string
+        format: uuid
+        minLength: 36
+        maxLength: 36
+        example: 1f1a8119-4e24-4460-a126-c79f8ed0017f
+  responses:
+    BadRequest:
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/BadRequest'
+          example:
+            value:
+              type: https://pack-solutions.com/probs/bad-request
+              title: Bad Request
+              status: 400
+              detail: The request body contains invalid or malformed fields.
+              errors:
+                - code: INVALID
+                  detail: The value provided is not a valid date format. Expected YYYY-MM-DD.
+                  pointer: /birth/date_of_birth
+                - code: INVALID
+                  detail: The value provided is not a valid email address.
+                  pointer: /communication/email
+                - code: MISSING_FIELD
+                  detail: The last_name field is required.
+                  pointer: /last_name
+      description: Bad Request
+    Unauthorized:
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Unauthorized'
+          example:
+            value:
+              type: https://pack-solutions.com/probs/unauthorized
+              title: Unauthorized
+              status: 401
+              detail: The request requires user authentication.
+      description: Unauthorized
+    Forbidden:
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Forbidden'
+          example:
+            value:
+              type: https://pack-solutions.com/probs/forbidden
+              title: Forbidden
+              status: 403
+              detail: The server understood the request, but is refusing to fulfill it.
+      description: Forbidden
+    NotFound:
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/NotFound'
+          example:
+            value:
+              type: https://pack-solutions.com/probs/not-found
+              title: Not Found
+              status: 404
+              detail: The server has not found anything matching the Request-URI.
+      description: Not Found
+    Conflict:
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Conflict'
+          example:
+            value:
+              type: https://pack-solutions.com/probs/conflict
+              title: Conflict
+              status: 409
+              detail: The request could not be completed due to a conflict with the current state of the target resource.
+              errors:
+                - code: ALREADY_EXISTS
+                  detail: An individual with the same first name, last name and date of birth already exists.
+                  pointer: /last_name
+      description: Conflict
+    ContentTooLarge:
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ContentTooLarge'
+          example:
+            value:
+              type: https://pack-solutions.com/probs/content-too-large
+              title: Content Too Large
+              status: 413
+              detail: The request body exceeds the maximum allowed size of 256000 bytes.
+      description: Content Too Large
+    UnprocessableEntity:
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/UnprocessableEntity'
+          example:
+            value:
+              type: https://pack-solutions.com/probs/unprocessable-entity
+              title: Unprocessable Entity
+              status: 422
+              detail: The request was well-formed but was unable to be followed due to semantic errors.
+              errors:
+                - code: BUSINESS_RULE_VIOLATION
+                  detail: The individual cannot be submitted because required fields are missing.
+                  pointer: /status
+                - code: MISSING_FIELD
+                  detail: The date of birth is required before submission.
+                  pointer: /birth/date_of_birth
+      description: Unprocessable Entity
+    InternalServerError:
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/InternalServerError'
+          example:
+            value:
+              type: https://pack-solutions.com/probs/internal-server-error
+              title: Internal Server Error
+              status: 500
+              detail: The server encountered an unexpected condition which prevented it from fulfilling the request.
+      description: Internal Server Error
+  securitySchemes:
+    oauth2:
+      type: oauth2
+      flows:
+        clientCredentials:
+          tokenUrl: https://iam.pack-solutions.com/oauth/token
+          scopes:
+            service-requests:read: Read access to service requests.
+            service-requests:write: Write access to service requests (attach documents).
+            service-requests:admin: |
+              Admin access — create service requests, cancel them, and record decisions. Reserved for back-office reviewer tooling. Not exposed to partner integrators.

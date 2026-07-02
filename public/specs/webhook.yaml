@@ -1,0 +1,1383 @@
+openapi: 3.1.2
+info:
+  title: Webhook API
+  description: |
+    # Overview
+    The Webhook API lets a partner register HTTP endpoints to receive
+    asynchronous notifications when public resources change state
+    (`contract.*`, `premium.*`, `premium-review.*`, `individual.*`,
+    `mandate.*`).
+
+    ## Core Concepts
+
+    ### Webhook endpoints
+    A **webhook endpoint** is the partner-owned URL that PACK Solutions
+    delivers events to. Each endpoint subscribes to a subset of event
+    types (`event_types`). A `signing_secret` is generated at creation
+    time and returned **once** — partners must store it and use it to
+    verify the `X-Signature` header on every delivery.
+
+    ### Events
+    PACK Solutions emits events from the public APIs only — service
+    request internals are not exposed. The full catalog lives in
+    `WebhookEventType`. Each event carries:
+    - `id`, `type`, `occurred_at`
+    - `resource._links.self`: HAL link to the source resource
+    - optional `transition.{from,to}` for lifecycle transitions
+    - optional `related_resources[]` for cascades
+
+    Resource bodies are **never** embedded: partners follow the HAL
+    link to fetch the current state from the appropriate API. This
+    keeps webhook payloads small and version-agnostic.
+
+    ### Delivery and retry
+    PACK Solutions retries non-2xx deliveries with exponential backoff.
+    The `GET /webhook-endpoints/{endpoint_id}/events` endpoint exposes
+    a paginated history of deliveries for inspection and replay.
+
+    ## Security and Authentication
+    The API is secured using **OAuth 2.0** (Client Credentials flow).
+
+    ### Scopes
+    - `webhooks:read` for `GET` operations.
+    - `webhooks:write` for `POST` and `DELETE` operations.
+
+    ### Payload signature
+    Every delivery carries an `X-Signature` header equal to the
+    `HMAC-SHA256` of the raw body, keyed by the endpoint's
+    `signing_secret`. Partners must verify it server-side before
+    processing the payload.
+
+    ## Navigation & HAL
+    This API follows **HAL (Hypertext Application Language)** principles.
+  version: 0.0.59
+  contact:
+    email: support@pack-solutions.com
+    name: Pack Solutions Support
+  license:
+    name: Proprietary
+    url: https://pack-solutions.com/license
+security:
+  - oauth2: []
+tags:
+  - name: webhook-endpoint
+    description: |
+      Manage the partner-owned URLs that PACK Solutions delivers events
+      to. Subscribe to event types, rotate the signing secret by
+      recreating the endpoint, and review the delivery history.
+  - name: webhook-event
+    description: |
+      Inspect the delivery history of webhook events.
+paths:
+  /webhook-endpoints:
+    get:
+      operationId: listWebhookEndpoints
+      summary: List webhook endpoints
+      description: |
+        Return a paginated list of every webhook endpoint registered by the
+        caller.
+      tags:
+        - webhook-endpoint
+      security:
+        - oauth2:
+            - webhooks:read
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Paginated collection of webhook endpoints.
+          content:
+            application/hal+json:
+              schema:
+                $ref: '#/components/schemas/WebhookEndpointCollection'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+    post:
+      operationId: createWebhookEndpoint
+      summary: Create a webhook endpoint
+      description: |
+        Register a new HTTPS URL to receive event deliveries. The server
+        generates a `signing_secret` that is returned **only on this
+        response** — store it and use it to verify the `X-Signature` header
+        on every delivery. Rotate by deleting and recreating the endpoint.
+      tags:
+        - webhook-endpoint
+      security:
+        - oauth2:
+            - webhooks:write
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WebhookEndpointCreate'
+      responses:
+        '201':
+          description: The webhook endpoint has been created.
+          headers:
+            Location:
+              description: URL of the newly created webhook endpoint.
+              schema:
+                type: string
+                format: uri-reference
+                maxLength: 2048
+          content:
+            application/hal+json:
+              schema:
+                $ref: '#/components/schemas/WebhookEndpointResource'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: |
+            Conflict. An endpoint with the same `url` already exists for the
+            caller. Update the existing endpoint or delete it before
+            recreating one with the same target URL.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Conflict'
+        '413':
+          $ref: '#/components/responses/ContentTooLarge'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+  /webhook-endpoints/{webhook_endpoint_id}:
+    get:
+      operationId: getWebhookEndpoint
+      summary: Retrieve a webhook endpoint
+      description: |
+        Retrieve the details of a webhook endpoint. The `signing_secret` is
+        redacted on this response — it is only returned on creation.
+      tags:
+        - webhook-endpoint
+      security:
+        - oauth2:
+            - webhooks:read
+      parameters:
+        - $ref: '#/components/parameters/WebhookEndpointId'
+      responses:
+        '200':
+          description: Webhook endpoint details.
+          content:
+            application/hal+json:
+              schema:
+                $ref: '#/components/schemas/WebhookEndpointResource'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+    post:
+      operationId: updateWebhookEndpoint
+      summary: Update a webhook endpoint
+      description: |
+        Partial update of a webhook endpoint (URL, description, subscribed
+        event types). Server-managed fields are immutable and ignored if
+        supplied.
+      tags:
+        - webhook-endpoint
+      security:
+        - oauth2:
+            - webhooks:write
+      parameters:
+        - $ref: '#/components/parameters/WebhookEndpointId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WebhookEndpointUpdate'
+      responses:
+        '200':
+          description: Webhook endpoint updated.
+          content:
+            application/hal+json:
+              schema:
+                $ref: '#/components/schemas/WebhookEndpointResource'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: |
+            Conflict. Another endpoint with the same `url` already exists
+            for the caller. Delete the conflicting endpoint or pick a
+            different `url`.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Conflict'
+        '413':
+          $ref: '#/components/responses/ContentTooLarge'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+    delete:
+      operationId: revokeWebhookEndpoint
+      summary: Revoke a webhook endpoint
+      description: |
+        Revoke a webhook endpoint. Deliveries stop immediately. Revocation
+        is terminal — to re-enable deliveries, create a new endpoint.
+      tags:
+        - webhook-endpoint
+      security:
+        - oauth2:
+            - webhooks:write
+      parameters:
+        - $ref: '#/components/parameters/WebhookEndpointId'
+      responses:
+        '204':
+          description: Endpoint revoked.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+  /webhook-endpoints/{webhook_endpoint_id}/events:
+    get:
+      operationId: listWebhookEndpointEvents
+      summary: List webhook event deliveries
+      description: |
+        Return a paginated list of every event delivery attempted for the
+        given webhook endpoint, including pending retries.
+      tags:
+        - webhook-event
+      security:
+        - oauth2:
+            - webhooks:read
+      parameters:
+        - $ref: '#/components/parameters/WebhookEndpointId'
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Paginated collection of webhook event deliveries.
+          content:
+            application/hal+json:
+              schema:
+                $ref: '#/components/schemas/WebhookEventDeliveryCollection'
+              examples:
+                webhookEventDeliveryCollection:
+                  $ref: '#/components/examples/WebhookEventDeliveryCollection'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+  /webhook-endpoints/{webhook_endpoint_id}/events/{event_id}/redeliver:
+    post:
+      operationId: redeliverWebhookEvent
+      summary: Re-deliver a webhook event
+      description: |
+        Re-queue a previous webhook event for delivery to this endpoint.
+        Useful when the partner endpoint was temporarily down or when the
+        partner needs to replay an event after fixing a downstream issue.
+
+        Re-delivery is asynchronous: the response is `202 Accepted` with the
+        updated delivery record. The endpoint must be in `ACTIVE` status.
+      tags:
+        - webhook-event
+      security:
+        - oauth2:
+            - webhooks:write
+      parameters:
+        - $ref: '#/components/parameters/WebhookEndpointId'
+        - name: event_id
+          in: path
+          required: true
+          description: Identifier of the original webhook event to re-deliver.
+          schema:
+            type: string
+            format: uuid
+            minLength: 36
+            maxLength: 36
+          example: 5b1a8119-4e24-4460-a126-c79f8ed0017f
+      responses:
+        '202':
+          description: Re-delivery queued. Updated delivery record returned.
+          content:
+            application/hal+json:
+              schema:
+                $ref: '#/components/schemas/WebhookEventDelivery'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: |
+            Conflict. The endpoint is `PAUSED` or `REVOKED`; resume or
+            recreate the endpoint before re-delivering.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+components:
+  schemas:
+    HalLink:
+      type: object
+      title: HalLink
+      description: |
+        HAL link object. Minimal shape: an `href` (URI of the linked resource)
+        and the `method` to use when following it. Navigation and pagination
+        relations use `GET`; action relations use `POST` (or `DELETE` for
+        resource removal). The project does not use `PUT` or `PATCH`.
+      additionalProperties: false
+      required:
+        - href
+        - method
+      properties:
+        href:
+          type: string
+          format: uri-reference
+          maxLength: 2048
+          description: URI of the linked resource.
+          example: /resources/1f1a8119-4e24-4460-a126-c79f8ed0017f
+        method:
+          $ref: '#/components/schemas/HalLinkMethod'
+          description: HTTP method to use when following this link.
+    HalLinkMethod:
+      type: string
+      title: HalLinkMethod
+      description: |
+        HTTP method to use when following a HAL link. Restricted to
+        `GET` (navigation), `POST` (actions and mutations), and `DELETE`
+        (resource removal). The project does not use `PUT` or `PATCH`.
+      enum:
+        - GET
+        - POST
+        - DELETE
+      example: GET
+    HalPaginationLinks:
+      type: object
+      title: HalPaginationLinks
+      description: |
+        Pagination link relations used inside the `_links` of a collection envelope.
+        `first` and `last` are always present; `next` and `prev` are conditional on
+        page state. Compose with `HalSelfLinks` in every `*Collection._links`.
+      properties:
+        first:
+          $ref: '#/components/schemas/HalLink'
+          description: Link to the first page of the collection.
+        last:
+          $ref: '#/components/schemas/HalLink'
+          description: Link to the last page of the collection.
+        next:
+          $ref: '#/components/schemas/HalLink'
+          description: Link to the next page of the collection. Omitted on the last page.
+        prev:
+          $ref: '#/components/schemas/HalLink'
+          description: Link to the previous page of the collection. Omitted on the first page.
+      required:
+        - first
+        - last
+      example:
+        first:
+          href: /resources?page=1&size=20
+          method: GET
+        last:
+          href: /resources?page=5&size=20
+          method: GET
+        next:
+          href: /resources?page=3&size=20
+          method: GET
+        prev:
+          href: /resources?page=1&size=20
+          method: GET
+    HalSelfLinks:
+      type: object
+      title: HalSelfLinks
+      description: |
+        Base shape for every `_links` block. Guarantees that the `self` link is present
+        on every HAL Resource and Collection envelope. Compose with `HalPaginationLinks`
+        for paginated collections, or extend inline with action/navigation relations.
+      properties:
+        self:
+          $ref: '#/components/schemas/HalLink'
+          description: Link to the current resource.
+      required:
+        - self
+      example:
+        self:
+          href: /resources/1f1a8119-4e24-4460-a126-c79f8ed0017f
+          method: GET
+    PageMetadata:
+      type: object
+      title: PageMetadata
+      description: Pagination metadata for collection responses.
+      properties:
+        number:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 10000
+          description: Current page number (one-based).
+          example: 1
+        size:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 100
+          description: Number of items per page.
+          example: 20
+        total_elements:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 999999999999
+          description: Total number of items across all pages.
+          example: 100
+        total_pages:
+          type: integer
+          format: int32
+          minimum: 0
+          maximum: 10000
+          description: Total number of pages.
+          example: 5
+      required:
+        - size
+        - total_elements
+        - total_pages
+        - number
+    ProblemDetails:
+      type: object
+      title: Problem Details
+      description: A RFC 9457 compliant problem detail object
+      properties:
+        detail:
+          type: string
+          minLength: 1
+          maxLength: 1000
+          description: A human-readable explanation specific to this occurrence of the problem.
+          example: Your current balance is 30, but that costs 50.
+        instance:
+          type: string
+          format: uri-reference
+          maxLength: 2048
+          description: A URI reference that identifies the specific occurrence of the problem.
+          example: https://pack-solutions.com/accounts/12345/msgs/abc
+        status:
+          type: integer
+          format: int32
+          minimum: 100
+          maximum: 599
+          description: The HTTP status code generated by the origin server for this occurrence of the problem.
+          example: 403
+        title:
+          type: string
+          minLength: 1
+          maxLength: 255
+          description: A short, human-readable summary of the problem type.
+          example: You do not have enough credit.
+        type:
+          type: string
+          format: uri-reference
+          maxLength: 2048
+          description: A URI reference that identifies the problem type.
+          default: about:blank
+          example: https://pack-solutions.com/probs/out-of-stock
+    ValidationProblemDetails:
+      type: object
+      title: Validation Problem Details
+      description: |
+        An extension of RFC 9457 Problem Details that includes structured validation errors.
+        Used for responses where the server needs to communicate specific field-level or business-rule validation failures.
+      allOf:
+        - $ref: '#/components/schemas/ProblemDetails'
+        - type: object
+          properties:
+            errors:
+              type: array
+              maxItems: 100
+              description: A list of validation errors that occurred during request processing.
+              items:
+                $ref: '#/components/schemas/ValidationError'
+    ValidationError:
+      type: object
+      title: Validation Error
+      description: |
+        A single validation error entry describing a specific issue with the request.
+      properties:
+        code:
+          $ref: '#/components/schemas/ValidationErrorCode'
+        detail:
+          type: string
+          minLength: 1
+          maxLength: 1000
+          description: A human-readable explanation of the validation error.
+        pointer:
+          type: string
+          minLength: 1
+          maxLength: 500
+          pattern: ^/
+          description: |
+            A JSON Pointer (RFC 6901) to the field in the request body that caused the
+            error. For asynchronous validations surfaced on a service request (e.g.,
+            manual review rejections), the same convention is used in
+            `ServiceRequestRequirement.pointer` (entries with `kind=DATA_FIELD`). Consumer
+            rendering logic can therefore be shared between synchronous `422` errors and
+            asynchronous INVALID requirements.
+
+            When the offending field lives inside a HAL `_embedded` or `_links` block
+            (e.g., on a 409 conflict against a resource that exposes its sub-collections
+            via embedding), the pointer follows the **physical** structure of the HAL
+            response and includes the `_embedded`/`_links` segments — for example
+            `/_embedded/individuals/0/birth/date_of_birth`.
+      required:
+        - code
+        - detail
+    ValidationErrorCode:
+      type: string
+      title: Validation Error Code
+      description: |
+        A machine-readable error code indicating the type of validation failure.
+
+        Prefer the most specific code available. Use `UNPROCESSABLE` and `CUSTOM`
+        only as last-resort fallbacks when no specific code fits.
+
+        ### Presence (typically on 422 and 400)
+        - `MISSING`: A required resource or related entity is missing (e.g., referenced `subscriber_id` does not exist).
+        - `MISSING_FIELD`: A required field was not provided in the request body.
+
+        ### Shape (typically on 400 and 422)
+        - `INVALID`: The field value is invalid in a generic sense. Use a more specific code when applicable.
+        - `INVALID_FORMAT`: The field value does not match the expected format (e.g., not a valid IBAN, UUID, ISO-8601 date).
+        - `OUT_OF_RANGE`: The field value is well-formed but falls outside the accepted range — numeric bounds, temporal window, or string length.
+        - `INCONSISTENT`: The field is inconsistent with another field in the same payload (e.g., `allocations` rates do not sum to 100%, `date_of_end` before `date_of_start`).
+
+        ### State (typically on 409)
+        - `ALREADY_EXISTS`: The resource or value already exists and duplicates are not allowed.
+        - `INVALID_STATE`: The operation is incompatible with the current state of the resource (e.g., trying to cancel an already-executed premium, submitting a contract whose subscriber is still in `DRAFT`).
+
+        ### Business rules (typically on 422)
+        - `BUSINESS_RULE_VIOLATION`: A documented business rule is violated and no more specific code above fits (e.g., a regulatory threshold is crossed).
+
+        ### Fallbacks
+        - `UNPROCESSABLE`: Legacy generic code. **Prefer `BUSINESS_RULE_VIOLATION` or a state/shape code above.**
+        - `CUSTOM`: A custom validation error not covered by the standard codes.
+      enum:
+        - MISSING
+        - MISSING_FIELD
+        - INVALID
+        - INVALID_FORMAT
+        - OUT_OF_RANGE
+        - INCONSISTENT
+        - ALREADY_EXISTS
+        - INVALID_STATE
+        - BUSINESS_RULE_VIOLATION
+        - UNPROCESSABLE
+        - CUSTOM
+      example: MISSING_FIELD
+    BadRequest:
+      type: object
+      title: Bad Request
+      description: Bad Request (400)
+      allOf:
+        - $ref: '#/components/schemas/ValidationProblemDetails'
+    Unauthorized:
+      type: object
+      title: Unauthorized
+      description: Unauthorized (401)
+      allOf:
+        - $ref: '#/components/schemas/ProblemDetails'
+    Forbidden:
+      type: object
+      title: Forbidden
+      description: Forbidden (403)
+      allOf:
+        - $ref: '#/components/schemas/ProblemDetails'
+    NotFound:
+      type: object
+      title: Not Found
+      description: Not Found (404)
+      allOf:
+        - $ref: '#/components/schemas/ProblemDetails'
+    Conflict:
+      type: object
+      title: Conflict
+      description: Conflict (409)
+      allOf:
+        - $ref: '#/components/schemas/ValidationProblemDetails'
+    ContentTooLarge:
+      type: object
+      title: Content Too Large
+      description: Content Too Large (413). Returned when the request body exceeds the maximum allowed size enforced by the API (default 250 KiB / 256000 bytes). File-upload endpoints may apply a larger, content-specific limit.
+      allOf:
+        - $ref: '#/components/schemas/ProblemDetails'
+    UnprocessableEntity:
+      type: object
+      title: Unprocessable Entity
+      description: Unprocessable Entity (422)
+      allOf:
+        - $ref: '#/components/schemas/ValidationProblemDetails'
+    InternalServerError:
+      type: object
+      title: Internal Server Error
+      description: Internal Server Error (500)
+      allOf:
+        - $ref: '#/components/schemas/ProblemDetails'
+    WebhookEventType:
+      type: string
+      title: Webhook Event Type
+      description: |
+        Catalog of partner-facing webhook event types. Service-request
+        internals are deliberately not exposed: events are emitted on the
+        public resources (contract, premium, individual, mandate) and on
+        `premium-review` for the review lifecycle.
+
+        ### Contract
+        - `contract.created`: A new contract has been created (`POST /contracts`).
+        - `contract.submitted`: The contract has been submitted (`POST /contracts/{id}/submit`); the server has generated the `contract_number` and the backing `CONTRACT_SUBSCRIPTION` service request.
+        - `contract.accepted`: The `CONTRACT_SUBSCRIPTION` review has been approved; the contract is now `ACCEPTED`.
+        - `contract.rejected`: The `CONTRACT_SUBSCRIPTION` review has been rejected.
+        - `contract.cancelled`: The contract has been cancelled (partner-initiated cancellation or approved `CONTRACT_RENUNCIATION`).
+
+        ### Premium
+        - `premium.created`: A one-time or periodic premium has been created on a contract.
+        - `premium.review-required`: A backing `PREMIUM_PAYMENT` service request has been created on a premium (AML check triggered).
+        - `premium.accepted`: The premium has reached `ACCEPTED` (one-time) or `ACTIVE` (periodic) status.
+        - `premium.rejected`: The backing service request has been rejected; the premium is in `REJECTED` status.
+        - `premium.executed`: Buy/sell orders have been executed; the premium is `EXECUTED` (one-time only).
+        - `premium.cancelled`: The premium has been cancelled.
+        - `premium.suspended`: A periodic premium has been suspended.
+        - `premium.resumed`: A suspended periodic premium has been resumed.
+
+        ### Premium review (service request lifecycle on premiums)
+        - `premium-review.created`: A new `PREMIUM_PAYMENT` or `CONTRACT_SUBSCRIPTION` service request has been created on a contract/premium.
+        - `premium-review.information-required`: A reviewer sent a premium-scoped SR back from `UNDER_REVIEW` to `REQUIRES_INFORMATION` via `POST /service-requests/{id}/decisions` with `outcome=RETURNED_FOR_INFORMATION`. The partner must address the new `requirements[]` entries.
+        - `premium-review.under-review`: All required documents have been supplied; the SR has moved to `UNDER_REVIEW`.
+        - `premium-review.approved`: The SR has been approved (cascades to `contract.accepted` / `premium.accepted`).
+        - `premium-review.rejected`: The SR has been rejected (cascades to `contract.rejected` / `premium.rejected`).
+
+        ### Individual
+        - `individual.created`: A new individual has been created (`POST /individuals`).
+        - `individual.submitted`: The individual has been submitted (`POST /individuals/{id}/submit`).
+        - `individual.engaged`: The individual has become `ENGAGED` (a related contract reached `ACCEPTED`).
+        - `individual.review-required`: A service request has been created on the individual (`NAME_CHANGE`, `FAMILY_STATUS_CHANGE`, `ADDRESS_CHANGE`, or `BANK_ACCOUNT_CHANGE`).
+        - `individual.review-information-required`: A reviewer sent an individual-scoped SR back from `UNDER_REVIEW` to `REQUIRES_INFORMATION` via `POST /service-requests/{id}/decisions` with `outcome=RETURNED_FOR_INFORMATION`. The partner must address the new `requirements[]` entries.
+        - `individual.review-approved`: An individual-scoped SR has been approved; the change is applied.
+        - `individual.review-rejected`: An individual-scoped SR has been rejected; the resource is unchanged.
+
+        ### Mandate
+        - `mandate.signed`: A SEPA mandate has been signed (`POST /payment-methods/{id}/mandates`).
+        - `mandate.revoked`: A SEPA mandate has been revoked.
+      maxLength: 60
+      minLength: 1
+      enum:
+        - contract.created
+        - contract.submitted
+        - contract.accepted
+        - contract.rejected
+        - contract.cancelled
+        - premium.created
+        - premium.review-required
+        - premium.accepted
+        - premium.rejected
+        - premium.executed
+        - premium.cancelled
+        - premium.suspended
+        - premium.resumed
+        - premium-review.created
+        - premium-review.information-required
+        - premium-review.under-review
+        - premium-review.approved
+        - premium-review.rejected
+        - individual.created
+        - individual.submitted
+        - individual.engaged
+        - individual.review-required
+        - individual.review-information-required
+        - individual.review-approved
+        - individual.review-rejected
+        - mandate.signed
+        - mandate.revoked
+      example: contract.accepted
+    WebhookEvent:
+      type: object
+      title: Webhook Event
+      description: |
+        Envelope of a partner-facing webhook event. The `type` field carries
+        the family-prefixed event name (see `WebhookEventType`). The `resource`
+        field carries HAL links to the affected resource(s) — partners follow
+        `_links.self` to fetch the current state from the appropriate public
+        API. Resource shapes are intentionally not embedded: they remain
+        governed by each API's own versioning.
+
+        When the event is a state transition, `transition.from` and
+        `transition.to` describe the lifecycle move (e.g. `SUBMITTED` →
+        `ACCEPTED`). When the event cascades to other resources, those are
+        listed in `related_resources[]`.
+      properties:
+        id:
+          type: string
+          format: uuid
+          minLength: 36
+          maxLength: 36
+          readOnly: true
+          description: Unique identifier of the event.
+          example: 5b1a8119-4e24-4460-a126-c79f8ed0017f
+        occurred_at:
+          type: string
+          format: date-time
+          minLength: 20
+          maxLength: 35
+          readOnly: true
+          description: Timestamp at which the event occurred on the server.
+          example: 2026-05-13T12:34:56Z
+        related_resources:
+          type: array
+          maxItems: 50
+          readOnly: true
+          description: |
+            HAL links to resources affected by a cascade triggered by this
+            event (e.g. premiums transitioning when a contract is accepted).
+          items:
+            $ref: '#/components/schemas/RelatedResource'
+        resource:
+          type: object
+          readOnly: true
+          description: HAL links to the resource that emitted the event.
+          properties:
+            _links:
+              $ref: '#/components/schemas/HalSelfLinks'
+          required:
+            - _links
+        transition:
+          type: object
+          readOnly: true
+          description: |
+            State transition associated with this event, when applicable.
+            Absent for events that are not lifecycle transitions.
+          properties:
+            from:
+              type: string
+              maxLength: 60
+              minLength: 1
+              pattern: ^[A-Z][A-Z0-9_]*$
+              description: Status the resource transitioned from.
+              example: SUBMITTED
+            to:
+              type: string
+              maxLength: 60
+              minLength: 1
+              pattern: ^[A-Z][A-Z0-9_]*$
+              description: Status the resource transitioned to.
+              example: ACCEPTED
+          required:
+            - to
+        type:
+          allOf:
+            - $ref: '#/components/schemas/WebhookEventType'
+          readOnly: true
+      required:
+        - id
+        - type
+        - occurred_at
+        - resource
+    RelatedResource:
+      type: object
+      title: Related Resource
+      description: |
+        HAL links to a resource affected by a cascade triggered by a webhook event
+        (e.g. premiums transitioning when a contract is accepted), with its type.
+      properties:
+        _links:
+          $ref: '#/components/schemas/HalSelfLinks'
+        type:
+          type: string
+          maxLength: 60
+          minLength: 1
+          pattern: ^[a-z][a-z0-9-]*$
+          description: Type of the related resource (e.g. `premium`, `service-request`).
+          example: premium
+      required:
+        - type
+        - _links
+    WebhookEventDelivery:
+      type: object
+      title: Webhook Event Delivery
+      description: |
+        A single delivery attempt of a webhook event to a partner endpoint.
+        Carries the event envelope plus delivery metadata (attempt count,
+        last attempt timestamp, last HTTP response status).
+      properties:
+        delivery:
+          type: object
+          readOnly: true
+          description: Delivery metadata.
+          properties:
+            attempts:
+              type: integer
+              format: int32
+              minimum: 0
+              maximum: 100
+              description: Number of delivery attempts so far.
+              example: 1
+            last_attempt_at:
+              oneOf:
+                - type: string
+                  format: date-time
+                  minLength: 20
+                  maxLength: 35
+                - type: 'null'
+              description: Timestamp of the most recent delivery attempt. `null` if not yet attempted.
+              example: 2026-05-13T12:35:02Z
+            response_code:
+              oneOf:
+                - type: integer
+                  format: int32
+                  minimum: 100
+                  maximum: 599
+                - type: 'null'
+              description: HTTP status code received from the partner on the last attempt. `null` if not yet attempted.
+              example: 200
+            status:
+              $ref: '#/components/schemas/WebhookDeliveryStatus'
+          required:
+            - attempts
+            - status
+        event:
+          $ref: '#/components/schemas/WebhookEvent'
+      required:
+        - event
+        - delivery
+    WebhookDeliveryStatus:
+      type: string
+      title: Webhook Delivery Status
+      description: |
+        Lifecycle status of a single webhook delivery attempt.
+
+        - `PENDING`: not yet attempted.
+        - `DELIVERED`: a 2xx response was received.
+        - `RETRYING`: a delivery failed and a retry is scheduled.
+        - `FAILED`: all retries have been exhausted.
+      maxLength: 30
+      minLength: 1
+      enum:
+        - PENDING
+        - DELIVERED
+        - RETRYING
+        - FAILED
+      example: DELIVERED
+    WebhookEndpointBase:
+      type: object
+      title: Webhook Endpoint Base
+      description: Shared domain properties for a webhook endpoint.
+      properties:
+        description:
+          type: string
+          maxLength: 500
+          minLength: 1
+          description: Free-text description of the endpoint (e.g., its environment, owning team).
+          example: Production webhook endpoint for the partner integration team.
+        event_types:
+          type: array
+          description: |
+            Event types this endpoint subscribes to. An empty list is not
+            allowed — at least one type must be selected.
+          minItems: 1
+          maxItems: 100
+          items:
+            $ref: '#/components/schemas/WebhookEventType'
+          example:
+            - contract.accepted
+            - contract.rejected
+            - premium-review.approved
+        url:
+          type: string
+          format: uri
+          maxLength: 2048
+          minLength: 1
+          description: |
+            HTTPS URL the partner exposes to receive event deliveries.
+            Must be reachable and respond `2xx` within a few seconds.
+          example: https://partner.example.com/webhooks/pack-solutions
+      required:
+        - url
+        - event_types
+    WebhookEndpointStatus:
+      type: string
+      title: Webhook Endpoint Status
+      description: |
+        Lifecycle status of a webhook endpoint.
+
+        - `ACTIVE`: deliveries are attempted.
+        - `PAUSED`: deliveries are suspended; events accumulate.
+        - `REVOKED`: terminal — endpoint is no longer used.
+      maxLength: 30
+      minLength: 1
+      enum:
+        - ACTIVE
+        - PAUSED
+        - REVOKED
+      example: ACTIVE
+    WebhookEndpointCreate:
+      title: Webhook Endpoint Create
+      description: Payload for creating a new webhook endpoint.
+      allOf:
+        - $ref: '#/components/schemas/WebhookEndpointBase'
+        - type: object
+          required:
+            - url
+            - event_types
+    WebhookEndpointUpdate:
+      type: object
+      title: Webhook Endpoint Update
+      description: |
+        Partial update payload for a webhook endpoint. All fields are
+        optional — only the supplied fields are applied.
+
+        Server-managed fields (`id`, `signing_secret`, `status`, `created_at`,
+        `updated_at`) cannot be modified.
+      properties:
+        description:
+          type: string
+          maxLength: 500
+          minLength: 1
+          description: New free-text description.
+          example: Production webhook endpoint (rotated URL).
+        event_types:
+          type: array
+          description: New set of subscribed event types. Replaces the current list when provided.
+          minItems: 1
+          maxItems: 100
+          items:
+            $ref: '#/components/schemas/WebhookEventType'
+        url:
+          type: string
+          format: uri
+          maxLength: 2048
+          minLength: 1
+          description: New HTTPS URL for event delivery.
+          example: https://partner.example.com/webhooks/pack-solutions-v2
+    WebhookEndpointResponse:
+      title: Webhook Endpoint Response
+      description: Webhook endpoint response including server-managed read-only fields.
+      allOf:
+        - $ref: '#/components/schemas/WebhookEndpointBase'
+        - type: object
+          required:
+            - id
+            - status
+            - created_at
+            - updated_at
+          properties:
+            created_at:
+              type: string
+              format: date-time
+              minLength: 20
+              maxLength: 35
+              readOnly: true
+              description: Timestamp when the endpoint was created.
+              example: 2026-05-13T12:34:56Z
+            id:
+              type: string
+              format: uuid
+              minLength: 36
+              maxLength: 36
+              readOnly: true
+              description: Unique identifier of the webhook endpoint.
+              example: 5b1a8119-4e24-4460-a126-c79f8ed0017f
+            signing_secret:
+              type: string
+              format: password
+              maxLength: 128
+              minLength: 32
+              description: |
+                Secret used to sign payloads delivered to this endpoint
+                (HMAC-SHA256 of the raw body, exposed via the `X-Signature`
+                header). **Returned only on creation** — subsequent GETs hide
+                it. Rotate the secret by deleting and recreating the endpoint.
+              readOnly: true
+              example: whsec_K9j3l1p4qNm2R7s5T8v6X0Y2Z4A6B8C0
+            status:
+              allOf:
+                - $ref: '#/components/schemas/WebhookEndpointStatus'
+              readOnly: true
+            updated_at:
+              type: string
+              format: date-time
+              minLength: 20
+              maxLength: 35
+              readOnly: true
+              description: Timestamp of the most recent update to the endpoint.
+              example: 2026-05-13T12:34:56Z
+    WebhookEndpointResource:
+      type: object
+      title: Webhook Endpoint Resource
+      description: Webhook endpoint resource with HAL links.
+      allOf:
+        - $ref: '#/components/schemas/WebhookEndpointResponse'
+        - type: object
+          properties:
+            _links:
+              allOf:
+                - $ref: '#/components/schemas/HalSelfLinks'
+                - type: object
+                  description: |
+                    HAL navigation for a webhook endpoint.
+
+                    | Relation | Method | Always present |
+                    |---|---|---|
+                    | `self` | GET | yes |
+                    | `events` | GET | yes |
+                    | `update` | POST | yes |
+                    | `revoke` | DELETE | yes |
+                  properties:
+                    events:
+                      $ref: '#/components/schemas/HalLink'
+                      description: Link to the deliveries collection of this endpoint.
+                    revoke:
+                      $ref: '#/components/schemas/HalLink'
+                      description: Action link to revoke (delete) the endpoint.
+                    update:
+                      $ref: '#/components/schemas/HalLink'
+                      description: Action link to update the endpoint.
+                  required:
+                    - events
+                    - update
+                    - revoke
+          required:
+            - _links
+    WebhookEndpointCollection:
+      type: object
+      title: Webhook Endpoint Collection
+      description: Paginated HAL collection of webhook endpoints.
+      properties:
+        _embedded:
+          $ref: '#/components/schemas/WebhookEndpointCollectionEmbedded'
+        _links:
+          allOf:
+            - $ref: '#/components/schemas/HalSelfLinks'
+            - $ref: '#/components/schemas/HalPaginationLinks'
+        page:
+          $ref: '#/components/schemas/PageMetadata'
+      required:
+        - _embedded
+        - _links
+        - page
+    WebhookEndpointCollectionEmbedded:
+      type: object
+      title: Webhook Endpoint Collection Embedded
+      description: Embedded resources for a webhook endpoint collection.
+      properties:
+        webhook_endpoints:
+          type: array
+          maxItems: 100
+          description: Webhook endpoints registered by the caller.
+          items:
+            $ref: '#/components/schemas/WebhookEndpointResource'
+      required:
+        - webhook_endpoints
+    WebhookEventDeliveryCollection:
+      type: object
+      title: Webhook Event Delivery Collection
+      description: Paginated HAL collection of webhook event deliveries.
+      properties:
+        _embedded:
+          $ref: '#/components/schemas/WebhookEventDeliveryCollectionEmbedded'
+        _links:
+          allOf:
+            - $ref: '#/components/schemas/HalSelfLinks'
+            - $ref: '#/components/schemas/HalPaginationLinks'
+        page:
+          $ref: '#/components/schemas/PageMetadata'
+      required:
+        - _embedded
+        - _links
+        - page
+    WebhookEventDeliveryCollectionEmbedded:
+      type: object
+      title: Webhook Event Delivery Collection Embedded
+      description: Embedded resources for a webhook event delivery collection.
+      properties:
+        deliveries:
+          type: array
+          maxItems: 100
+          description: Webhook event deliveries for the parent endpoint.
+          items:
+            $ref: '#/components/schemas/WebhookEventDelivery'
+      required:
+        - deliveries
+  examples:
+    WebhookEventDeliveryCollection:
+      summary: Webhook event deliveries for the demo endpoint — illustrates an SR lifecycle and a contract acceptance
+      description: |
+        Sample deliveries showing the full narrative of an `ADDRESS_CHANGE` SR on
+        individual `1f1a8119-4e24-4460-a126-c79f8ed0017f` (SR
+        `7d2c9f63-3e72-46e5-bd1c-5d3f7494f210`), followed by a `contract.accepted`
+        event on contract `3f3a8119-4e24-4460-a126-c79f8ed0017f`. UUIDs match the
+        resources documented in the Person and Contract APIs.
+      value:
+        _embedded:
+          deliveries:
+            - event:
+                id: 0b0e2e8d-1111-4abc-9def-111111111111
+                type: individual.review-required
+                occurred_at: 2026-04-20T10:16:02Z
+                resource:
+                  _links:
+                    self:
+                      href: /individuals/1f1a8119-4e24-4460-a126-c79f8ed0017f/service-requests/7d2c9f63-3e72-46e5-bd1c-5d3f7494f210
+                      method: GET
+                related_resources:
+                  - type: individual
+                    _links:
+                      self:
+                        href: /individuals/1f1a8119-4e24-4460-a126-c79f8ed0017f
+                        method: GET
+              delivery:
+                attempts: 1
+                last_attempt_at: 2026-04-20T10:16:03Z
+                status: DELIVERED
+                response_code: 200
+            - event:
+                id: 0b0e2e8d-2222-4abc-9def-222222222222
+                type: individual.review-approved
+                occurred_at: 2026-04-25T14:02:11Z
+                resource:
+                  _links:
+                    self:
+                      href: /individuals/1f1a8119-4e24-4460-a126-c79f8ed0017f/service-requests/7d2c9f63-3e72-46e5-bd1c-5d3f7494f210
+                      method: GET
+                transition:
+                  from: UNDER_REVIEW
+                  to: APPROVED
+                related_resources:
+                  - type: individual
+                    _links:
+                      self:
+                        href: /individuals/1f1a8119-4e24-4460-a126-c79f8ed0017f
+                        method: GET
+              delivery:
+                attempts: 1
+                last_attempt_at: 2026-04-25T14:02:12Z
+                status: DELIVERED
+                response_code: 200
+            - event:
+                id: 0b0e2e8d-3333-4abc-9def-333333333333
+                type: contract.accepted
+                occurred_at: 2026-04-30T15:45:00Z
+                resource:
+                  _links:
+                    self:
+                      href: /contracts/3f3a8119-4e24-4460-a126-c79f8ed0017f
+                      method: GET
+                transition:
+                  from: UNDER_REVIEW
+                  to: ACCEPTED
+                related_resources:
+                  - type: service-request
+                    _links:
+                      self:
+                        href: /contracts/3f3a8119-4e24-4460-a126-c79f8ed0017f/service-requests/c34ed52f-78aa-5904-c789-2f24d5e6f701
+                        method: GET
+                  - type: premium
+                    _links:
+                      self:
+                        href: /contracts/3f3a8119-4e24-4460-a126-c79f8ed0017f/premiums/1f1a8119-4e24-4460-a126-c79f8ed0017f
+                        method: GET
+              delivery:
+                attempts: 2
+                last_attempt_at: 2026-04-30T15:46:30Z
+                status: DELIVERED
+                response_code: 200
+        _links:
+          self:
+            href: /webhook-endpoints/5b1a8119-4e24-4460-a126-c79f8ed0017f/events?page=1&limit=20
+            method: GET
+          first:
+            href: /webhook-endpoints/5b1a8119-4e24-4460-a126-c79f8ed0017f/events?page=1&limit=20
+            method: GET
+          last:
+            href: /webhook-endpoints/5b1a8119-4e24-4460-a126-c79f8ed0017f/events?page=1&limit=20
+            method: GET
+        page:
+          number: 1
+          size: 20
+          total_elements: 3
+          total_pages: 1
+  parameters:
+    Page:
+      name: page
+      in: query
+      required: false
+      schema:
+        type: integer
+        format: int32
+        default: 1
+        minimum: 1
+        maximum: 10000
+        example: 1
+      description: Page number (one-based).
+    Limit:
+      name: limit
+      in: query
+      required: false
+      schema:
+        type: integer
+        format: int32
+        default: 20
+        minimum: 1
+        maximum: 100
+        example: 20
+      description: Maximum number of items per page.
+    WebhookEndpointId:
+      name: webhook_endpoint_id
+      in: path
+      required: true
+      description: Unique identifier of the webhook endpoint.
+      schema:
+        type: string
+        format: uuid
+        minLength: 36
+        maxLength: 36
+      example: 5b1a8119-4e24-4460-a126-c79f8ed0017f
+  responses:
+    BadRequest:
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/BadRequest'
+          example:
+            value:
+              type: https://pack-solutions.com/probs/bad-request
+              title: Bad Request
+              status: 400
+              detail: The request body contains invalid or malformed fields.
+              errors:
+                - code: INVALID
+                  detail: The value provided is not a valid date format. Expected YYYY-MM-DD.
+                  pointer: /birth/date_of_birth
+                - code: INVALID
+                  detail: The value provided is not a valid email address.
+                  pointer: /communication/email
+                - code: MISSING_FIELD
+                  detail: The last_name field is required.
+                  pointer: /last_name
+      description: Bad Request
+    Unauthorized:
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Unauthorized'
+          example:
+            value:
+              type: https://pack-solutions.com/probs/unauthorized
+              title: Unauthorized
+              status: 401
+              detail: The request requires user authentication.
+      description: Unauthorized
+    Forbidden:
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Forbidden'
+          example:
+            value:
+              type: https://pack-solutions.com/probs/forbidden
+              title: Forbidden
+              status: 403
+              detail: The server understood the request, but is refusing to fulfill it.
+      description: Forbidden
+    NotFound:
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/NotFound'
+          example:
+            value:
+              type: https://pack-solutions.com/probs/not-found
+              title: Not Found
+              status: 404
+              detail: The server has not found anything matching the Request-URI.
+      description: Not Found
+    ContentTooLarge:
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ContentTooLarge'
+          example:
+            value:
+              type: https://pack-solutions.com/probs/content-too-large
+              title: Content Too Large
+              status: 413
+              detail: The request body exceeds the maximum allowed size of 256000 bytes.
+      description: Content Too Large
+    UnprocessableEntity:
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/UnprocessableEntity'
+          example:
+            value:
+              type: https://pack-solutions.com/probs/unprocessable-entity
+              title: Unprocessable Entity
+              status: 422
+              detail: The request was well-formed but was unable to be followed due to semantic errors.
+              errors:
+                - code: BUSINESS_RULE_VIOLATION
+                  detail: The individual cannot be submitted because required fields are missing.
+                  pointer: /status
+                - code: MISSING_FIELD
+                  detail: The date of birth is required before submission.
+                  pointer: /birth/date_of_birth
+      description: Unprocessable Entity
+    InternalServerError:
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/InternalServerError'
+          example:
+            value:
+              type: https://pack-solutions.com/probs/internal-server-error
+              title: Internal Server Error
+              status: 500
+              detail: The server encountered an unexpected condition which prevented it from fulfilling the request.
+      description: Internal Server Error
+  securitySchemes:
+    oauth2:
+      type: oauth2
+      flows:
+        clientCredentials:
+          tokenUrl: https://iam.pack-solutions.com/oauth/token
+          scopes:
+            webhooks:read: read access to webhook endpoints and delivery history
+            webhooks:write: write access for managing webhook endpoints

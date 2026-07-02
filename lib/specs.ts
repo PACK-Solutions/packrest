@@ -1,5 +1,10 @@
-import fs from "node:fs/promises";
-import path from "node:path";
+// Client-side OpenAPI spec loader. Reads YAML bundles from the writable spec
+// store (lib/specs-fs — tauri-plugin-fs in Tauri, bundled static assets in a
+// plain browser), parses + dereferences them, and caches in module memory.
+// Mirrors the surface of the former server-only node:fs loader; the read is
+// now async and I/O-agnostic, while the parsing/deref and the pure endpoint
+// walkers are unchanged.
+
 import yaml from "js-yaml";
 import type {
   ApiSummary,
@@ -12,14 +17,14 @@ import type {
 import { HTTP_METHODS } from "./types";
 import { dereference } from "./deref";
 import constants from "./sync-constants.json";
+import { listSpecFiles, readSpecFile } from "./specs-fs";
 
 const { EXCLUDED_APIS } = constants;
 
-// Server-side OpenAPI spec loader. Reads YAML bundles copied into
-// public/specs/<api>.yaml by scripts/copy-specs.mjs and caches them in
-// module-level memory (the Next.js dev server reloads on file change).
-
-const SPECS_DIR = path.join(process.cwd(), "public", "specs");
+// Dispatched on the window after the spec store changes (a sync wrote new
+// bundles and busted the cache), so the API grid / sidebar re-load without a
+// full navigation.
+export const SPECS_CHANGED_EVENT = "packrest:specs-changed";
 
 const docCache = new Map<string, OpenApiDocument>();
 let listCache: string[] | null = null;
@@ -27,15 +32,15 @@ let listCache: string[] | null = null;
 export function resetSpecCache(): void {
   docCache.clear();
   listCache = null;
+  if (typeof window !== "undefined")
+    window.dispatchEvent(new Event(SPECS_CHANGED_EVENT));
 }
 
 export async function listApis(): Promise<string[]> {
   if (listCache) return listCache;
   try {
-    const entries = await fs.readdir(SPECS_DIR);
-    listCache = entries
-      .filter((f) => f.endsWith(".yaml") || f.endsWith(".yml"))
-      .map((f) => f.replace(/\.ya?ml$/, ""))
+    const ids = await listSpecFiles();
+    listCache = ids
       // Defensive: hide deprecated / merged APIs even if a stale file lingers.
       .filter((id) => !EXCLUDED_APIS.includes(id))
       .sort();
@@ -48,13 +53,8 @@ export async function listApis(): Promise<string[]> {
 export async function loadSpec(apiId: string): Promise<OpenApiDocument | null> {
   const cached = docCache.get(apiId);
   if (cached) return cached;
-  const filePath = path.join(SPECS_DIR, `${apiId}.yaml`);
-  let raw: string;
-  try {
-    raw = await fs.readFile(filePath, "utf8");
-  } catch {
-    return null;
-  }
+  const raw = await readSpecFile(apiId);
+  if (raw == null) return null;
   const parsed = yaml.load(raw) as OpenApiDocument;
   // Bundles keep internal `#/components/...` refs. The form generator and
   // example extractor expect concrete schemas, so resolve them once here.

@@ -1,0 +1,30 @@
+[package]
+name = "packrest"
+version = "0.1.0"
+description = "PackRest — client REST guidé pour les APIs Pack Solutions"
+authors = ["Pack Solutions"]
+edition = "2021"
+
+# The library that main.rs (and the mobile entry point) calls into.
+[lib]
+name = "packrest_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-store = "2"
+tauri-plugin-fs = "2"
+tauri-plugin-http = "2"
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[features]
+# by default Tauri runs in production mode
+# when `tauri dev` runs it is executed with `cargo run --no-default-features` if `devPath` is an URL
+default = ["custom-protocol"]
+# this feature is used for production builds where `devPath` points to the filesystem
+custom-protocol = ["tauri/custom-protocol"]

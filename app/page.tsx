@@ -1,14 +1,31 @@
+"use client";
+
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { ArrowRight, FolderSync, KeyRound } from "lucide-react";
 import { Card, CardBody } from "@/components/Card";
-import { listApiSummaries } from "@/lib/specs";
+import { listApiSummaries, SPECS_CHANGED_EVENT } from "@/lib/specs";
+import type { ApiSummary } from "@/lib/types";
 import { apiTheme } from "@/lib/design";
 import { cn } from "@/lib/utils";
 
-export const dynamic = "force-dynamic";
+export default function Home() {
+  const [apis, setApis] = useState<ApiSummary[]>([]);
 
-export default async function Home() {
-  const apis = await listApiSummaries();
+  useEffect(() => {
+    let cancelled = false;
+    const load = () => {
+      listApiSummaries().then((list) => {
+        if (!cancelled) setApis(list);
+      });
+    };
+    load();
+    window.addEventListener(SPECS_CHANGED_EVENT, load);
+    return () => {
+      cancelled = true;
+      window.removeEventListener(SPECS_CHANGED_EVENT, load);
+    };
+  }, []);
 
   return (
     <div className="mx-auto max-w-6xl space-y-6">
@@ -62,7 +79,7 @@ export default async function Home() {
           return (
             <Link
               key={api.id}
-              href={`/${api.id}`}
+              href={`/api-view?id=${encodeURIComponent(api.id)}`}
               className={cn(
                 "group bg-card relative flex flex-col gap-3 overflow-hidden rounded-xl border p-4 shadow-sm transition hover:-translate-y-0.5 hover:shadow-lg hover:ring-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
                 theme.border,

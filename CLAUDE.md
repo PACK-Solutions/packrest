@@ -1,108 +1,113 @@
-# `packrest/` — REST client for non-developers
+# `packrest/` — REST client for non-developers (Tauri desktop)
 
-A Next.js 16 app that loads the bundled OpenAPI specs from a configurable
-source directory and lets business users exercise every endpoint without
-leaving the browser. The flow: pick an API → pick an endpoint → form
-pre-populated from the contract's `examples` → get a token with selectable
-scopes → execute → response panel.
+A **Tauri v2 desktop app** wrapping a Next.js 16 frontend. The frontend is a
+**static export** (`output: "export"` → `out/`) loaded by the Tauri webview;
+there is **no Node server at runtime**. What used to be Next.js API routes now
+runs client-side through Tauri plugins (`http`, `fs`, `store`, `dialog`).
+
+The flow is unchanged: pick an API → pick an endpoint → form pre-populated from
+the contract's `examples` → get a token with selectable scopes → execute →
+response panel.
+
+Run it with **`npm run tauri:dev`** (launches `next dev` on :3001 + the webview).
+Plain `npm run dev` opens the frontend in a browser but Tauri APIs (store/fs/
+http/dialog) are unavailable there — see the fallback note below.
 
 ## Sources of truth
 
-| What                                      | Where                                                        |
-| ----------------------------------------- | ------------------------------------------------------------ |
-| **API shape**, endpoints, scopes, examples | `<specsDir>/<api>/v1/openapi.bundle.yaml`. `specsDir` resolution order: `.packrest.config.json` → `PACKREST_SPECS_DIR` env → `../openapi/dist`. Edit via Settings UI or `npm run sync-specs`. **Or** pull a GitLab release's `bundle.zip` via Settings → "Synchroniser depuis une release GitLab" (`lib/gitlab.ts`); both sources write the same `public/specs/<api>.yaml`. |
-| **Spec source config** (server-side)      | `.packrest.config.json` at the repo root (gitignored). Read by both `lib/sync.ts` (Next.js) and `scripts/copy-specs.mjs` (CLI). Holds `specsDir` and the `gitlab` block (`host`, `projectPath`, `token`). |
-| **Design tokens** (tones, status colours) | `lib/design.ts` — same palette as `demo/lib/design.ts`       |
-| **Persistence** (collections, settings, token) | `lib/storage.ts` — all in `localStorage`, never on disk |
+| What | Where |
+| --- | --- |
+| **API shape**, endpoints, scopes, examples | Writable spec store `$APPDATA/specs/<api>.yaml`, read via `lib/specs-fs.ts` (tauri-plugin-fs). Loaded/parsed/dereffed by `lib/specs.ts` (async client loader, module cache + `resetSpecCache`). |
+| **Bundled seed specs** | `public/specs/<api>.yaml` + `public/specs/manifest.json`, produced by `scripts/copy-specs.mjs` at predev/prebuild from the local `specsDir`. Shipped in the static export; `seedSpecsIfEmpty()` (in `specs-fs.ts`) copies them into `$APPDATA/specs` on first launch. |
+| **Config** (specsDir, GitLab host/project/token) | `lib/config.ts` → `lib/store.ts` (tauri-plugin-store, file `packrest.json` in app-data). |
+| **Persistence** (settings incl. `clientSecret`, token) | `lib/storage.ts` — synchronous API backed by an in-memory cache hydrated from the store; edits persist through `lib/store.ts`. |
+| **Design tokens** | `lib/design.ts` |
 
 ## Layout
 
-- `app/` — App Router.
-  - `page.tsx` — API grid.
-  - `[api]/page.tsx` — endpoints by tag.
-  - `[api]/[operationId]/page.tsx` — server entry that loads the spec and
-    hands an `EndpointEntry` to the client `RequestBuilder`.
-  - `collections/`, `settings/` — full client pages.
-  - `api/token/route.ts` — server-side OAuth2 Client Credentials proxy.
-  - `api/proxy/route.ts` — CORS-bypass fetch proxy.
-  - `api/config/route.ts` — GET/PUT `.packrest.config.json` (specsDir).
-  - `api/sync-specs/route.ts` — POST: copy specs + reset spec cache.
-  - `api/gitlab/route.ts` — GET/PUT the `gitlab` config block (token masked
-    on GET, kept on PUT when left blank).
-  - `api/gitlab/releases/route.ts` — GET: list release tags (+ bundle presence).
-  - `api/gitlab/sync/route.ts` — POST `{tag}`: download `bundle.zip`, extract
-    specs into `public/specs/`, reset cache.
-  - `api/bruno/export/route.ts` — GET `?api=<id>`: build a Bruno collection
-    from the spec and stream it as a `.zip` (via `lib/bruno-export.ts`).
-  - `api/endpoints/route.ts` — GET: lightweight
-    `[{apiId, method, path, operationId}]` index; the Bruno importer uses it to
-    match imported requests back to operation pages.
-- `components/` — `RequestBuilder` (state-heavy), plus `Card`, `Field`,
-  `Tabs`, `StatusBadge`, `MethodBadge`, `SchemaField`, `JsonEditor`,
-  `ResponsePanel`, `ScopeSelector`, `TokenStatus`, `HeaderEditor`,
-  `BrunoExportButton`.
-- `lib/` — `specs.ts` (server-side YAML loader, module cache + `resetSpecCache`),
-  `sync.ts` (config loader + copy helper, mirror of `scripts/copy-specs.mjs`),
-  `gitlab.ts` (GitLab release download + unzip via `fflate`, writes
-  `public/specs/<api>.yaml`; tolerant of nested `<api>/v1/openapi.bundle.yaml`
-  and flat `<api>.yaml` zip layouts),
-  `bruno.ts` (Bruno `opencollection` YAML serialize/parse, neutral — used on
-  both server and client), `bruno-export.ts` (server-only: spec → collection
-  tree), `types.ts` (OpenAPI 3.1 type surface used by the UI),
-  `schema-form` lives in `components/SchemaField.tsx` (recursive renderer),
-  `example-extractor.ts`, `storage.ts`, `token.ts`, `http.ts`,
-  `design.ts`.
-- `public/specs/` — populated at predev/prebuild (or via `npm run sync-specs` /
-  the Settings UI) by `scripts/copy-specs.mjs` from the configured `specsDir`.
+- `src-tauri/` — Rust. `src/lib.rs` registers the 4 plugins and exposes two
+  commands: `read_source_specs(dir)` (reads a user-picked local source dir for
+  the local sync) and `write_file(path, contents)` (saves Bruno exports to a
+  user-chosen path). `tauri.conf.json`: `beforeDevCommand: npm run dev`,
+  `devUrl: http://localhost:3001`, `frontendDist: ../out`. Permissions in
+  `capabilities/default.json`.
+- `app/` — App Router, **all client components** (static export).
+  - `page.tsx` — API grid (`?` none) → links to `/api-view?id=<api>`.
+  - `api-view/page.tsx` — endpoints by tag; reads `?id=<api>`.
+  - `endpoint/page.tsx` — hosts `RequestBuilder`; reads `?api=<api>&op=<operationId>`.
+  - `collections/`, `settings/` — client pages.
+  - `layout.tsx` — wraps `TauriProvider` (startup gate) + `AppShell`; the
+    `<Suspense>` boundary satisfies static export's `useSearchParams` rule.
+  - **No `app/api/*`** — deleted; that logic is client-side now.
+- `components/` — `RequestBuilder` (state-heavy), `tauri-provider.tsx`
+  (hydrate store + seed specs before render), `app-shell.tsx` (loads the API
+  list client-side, refreshes on `SPECS_CHANGED_EVENT`), plus `Card`, `Field`,
+  `Tabs`, `MethodBadge`, `SchemaField`, `JsonEditor`, `ResponsePanel`,
+  `ScopeSelector`, `TokenStatus`, `HeaderEditor`, `BrunoExportButton`, `SyncDiff`.
+- `lib/`
+  - `platform.ts` — `isTauri()` runtime detection.
+  - `store.ts` — shared tauri-plugin-store handle (localStorage fallback).
+  - `storage.ts` — sync settings/token cache + `bootstrapStorage()`.
+  - `config.ts` — specsDir + GitLab config in the store.
+  - `specs.ts` — async client spec loader; `specs-fs.ts` — fs/seed layer.
+  - `net.ts` — `tauriFetch` (tauri-plugin-http; no CORS) + base64 helpers.
+  - `token.ts`, `http.ts` — call the upstream directly (ex-`/api/token`,
+    `/api/proxy`); reuse `url-policy.ts` (allowlist + header filter + caps).
+  - `sync.ts` — local-dir sync (Rust `read_source_specs` → `specs-fs`).
+  - `gitlab.ts` — GitLab release download (tauriFetch) + `fflate` unzip → `specs-fs`.
+  - `bruno.ts` / `bruno-export.ts` — Bruno collection (pure JS, unchanged).
+  - `dialog.ts` (folder/save pickers), `exporter.ts` (save via `write_file`).
+  - `deref.ts`, `spec-diff.ts`, `example-extractor.ts`, `env.ts`, `types.ts`,
+    `hal.ts`, `jwt.ts`, `design.ts`, `utils.ts`.
+- `public/specs/` — bundled seed specs + `manifest.json` (generated; gitignored).
 
 ## Before editing
 
-1. **Spec changes win.** If a contract gains a path, scope, or schema, the
-   only thing required here is `npm run sync-specs` (or the "Synchroniser
-   maintenant" button in Settings) — the new bundle is copied and the
-   in-memory cache reset, so pages reload with the updated schema without
-   a server restart. If the configured `specsDir` doesn't exist, the script
-   warns and exits 0; the UI loads with no APIs visible.
-2. **`scripts/copy-specs.mjs` and `lib/sync.ts` are duplicates.** The CLI
-   script runs under plain `node` and can't import TS; the route uses the
-   TS module. Update both when changing resolution rules or copy logic.
-   (The GitLab source in `lib/gitlab.ts` is UI/route-only — not mirrored in
-   the CLI, which still copies from the local `specsDir` at predev/prebuild.)
-   The **spec-diff** algorithm is duplicated the same way: `lib/spec-diff.ts`
-   (typed; both sync paths return `diffs` in their result, surfaced by the
-   Settings UI via `components/SyncDiff.tsx`) and a plain-JS mirror in
-   `scripts/copy-specs.mjs` (console summary). Keep the two in step.
-3. **Don't break the server / client boundary.** `specs.ts` is server-only
-   (uses `node:fs`). The request builder is `"use client"` and only sees
-   serialised props.
-4. **Never bypass `/api/token` or `/api/proxy`.** The browser must not
-   talk to `api.pack-solutions.com` directly — both for CORS and to keep
-   the `client_secret` off the wire.
+1. **Spec changes win.** New bundle in the local `specsDir` → local sync
+   (topbar button or Settings) copies it into `$APPDATA/specs` and calls
+   `resetSpecCache()`, which fires `SPECS_CHANGED_EVENT` so pages reload. The
+   bundled seed only refreshes at predev/prebuild via `copy-specs.mjs`.
+2. **`copy-specs.mjs` still mirrors the sync/diff logic.** It runs under plain
+   `node` (can't import TS) and, besides copying, emits `public/specs/manifest.json`
+   and prints a spec diff. Its diff is a JS mirror of `lib/spec-diff.ts` — keep
+   the two in step. (Runtime sync now lives in `lib/sync.ts` / `lib/gitlab.ts`,
+   not a server route.)
+3. **Tauri vs browser.** Every Tauri plugin call is guarded by `isTauri()` with
+   a graceful fallback (localStorage for the store; bundled static `/specs/`
+   for reads). Keep imports of `@tauri-apps/*` behind dynamic `import()` inside
+   functions so the static export still prerenders.
+4. **Keep `url-policy.ts` on the token/proxy paths.** `checkUrl` (allowlist +
+   private-IP block) and the header safelist still guard `lib/token.ts` /
+   `lib/http.ts`. The Tauri HTTP capability scope in
+   `src-tauri/capabilities/default.json` is the other gate — a **custom GitLab
+   host or release-asset storage host** may need adding there.
+5. **Storage stays synchronous.** `loadSettings/saveSettings/loadToken/saveToken`
+   are sync (backed by the cache). Do not make them async — the cache is
+   hydrated by `TauriProvider` before any page renders.
 
 ## Commands
 
 ```
-npm run dev          # http://localhost:3001 (predev copies specs)
-npm run build        # production build (prebuild copies specs)
-npm run sync-specs   # re-copy specs without restarting dev (UI button does same)
+npm run tauri:dev    # full desktop app (next dev :3001 + webview)  ← primary
+npm run dev          # frontend only in a browser (Tauri APIs disabled)
+npm run build        # static export → out/ (prebuild copies specs + manifest)
+npm run tauri:build  # bundle the desktop app
+npm run sync-specs   # refresh bundled seed specs + manifest from specsDir
 npm run typecheck    # tsc --noEmit
 ```
 
-No test runner, ESLint, or Prettier is configured. `typecheck` is the only
-automated check — run it before shipping.
+No test runner/ESLint/Prettier. `typecheck` + `next build` (static export) +
+`cargo check` (in `src-tauri/`) are the automated checks — run before shipping.
 
 ## Known limitations
 
-- Only the OAuth2 Client Credentials flow is supported — the contracts
-  don't declare anything else.
-- Requests are **not persisted** (no localStorage collections). Exchange is via
-  Bruno collections: export a whole API (`/api/bruno/export`) or the current
-  request from the builder; import a Bruno `.zip`/`.yml` on `/collections`.
-  Bruno import supports the newer `opencollection` YAML format only (not the
-  classic `.bru` DSL). Imported requests are matched to a spec endpoint by
-  method + path and opened in the builder via a one-shot `sessionStorage` seed
-  (`IMPORT_SEED_KEY`); a request with no matching loaded spec is shown but not
-  openable.
-- `client_secret` is stored in `localStorage` for convenience. Acceptable
-  for an internal tool; a public deployment would need a server-side
-  encrypted store and a per-user session.
+- Only the OAuth2 Client Credentials flow is supported.
+- Requests are **not persisted**. Exchange is via Bruno collections: export a
+  whole API or the current request (client-side, saved via a native dialog);
+  import a Bruno `.zip`/`.yml` on `/collections`. Import supports the
+  `opencollection` YAML format only. Imported requests match a spec endpoint by
+  method + path and open via a one-shot `sessionStorage` seed (`IMPORT_SEED_KEY`).
+- `clientSecret`, token and the GitLab PAT live in the app-data store
+  (`packrest.json`), unencrypted — same protection level as the previous
+  localStorage / gitignored file. A hardened build would move secrets to the
+  OS keychain.

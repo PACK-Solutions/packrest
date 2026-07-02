@@ -6,9 +6,13 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 /** @type {import('next').NextConfig} */
 const config = {
   reactStrictMode: true,
+  // Static export: the frontend is bundled into `out/` and served by the Tauri
+  // webview. There is no Node server at runtime — all former API routes now run
+  // client-side through Tauri plugins.
+  output: "export",
+  images: { unoptimized: true },
   outputFileTracingRoot: __dirname,
-  // Allow LAN devices (phones, other machines) to reach the dev server's
-  // HMR/websocket resources without the cross-origin block.
+  // Allow LAN devices to reach the dev server's HMR resources (dev only).
   allowedDevOrigins: ["192.168.1.15", "192.168.1.*"],
 };
 

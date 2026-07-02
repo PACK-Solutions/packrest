@@ -2,13 +2,16 @@
 
 import { useState } from "react";
 import { Download, Loader2 } from "lucide-react";
+import { zipSync, strToU8 } from "fflate";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
+import { buildBrunoCollection } from "@/lib/bruno-export";
+import { saveBytes } from "@/lib/exporter";
 
-// Downloads a Bruno collection (.zip) for an API, generated server-side from
-// its OpenAPI spec. Uses fetch + Blob so a server error surfaces as a toast
-// instead of navigating away to a JSON error page.
+// Builds a Bruno collection (.zip) for an API entirely client-side from its
+// OpenAPI spec (buildBrunoCollection + fflate), then saves it via a native
+// dialog. Formerly this hit the server-side /api/bruno/export route.
 export default function BrunoExportButton({
   apiId,
   title,
@@ -21,27 +24,18 @@ export default function BrunoExportButton({
   const onExport = async () => {
     setBusy(true);
     try {
-      const res = await fetch(
-        `/api/bruno/export?api=${encodeURIComponent(apiId)}`,
-      );
-      if (!res.ok) {
-        let message = `HTTP ${res.status}`;
-        try {
-          const body = (await res.json()) as { error_description?: string };
-          if (body.error_description) message = body.error_description;
-        } catch {
-          /* non-JSON error body */
-        }
-        throw new Error(message);
+      const collection = await buildBrunoCollection(apiId);
+      if (!collection) throw new Error("Spec introuvable pour cette API.");
+      // Zip laid out like ../openapi/bruno/<api>/v1/, mirroring the old route.
+      const entries: Record<string, Uint8Array> = {};
+      for (const [rel, content] of Object.entries(collection.files)) {
+        entries[`${collection.dir}/${rel}`] = strToU8(content);
       }
-      const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `${apiId}-bruno.zip`;
-      a.click();
-      URL.revokeObjectURL(url);
-      toast.success("Collection Bruno exportée", { description: title });
+      const zipped = zipSync(entries);
+      const saved = await saveBytes(`${apiId}-bruno.zip`, zipped, [
+        { name: "Archive Bruno", extensions: ["zip"] },
+      ]);
+      if (saved) toast.success("Collection Bruno exportée", { description: title });
     } catch (e) {
       toast.error("Échec de l'export Bruno", {
         description: (e as Error).message,

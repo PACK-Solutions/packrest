@@ -59,6 +59,7 @@ import type {
   OpenApiParameter,
   JsonSchema,
 } from "@/lib/types";
+import { saveText } from "@/lib/exporter";
 import { cn } from "@/lib/utils";
 
 interface Props {
@@ -431,16 +432,15 @@ export default function RequestBuilder(props: Props) {
           : undefined,
       docs,
     };
-    const blob = new Blob([serializeRequestYml(req)], {
-      type: "application/yaml",
-    });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `${effectiveDefaultName.replace(/[/\\]+/g, "-").trim() || "request"}.yml`;
-    a.click();
-    URL.revokeObjectURL(url);
-    toast.success("Requête exportée (Bruno)");
+    const name = `${effectiveDefaultName.replace(/[/\\]+/g, "-").trim() || "request"}.yml`;
+    saveText(name, serializeRequestYml(req), [
+      { name: "Requête Bruno", extensions: ["yml"] },
+    ]).then(
+      (saved) => {
+        if (saved) toast.success("Requête exportée (Bruno)");
+      },
+      (e) => toast.error("Échec de l'export", { description: (e as Error).message }),
+    );
   };
 
   // Persist the context path of the current API, derived from the edited base

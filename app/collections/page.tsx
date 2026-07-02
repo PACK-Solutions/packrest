@@ -19,6 +19,7 @@ import {
   type BrunoRequest,
   type ImportSeed,
 } from "@/lib/bruno";
+import { listApis, loadSpec, listEndpoints } from "@/lib/specs";
 
 interface EndpointIndexEntry {
   apiId: string;
@@ -67,18 +68,31 @@ export default function CollectionsPage() {
   const fileInput = useRef<HTMLInputElement | null>(null);
 
   // Endpoint index for matching imported requests back to operation pages.
+  // Built client-side from the loaded specs (method uppercased to match the
+  // importer's comparison).
   useEffect(() => {
     let cancelled = false;
-    fetch("/api/endpoints")
-      .then((r) =>
-        r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)),
-      )
-      .then((data: { endpoints: EndpointIndexEntry[] }) => {
-        if (!cancelled) setIndex(data.endpoints ?? []);
-      })
-      .catch(() => {
+    (async () => {
+      try {
+        const ids = await listApis();
+        const idx: EndpointIndexEntry[] = [];
+        for (const apiId of ids) {
+          const doc = await loadSpec(apiId);
+          if (!doc) continue;
+          for (const e of listEndpoints(doc, apiId)) {
+            idx.push({
+              apiId,
+              method: e.method.toUpperCase(),
+              path: e.path,
+              operationId: e.operationId,
+            });
+          }
+        }
+        if (!cancelled) setIndex(idx);
+      } catch {
         /* matching just stays disabled if the index can't load */
-      });
+      }
+    })();
     return () => {
       cancelled = true;
     };
@@ -175,7 +189,9 @@ export default function CollectionsPage() {
     } catch {
       /* private-mode etc. — the builder just opens without pre-fill */
     }
-    router.push(`/${r.match.apiId}/${r.match.operationId}`);
+    router.push(
+      `/endpoint?api=${encodeURIComponent(r.match.apiId)}&op=${encodeURIComponent(r.match.operationId)}`,
+    );
   };
 
   const renderInput = () => (

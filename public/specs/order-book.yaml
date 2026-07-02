@@ -1,0 +1,1772 @@
+openapi: 3.1.2
+info:
+  title: Order Book API
+  description: |
+    # Overview
+    The Order Book API exposes order books — the consolidated lists of
+    financial orders aggregated from contract management acts and
+    packaged for downstream depositaries and back-office systems.
+
+    The API is **read-only**: order books are surfaced for consumption
+    (metadata, line-level browsing, file download). No write operations
+    are exposed.
+
+    ## Core Concepts
+
+    ### Order Book
+    An order book groups together the orders aggregated for a single
+    dispatch context. Each order book carries metadata
+    (generation/dispatch/treatment dates, depositary, network,
+    periodicity), aggregated counters (`line_count`,
+    `estimated_total_amount`, `confirmed_total_amount`,
+    `delta_total_amount`) and a downloadable file.
+
+    The order book itself is **format-agnostic** — its canonical
+    shape on the REST resource is the JSON envelope (metadata + every
+    order line embedded inline). Non-standard layouts (CSV / XLSX)
+    are produced on demand by the file download endpoint.
+
+    ### Order Lines
+    Each order book is composed of order lines that share a common
+    structure (contract, product, support, side, status, dates,
+    amount, share count, unit price, reconciliation key, management
+    act id, depositary). The REST API exposes the canonical
+    (STANDARD) field set; format-specific extra columns
+    (order reference, cancellation flag, network code, effect date,
+    emission type, portfolio code) are emitted only inside the
+    corresponding file projections at download time.
+
+    ### REST resource
+    `GET /order-books/{order_book_id}` returns the canonical JSON
+    representation of an order book — metadata, counters, and every
+    order line embedded under `_embedded.orders`. This is *the*
+    standard JSON shape; no `format` selection is involved on the
+    REST side.
+
+    `GET /order-books/{order_book_id}/orders` provides a paginated
+    browse view of the same lines and is meant for clients that need
+    pagination or status filtering rather than the whole book at once.
+
+    ### File Download
+    `GET /order-books/{order_book_id}/file?format=…` projects the
+    order book into one of five non-standard file layouts. The
+    required `format` query parameter selects the layout:
+
+    - `JUMP1`, `STARCUST`, `STARCUST2`, `GAIA` return `text/csv`.
+    - `JUMP2` returns
+      `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`
+      (XLSX).
+
+    The canonical JSON representation is not exposed by this
+    endpoint — fetch the REST resource instead.
+
+    The `Content-Disposition` header carries a suggested filename
+    whose suffix matches the media type (`.csv` or `.xlsx`).
+
+    ## Security and Authentication
+    The API is secured using **OAuth 2.0** (Client Credentials flow).
+    Clients must obtain an access token and include it in the
+    `Authorization` header as a Bearer token. All operations require
+    the `order-books:read` scope.
+  version: 0.0.59
+  contact:
+    name: Pack Solutions Support
+    email: support@pack-solutions.com
+  license:
+    name: Proprietary
+    url: https://pack-solutions.com/license
+security:
+  - oauth2: []
+tags:
+  - name: order-book
+    description: |
+      Browse and download order books. The canonical JSON
+      representation is served by the REST resource; non-standard
+      file layouts (JUMP1/STARCUST/STARCUST2/GAIA CSV, JUMP2 XLSX)
+      are produced by the file download endpoint.
+  - name: order
+    description: |
+      Browse the order lines that compose an order book. Lines share
+      a single canonical shape; format-specific extra fields surface
+      only in the corresponding file projections.
+paths:
+  /order-books:
+    get:
+      operationId: listOrderBooks
+      summary: List order books
+      description: |
+        Retrieve a paginated list of generated order books.
+
+        Optionally filter by `depositary_code` or generation date range
+        (`date_of_generation_from` / `date_of_generation_to`). Multiple
+        filters are combined with logical AND.
+      tags:
+        - order-book
+      security:
+        - oauth2:
+            - order-books:read
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/OrderBookDepositaryQuery'
+        - $ref: '#/components/parameters/DateOfGenerationFromQuery'
+        - $ref: '#/components/parameters/DateOfGenerationToQuery'
+      responses:
+        '200':
+          description: Paginated collection of order books.
+          content:
+            application/hal+json:
+              schema:
+                $ref: '#/components/schemas/OrderBookCollection'
+              examples:
+                paginatedResponse:
+                  $ref: '#/components/examples/OrderBookCollection'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+  /order-books/{order_book_id}:
+    get:
+      operationId: getOrderBook
+      summary: Retrieve an order book by id
+      description: |
+        Retrieve a generated order book by its unique identifier.
+
+        The response is the canonical JSON representation of the order
+        book — metadata, aggregated counters, and every order line embedded
+        inline under `_embedded.orders`. The HAL `_links` block exposes
+        the `file` (file download) and `orders` (paginated browse)
+        relations.
+      tags:
+        - order-book
+      security:
+        - oauth2:
+            - order-books:read
+      parameters:
+        - $ref: '#/components/parameters/OrderBookId'
+      responses:
+        '200':
+          description: Order book retrieved.
+          content:
+            application/hal+json:
+              schema:
+                $ref: '#/components/schemas/OrderBookDetail'
+              examples:
+                orderBook:
+                  $ref: '#/components/examples/OrderBookDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+  /order-books/{order_book_id}/file:
+    get:
+      operationId: downloadOrderBookFile
+      summary: Download the order book file
+      description: |
+        Download the order book in a non-standard file layout. The
+        required `format` query parameter selects which layout is
+        produced:
+
+        - `JUMP1`, `STARCUST`, `STARCUST2`, `GAIA` return `text/csv`.
+        - `JUMP2` returns
+          `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`
+          (XLSX).
+
+        The canonical JSON representation of the order book is not
+        available on this endpoint — it is served by
+        `GET /order-books/{order_book_id}`.
+
+        The `Content-Disposition` header carries a suggested filename
+        whose suffix matches the media type (`.csv` or `.xlsx`).
+      tags:
+        - order-book
+      security:
+        - oauth2:
+            - order-books:read
+      parameters:
+        - $ref: '#/components/parameters/OrderBookId'
+        - $ref: '#/components/parameters/OrderBookFileFormatQuery'
+      responses:
+        '200':
+          description: Order book file payload — CSV or XLSX depending on `format`.
+          headers:
+            Content-Disposition:
+              description: Suggests a filename for clients saving the response to disk.
+              schema:
+                type: string
+                maxLength: 256
+                example: attachment; filename="order-book-2026-05-07.csv"
+          content:
+            text/csv:
+              schema:
+                type: string
+                format: binary
+                maxLength: 104857600
+                description: |
+                  CSV payload for `JUMP1`, `STARCUST`, `STARCUST2`, `GAIA`
+                  order books.
+            application/vnd.openxmlformats-officedocument.spreadsheetml.sheet:
+              schema:
+                type: string
+                format: binary
+                maxLength: 104857600
+                description: XLSX payload for `JUMP2` order books.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+  /order-books/{order_book_id}/orders:
+    get:
+      operationId: listOrderBookOrders
+      summary: List order lines of an order book
+      description: |
+        Retrieve a paginated list of order lines belonging to the given
+        order book.
+
+        Optionally filter by reconciliation `status` (`CONFIRMED`,
+        `ESTIMATED`, `DELTA`).
+      tags:
+        - order
+      security:
+        - oauth2:
+            - order-books:read
+      parameters:
+        - $ref: '#/components/parameters/OrderBookId'
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/OrderStatusQuery'
+      responses:
+        '200':
+          description: Paginated collection of order lines.
+          content:
+            application/hal+json:
+              schema:
+                $ref: '#/components/schemas/OrderCollection'
+              examples:
+                orderLines:
+                  $ref: '#/components/examples/OrderCollection'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+  /order-books/{order_book_id}/orders/{order_id}:
+    get:
+      operationId: getOrderBookOrder
+      summary: Retrieve an order line by id
+      description: |
+        Retrieve a single order line by its unique identifier within the
+        parent order book.
+      tags:
+        - order
+      security:
+        - oauth2:
+            - order-books:read
+      parameters:
+        - $ref: '#/components/parameters/OrderBookId'
+        - $ref: '#/components/parameters/OrderId'
+      responses:
+        '200':
+          description: Order line retrieved.
+          content:
+            application/hal+json:
+              schema:
+                $ref: '#/components/schemas/OrderResource'
+              examples:
+                orderLine:
+                  $ref: '#/components/examples/OrderResource'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+components:
+  schemas:
+    ProblemDetails:
+      type: object
+      title: Problem Details
+      description: A RFC 9457 compliant problem detail object
+      properties:
+        detail:
+          type: string
+          minLength: 1
+          maxLength: 1000
+          description: A human-readable explanation specific to this occurrence of the problem.
+          example: Your current balance is 30, but that costs 50.
+        instance:
+          type: string
+          format: uri-reference
+          maxLength: 2048
+          description: A URI reference that identifies the specific occurrence of the problem.
+          example: https://pack-solutions.com/accounts/12345/msgs/abc
+        status:
+          type: integer
+          format: int32
+          minimum: 100
+          maximum: 599
+          description: The HTTP status code generated by the origin server for this occurrence of the problem.
+          example: 403
+        title:
+          type: string
+          minLength: 1
+          maxLength: 255
+          description: A short, human-readable summary of the problem type.
+          example: You do not have enough credit.
+        type:
+          type: string
+          format: uri-reference
+          maxLength: 2048
+          description: A URI reference that identifies the problem type.
+          default: about:blank
+          example: https://pack-solutions.com/probs/out-of-stock
+    ValidationProblemDetails:
+      type: object
+      title: Validation Problem Details
+      description: |
+        An extension of RFC 9457 Problem Details that includes structured validation errors.
+        Used for responses where the server needs to communicate specific field-level or business-rule validation failures.
+      allOf:
+        - $ref: '#/components/schemas/ProblemDetails'
+        - type: object
+          properties:
+            errors:
+              type: array
+              maxItems: 100
+              description: A list of validation errors that occurred during request processing.
+              items:
+                $ref: '#/components/schemas/ValidationError'
+    ValidationError:
+      type: object
+      title: Validation Error
+      description: |
+        A single validation error entry describing a specific issue with the request.
+      properties:
+        code:
+          $ref: '#/components/schemas/ValidationErrorCode'
+        detail:
+          type: string
+          minLength: 1
+          maxLength: 1000
+          description: A human-readable explanation of the validation error.
+        pointer:
+          type: string
+          minLength: 1
+          maxLength: 500
+          pattern: ^/
+          description: |
+            A JSON Pointer (RFC 6901) to the field in the request body that caused the
+            error. For asynchronous validations surfaced on a service request (e.g.,
+            manual review rejections), the same convention is used in
+            `ServiceRequestRequirement.pointer` (entries with `kind=DATA_FIELD`). Consumer
+            rendering logic can therefore be shared between synchronous `422` errors and
+            asynchronous INVALID requirements.
+
+            When the offending field lives inside a HAL `_embedded` or `_links` block
+            (e.g., on a 409 conflict against a resource that exposes its sub-collections
+            via embedding), the pointer follows the **physical** structure of the HAL
+            response and includes the `_embedded`/`_links` segments — for example
+            `/_embedded/individuals/0/birth/date_of_birth`.
+      required:
+        - code
+        - detail
+    ValidationErrorCode:
+      type: string
+      title: Validation Error Code
+      description: |
+        A machine-readable error code indicating the type of validation failure.
+
+        Prefer the most specific code available. Use `UNPROCESSABLE` and `CUSTOM`
+        only as last-resort fallbacks when no specific code fits.
+
+        ### Presence (typically on 422 and 400)
+        - `MISSING`: A required resource or related entity is missing (e.g., referenced `subscriber_id` does not exist).
+        - `MISSING_FIELD`: A required field was not provided in the request body.
+
+        ### Shape (typically on 400 and 422)
+        - `INVALID`: The field value is invalid in a generic sense. Use a more specific code when applicable.
+        - `INVALID_FORMAT`: The field value does not match the expected format (e.g., not a valid IBAN, UUID, ISO-8601 date).
+        - `OUT_OF_RANGE`: The field value is well-formed but falls outside the accepted range — numeric bounds, temporal window, or string length.
+        - `INCONSISTENT`: The field is inconsistent with another field in the same payload (e.g., `allocations` rates do not sum to 100%, `date_of_end` before `date_of_start`).
+
+        ### State (typically on 409)
+        - `ALREADY_EXISTS`: The resource or value already exists and duplicates are not allowed.
+        - `INVALID_STATE`: The operation is incompatible with the current state of the resource (e.g., trying to cancel an already-executed premium, submitting a contract whose subscriber is still in `DRAFT`).
+
+        ### Business rules (typically on 422)
+        - `BUSINESS_RULE_VIOLATION`: A documented business rule is violated and no more specific code above fits (e.g., a regulatory threshold is crossed).
+
+        ### Fallbacks
+        - `UNPROCESSABLE`: Legacy generic code. **Prefer `BUSINESS_RULE_VIOLATION` or a state/shape code above.**
+        - `CUSTOM`: A custom validation error not covered by the standard codes.
+      enum:
+        - MISSING
+        - MISSING_FIELD
+        - INVALID
+        - INVALID_FORMAT
+        - OUT_OF_RANGE
+        - INCONSISTENT
+        - ALREADY_EXISTS
+        - INVALID_STATE
+        - BUSINESS_RULE_VIOLATION
+        - UNPROCESSABLE
+        - CUSTOM
+      example: MISSING_FIELD
+    BadRequest:
+      type: object
+      title: Bad Request
+      description: Bad Request (400)
+      allOf:
+        - $ref: '#/components/schemas/ValidationProblemDetails'
+    Unauthorized:
+      type: object
+      title: Unauthorized
+      description: Unauthorized (401)
+      allOf:
+        - $ref: '#/components/schemas/ProblemDetails'
+    Forbidden:
+      type: object
+      title: Forbidden
+      description: Forbidden (403)
+      allOf:
+        - $ref: '#/components/schemas/ProblemDetails'
+    NotFound:
+      type: object
+      title: Not Found
+      description: Not Found (404)
+      allOf:
+        - $ref: '#/components/schemas/ProblemDetails'
+    InternalServerError:
+      type: object
+      title: Internal Server Error
+      description: Internal Server Error (500)
+      allOf:
+        - $ref: '#/components/schemas/ProblemDetails'
+    HalLink:
+      type: object
+      title: HalLink
+      description: |
+        HAL link object. Minimal shape: an `href` (URI of the linked resource)
+        and the `method` to use when following it. Navigation and pagination
+        relations use `GET`; action relations use `POST` (or `DELETE` for
+        resource removal). The project does not use `PUT` or `PATCH`.
+      additionalProperties: false
+      required:
+        - href
+        - method
+      properties:
+        href:
+          type: string
+          format: uri-reference
+          maxLength: 2048
+          description: URI of the linked resource.
+          example: /resources/1f1a8119-4e24-4460-a126-c79f8ed0017f
+        method:
+          $ref: '#/components/schemas/HalLinkMethod'
+          description: HTTP method to use when following this link.
+    HalLinkMethod:
+      type: string
+      title: HalLinkMethod
+      description: |
+        HTTP method to use when following a HAL link. Restricted to
+        `GET` (navigation), `POST` (actions and mutations), and `DELETE`
+        (resource removal). The project does not use `PUT` or `PATCH`.
+      enum:
+        - GET
+        - POST
+        - DELETE
+      example: GET
+    HalPaginationLinks:
+      type: object
+      title: HalPaginationLinks
+      description: |
+        Pagination link relations used inside the `_links` of a collection envelope.
+        `first` and `last` are always present; `next` and `prev` are conditional on
+        page state. Compose with `HalSelfLinks` in every `*Collection._links`.
+      properties:
+        first:
+          $ref: '#/components/schemas/HalLink'
+          description: Link to the first page of the collection.
+        last:
+          $ref: '#/components/schemas/HalLink'
+          description: Link to the last page of the collection.
+        next:
+          $ref: '#/components/schemas/HalLink'
+          description: Link to the next page of the collection. Omitted on the last page.
+        prev:
+          $ref: '#/components/schemas/HalLink'
+          description: Link to the previous page of the collection. Omitted on the first page.
+      required:
+        - first
+        - last
+      example:
+        first:
+          href: /resources?page=1&size=20
+          method: GET
+        last:
+          href: /resources?page=5&size=20
+          method: GET
+        next:
+          href: /resources?page=3&size=20
+          method: GET
+        prev:
+          href: /resources?page=1&size=20
+          method: GET
+    HalSelfLinks:
+      type: object
+      title: HalSelfLinks
+      description: |
+        Base shape for every `_links` block. Guarantees that the `self` link is present
+        on every HAL Resource and Collection envelope. Compose with `HalPaginationLinks`
+        for paginated collections, or extend inline with action/navigation relations.
+      properties:
+        self:
+          $ref: '#/components/schemas/HalLink'
+          description: Link to the current resource.
+      required:
+        - self
+      example:
+        self:
+          href: /resources/1f1a8119-4e24-4460-a126-c79f8ed0017f
+          method: GET
+    PageMetadata:
+      type: object
+      title: PageMetadata
+      description: Pagination metadata for collection responses.
+      properties:
+        number:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 10000
+          description: Current page number (one-based).
+          example: 1
+        size:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 100
+          description: Number of items per page.
+          example: 20
+        total_elements:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 999999999999
+          description: Total number of items across all pages.
+          example: 100
+        total_pages:
+          type: integer
+          format: int32
+          minimum: 0
+          maximum: 10000
+          description: Total number of pages.
+          example: 5
+      required:
+        - size
+        - total_elements
+        - total_pages
+        - number
+    Amount:
+      type: object
+      title: Amount
+      description: |
+        Monetary amount represented as an integer value with a scale factor and currency.
+        The actual decimal amount is computed as `value * 10^(-scale)`.
+        For example, `{ "value": 12345, "scale": 2, "currency": "EUR" }` represents €123.45.
+      properties:
+        currency:
+          $ref: '#/components/schemas/CurrencyCode'
+        scale:
+          type: integer
+          format: int32
+          minimum: 0
+          maximum: 9
+          description: |
+            The number of decimal places to apply to the value.
+            The actual amount equals `value * 10^(-scale)`.
+          example: 2
+        value:
+          type: integer
+          format: int64
+          minimum: -999999999999999
+          maximum: 999999999999999
+          description: The unscaled integer value of the amount.
+          example: 12345
+      required:
+        - value
+        - scale
+        - currency
+    CurrencyCode:
+      type: string
+      title: Currency Code
+      description: |
+        ISO 4217 currency code.
+
+        - `EUR`: Euro
+        - `USD`: US Dollar
+        - `GBP`: British Pound Sterling
+        - `CHF`: Swiss Franc
+      enum:
+        - EUR
+        - USD
+        - GBP
+        - CHF
+      example: EUR
+    OrderBookFormat:
+      type: string
+      title: OrderBookFormat
+      description: |
+        File layout selected at download time on
+        `GET /order-books/{order_book_id}/file`. Only non-standard layouts
+        are exposed here — the canonical JSON shape (former `STANDARD`)
+        lives directly on the REST resource
+        (`GET /order-books/{order_book_id}`) and is therefore not a
+        downloadable format.
+
+        - `JUMP1`: JUMP first-level layout (CSV) — adds order reference,
+          cancellation flag and network code on top of the core fields.
+        - `JUMP2`: JUMP second-level layout (XLSX) — adds an effect date on
+          top of `JUMP1`.
+        - `STARCUST`: STARCUST layout (CSV) — same field set as `JUMP2`.
+        - `STARCUST2`: STARCUST second-generation layout (CSV) — uses
+          `portfolio_code` instead of `depositary_code`.
+        - `GAIA`: GAIA layout (CSV) — adds an order emission type
+          (`AMOUNT` / `QUANTITY`) on top of `JUMP2`.
+      enum:
+        - JUMP1
+        - JUMP2
+        - STARCUST
+        - STARCUST2
+        - GAIA
+      example: JUMP1
+    OrderBookPeriodicity:
+      type: string
+      title: Order Book Periodicity
+      description: |
+        Generation cadence of an order book.
+
+        - `DAILY`: produced on every business day.
+        - `ON_DEMAND`: produced ad-hoc on operator request.
+      enum:
+        - DAILY
+        - ON_DEMAND
+      example: DAILY
+    OrderBookCounters:
+      type: object
+      title: OrderBookCounters
+      description: |
+        Aggregated counters of an order book. Summarizes the number of
+        order lines and the total monetary amount split by reconciliation
+        status (estimated, confirmed, delta).
+      properties:
+        confirmed_total_amount:
+          allOf:
+            - $ref: '#/components/schemas/Amount'
+          readOnly: true
+          description: Sum of the invested amounts of lines whose `status` is `CONFIRMED`.
+        delta_total_amount:
+          allOf:
+            - $ref: '#/components/schemas/Amount'
+          readOnly: true
+          description: Sum of the invested amounts of lines whose `status` is `DELTA`.
+        estimated_total_amount:
+          allOf:
+            - $ref: '#/components/schemas/Amount'
+          readOnly: true
+          description: Sum of the invested amounts of lines whose `status` is `ESTIMATED`.
+        line_count:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 10000000
+          readOnly: true
+          description: Total number of order lines in the order book.
+          example: 124
+      required:
+        - line_count
+        - estimated_total_amount
+        - confirmed_total_amount
+        - delta_total_amount
+    OrderBookBase:
+      type: object
+      title: OrderBookBase
+      description: |
+        Domain representation of an order book — the consolidated list of
+        financial orders aggregated for delivery to a depositary or
+        downstream system.
+
+        Carries the metadata describing the order book
+        (generation/dispatch/treatment dates, depositary, network,
+        periodicity) and the aggregated counters. The order book is
+        format-agnostic: layout (STANDARD JSON, JUMP1/STARCUST/STARCUST2/GAIA
+        CSV, JUMP2 XLSX) is selected at download time on
+        `GET /order-books/{order_book_id}/file`.
+
+        Does not carry HAL fields; those live on the read wrappers
+        (`OrderBookResource`, `OrderBookDetail`).
+      properties:
+        counters:
+          $ref: '#/components/schemas/OrderBookCounters'
+        created_at:
+          type: string
+          format: date-time
+          minLength: 20
+          maxLength: 35
+          readOnly: true
+          description: Timestamp at which the order book was generated (ISO-8601 UTC).
+          example: 2026-05-07T06:00:00Z
+        date_of_dispatch:
+          type: string
+          format: date
+          minLength: 10
+          maxLength: 10
+          description: Business date at which the order book file is dispatched to the recipient.
+          example: 2026-05-07
+        date_of_effect_max:
+          type: string
+          format: date
+          minLength: 10
+          maxLength: 10
+          description: |
+            Maximum effect date considered when the order book was built.
+            Orders with an effect date after this value are excluded.
+            Optional — only set when the build was constrained by an effect
+            date cut-off.
+          example: 2026-05-10
+        date_of_generation:
+          type: string
+          format: date
+          minLength: 10
+          maxLength: 10
+          description: Business date at which the order book file was generated.
+          example: 2026-05-07
+        date_of_treatment:
+          type: string
+          format: date
+          minLength: 10
+          maxLength: 10
+          description: |
+            Business date used as the inclusion cut-off — orders whose
+            effect/dispatch date is on or before this date are included in
+            the order book.
+          example: 2026-05-06
+        depositary_code:
+          type: string
+          minLength: 1
+          maxLength: 16
+          pattern: ^[A-Z0-9_-]+$
+          description: |
+            Code identifying the depositary the order book is destined to.
+          example: DEP01
+        id:
+          type: string
+          format: uuid
+          minLength: 36
+          maxLength: 36
+          readOnly: true
+          description: Server-assigned unique identifier of the order book.
+          example: 4f1a8119-4e24-4460-a126-c79f8ed0017f
+        network_code:
+          type: string
+          minLength: 1
+          maxLength: 16
+          pattern: ^[A-Z0-9_-]+$
+          description: |
+            Code identifying the distribution network the order book covers.
+            Optional.
+          example: NET01
+        periodicity:
+          $ref: '#/components/schemas/OrderBookPeriodicity'
+        updated_at:
+          type: string
+          format: date-time
+          minLength: 20
+          maxLength: 35
+          readOnly: true
+          description: Timestamp at which the order book record was last modified (ISO-8601 UTC).
+          example: 2026-05-07T06:00:00Z
+      required:
+        - id
+        - date_of_generation
+        - date_of_dispatch
+        - date_of_treatment
+        - periodicity
+        - counters
+        - created_at
+        - updated_at
+    OrderBookResource:
+      title: OrderBookResource
+      description: |
+        Lightweight HAL read wrapper around `OrderBookBase` — metadata,
+        counters, and HAL `_links` (no embedded order lines). Used in the
+        paginated list response (`GET /order-books`).
+
+        The single-resource fetch (`GET /order-books/{order_book_id}`)
+        returns a richer payload (`OrderBookDetail`) that embeds the order
+        lines inline.
+      allOf:
+        - $ref: '#/components/schemas/OrderBookBase'
+        - type: object
+          properties:
+            _links:
+              allOf:
+                - $ref: '#/components/schemas/HalSelfLinks'
+                - type: object
+                  description: |
+                    HAL navigation for an order book.
+
+                    | Relation | Method | Always present |
+                    |---|---|---|
+                    | `self` | GET | yes |
+                    | `file` | GET | yes |
+                    | `orders` | GET | yes |
+                  properties:
+                    file:
+                      $ref: '#/components/schemas/HalLink'
+                      description: Link to the file-download endpoint of this order book.
+                    orders:
+                      $ref: '#/components/schemas/HalLink'
+                      description: Link to the paginated order-lines collection of this order book.
+                  required:
+                    - file
+                    - orders
+              readOnly: true
+          required:
+            - _links
+    OrderBookDetail:
+      title: OrderBookDetail
+      description: |
+        Canonical JSON representation of an order book — the order book
+        metadata, the embedded order lines, and the HAL `_links` block.
+        Returned by `GET /order-books/{order_book_id}`.
+      allOf:
+        - $ref: '#/components/schemas/OrderBookBase'
+        - type: object
+          properties:
+            _embedded:
+              type: object
+              description: |
+                Embedded resources for the order book — currently only the
+                order lines.
+              properties:
+                orders:
+                  type: array
+                  maxItems: 10000000
+                  description: |
+                    All order lines belonging to the order book, projected
+                    with the canonical (STANDARD) field set.
+                  items:
+                    $ref: '#/components/schemas/OrderResource'
+              required:
+                - orders
+            _links:
+              allOf:
+                - $ref: '#/components/schemas/HalSelfLinks'
+                - type: object
+                  properties:
+                    file:
+                      $ref: '#/components/schemas/HalLink'
+                    orders:
+                      $ref: '#/components/schemas/HalLink'
+                  required:
+                    - file
+                    - orders
+              readOnly: true
+              description: |
+                HAL link relations. Always includes `self`, `file` (download
+                endpoint), and `orders` (paginated browse view).
+          required:
+            - _embedded
+            - _links
+    OrderBookCollectionEmbedded:
+      type: object
+      title: OrderBookCollectionEmbedded
+      description: Embedded order book resources for the current page.
+      properties:
+        order_books:
+          type: array
+          maxItems: 100
+          description: Order book resources on this page.
+          items:
+            $ref: '#/components/schemas/OrderBookResource'
+      required:
+        - order_books
+    OrderBookCollection:
+      type: object
+      title: OrderBookCollection
+      description: Paginated HAL collection of order books.
+      properties:
+        _embedded:
+          $ref: '#/components/schemas/OrderBookCollectionEmbedded'
+        _links:
+          allOf:
+            - $ref: '#/components/schemas/HalSelfLinks'
+            - $ref: '#/components/schemas/HalPaginationLinks'
+        page:
+          $ref: '#/components/schemas/PageMetadata'
+      required:
+        - _embedded
+        - _links
+        - page
+    OrderDirection:
+      type: string
+      title: OrderDirection
+      description: |
+        Functional direction of an order line.
+
+        - `INVESTMENT`: cash flowing into the contract (e.g. premium, free
+          payment, scheduled payment, switch-in).
+        - `DIVESTMENT`: cash flowing out of the contract (e.g. partial
+          surrender, scheduled surrender, switch-out, claim).
+      enum:
+        - INVESTMENT
+        - DIVESTMENT
+      example: INVESTMENT
+    OrderSide:
+      type: string
+      title: OrderSide
+      description: |
+        Market side of an order line.
+
+        - `BUY`: subscription / acquisition of fund shares.
+        - `SELL`: redemption / disposal of fund shares.
+      enum:
+        - BUY
+        - SELL
+      example: BUY
+    OrderStatus:
+      type: string
+      title: OrderStatus
+      description: |
+        Reconciliation status of an order line.
+
+        - `CONFIRMED`: priced and confirmed by the depositary.
+        - `ESTIMATED`: provisional value, awaiting depositary confirmation.
+        - `DELTA`: adjustment line that captures the difference between an
+          estimated value and its later confirmation.
+      enum:
+        - CONFIRMED
+        - ESTIMATED
+        - DELTA
+      example: CONFIRMED
+    OrderSupportType:
+      type: string
+      title: OrderSupportType
+      description: |
+        Investment support type of an order line.
+
+        - `UNIT_LINKED`: unit-linked support priced in fund shares.
+        - `MONETARY`: euro-denominated monetary support priced in cash.
+      enum:
+        - UNIT_LINKED
+        - MONETARY
+      example: UNIT_LINKED
+    OrderBase:
+      type: object
+      title: OrderBase
+      description: |
+        Common core of an order line — the 20 contract / product / support /
+        pricing fields shared by every order regardless of the destination
+        format. Built on top by `Order` (which adds `depositary_code`).
+
+        Intended for `allOf` composition only; never served standalone.
+      properties:
+        contract_number:
+          type: string
+          minLength: 1
+          maxLength: 32
+          pattern: ^[A-Z0-9-]+$
+          description: Business identifier of the contract that emitted the order.
+          example: CTR-0000123456
+        currency:
+          type: string
+          minLength: 3
+          maxLength: 3
+          pattern: ^[A-Z]{3}$
+          description: ISO 4217 currency code of the order line.
+          example: EUR
+        date_of_dispatch:
+          type: string
+          format: date
+          minLength: 10
+          maxLength: 10
+          description: Business date at which the order is dispatched to the depositary.
+          example: 2026-05-07
+        date_of_generation:
+          type: string
+          format: date
+          minLength: 10
+          maxLength: 10
+          description: Business date at which the order line was generated.
+          example: 2026-05-07
+        date_of_investment:
+          type: string
+          format: date
+          minLength: 10
+          maxLength: 10
+          description: |
+            Effective investment date of the order — the value date used to
+            compute the unit price.
+          example: 2026-05-06
+        date_of_price:
+          type: string
+          format: date
+          minLength: 10
+          maxLength: 10
+          description: Business date at which the unit price was struck.
+          example: 2026-05-06
+        direction:
+          $ref: '#/components/schemas/OrderDirection'
+        id:
+          type: string
+          format: uuid
+          minLength: 36
+          maxLength: 36
+          readOnly: true
+          description: |
+            Server-assigned unique identifier of the order line within its
+            order book. Used for the HAL `self` link.
+          example: 7c1b8119-4e24-4460-a126-c79f8ed0017f
+        invested_amount:
+          allOf:
+            - $ref: '#/components/schemas/Amount'
+          description: Gross monetary amount invested or divested by the order.
+        isin_code:
+          type: string
+          minLength: 12
+          maxLength: 12
+          pattern: ^[A-Z0-9]{12}$
+          description: ISO 6166 ISIN code of the underlying fund.
+          example: FR0000123456
+        management_act_code:
+          type: string
+          minLength: 1
+          maxLength: 8
+          pattern: ^[A-Z0-9]+$
+          description: |
+            Code of the management act that triggered the order (e.g. `VER`
+            for a free payment, `RCP` for a partial surrender, `ARI` for an
+            arbitrage, `AFN` for a scheduled payment, `RCT` for a scheduled
+            surrender, `VPR` for a premium).
+          example: VER
+        management_act_id:
+          type: string
+          minLength: 1
+          maxLength: 64
+          pattern: ^[A-Za-z0-9_-]+$
+          description: |
+            Internal identifier of the management act instance that produced
+            the order. Distinct from `management_act_code`, which is the
+            catalog code.
+          example: ACT-2026-000456
+        product_code:
+          type: string
+          minLength: 1
+          maxLength: 16
+          pattern: ^[A-Z0-9_-]+$
+          description: Code of the product the contract is subscribed under.
+          example: PROD-001
+        reconciliation_key:
+          type: string
+          minLength: 1
+          maxLength: 64
+          pattern: ^[A-Za-z0-9_-]+$
+          description: |
+            Key that links the estimated, confirmed, and delta lines of the
+            same logical order together.
+          example: REC-2026-05-07-000123
+        share_count:
+          type: number
+          description: |
+            Number of fund shares acquired (`BUY`) or redeemed (`SELL`).
+            Decimal value — the depositary file may carry up to six decimals.
+          example: 12.345678
+        side:
+          $ref: '#/components/schemas/OrderSide'
+        status:
+          $ref: '#/components/schemas/OrderStatus'
+        support_code:
+          type: string
+          minLength: 1
+          maxLength: 16
+          pattern: ^[A-Z0-9_-]+$
+          description: Internal code identifying the investment support.
+          example: SUP-001
+        support_type:
+          $ref: '#/components/schemas/OrderSupportType'
+        unit_price:
+          allOf:
+            - $ref: '#/components/schemas/Amount'
+          description: Unit price applied to the order (per share).
+      required:
+        - id
+        - contract_number
+        - product_code
+        - management_act_code
+        - direction
+        - support_code
+        - isin_code
+        - support_type
+        - side
+        - status
+        - date_of_investment
+        - invested_amount
+        - currency
+        - share_count
+        - unit_price
+        - date_of_price
+        - date_of_dispatch
+        - date_of_generation
+        - reconciliation_key
+        - management_act_id
+    Order:
+      title: Order
+      description: |
+        Order line of an order book — the canonical JSON shape exposed by the
+        REST API. Mirrors the standard layout described in positions 1–20 of
+        the *Génération du carnet d'ordres* master table (KAPIA ME-6) plus
+        `depositary_code`.
+
+        Format-specific extra fields (order reference, cancellation flag,
+        network code, effect date, emission type, portfolio code) are not
+        surfaced on the REST resource — they are only emitted in the
+        format-specific projections produced by the file download endpoint.
+      allOf:
+        - $ref: '#/components/schemas/OrderBase'
+        - type: object
+          properties:
+            depositary_code:
+              type: string
+              minLength: 1
+              maxLength: 16
+              pattern: ^[A-Z0-9_-]+$
+              description: Code identifying the depositary the order is sent to.
+              example: DEP01
+          required:
+            - depositary_code
+    OrderResource:
+      title: OrderResource
+      description: |
+        HAL read wrapper around `Order`. Layered as `allOf: [Order, _links]`
+        to add the HAL link envelope (`self` for the order line,
+        `order_book` for the parent).
+      allOf:
+        - $ref: '#/components/schemas/Order'
+        - type: object
+          properties:
+            _links:
+              allOf:
+                - $ref: '#/components/schemas/HalSelfLinks'
+                - type: object
+                  description: |
+                    HAL navigation for an order line.
+
+                    | Relation | Method | Always present |
+                    |---|---|---|
+                    | `self` | GET | yes |
+                    | `order_book` | GET | yes |
+                  properties:
+                    order_book:
+                      $ref: '#/components/schemas/HalLink'
+                      description: Link to the parent order book.
+                  required:
+                    - order_book
+              readOnly: true
+          required:
+            - _links
+    OrderCollectionEmbedded:
+      type: object
+      title: OrderCollectionEmbedded
+      description: Embedded order resources for the current page.
+      properties:
+        orders:
+          type: array
+          maxItems: 100
+          description: Order resources on this page.
+          items:
+            $ref: '#/components/schemas/OrderResource'
+      required:
+        - orders
+    OrderCollection:
+      type: object
+      title: OrderCollection
+      description: Paginated HAL collection of order lines.
+      properties:
+        _embedded:
+          $ref: '#/components/schemas/OrderCollectionEmbedded'
+        _links:
+          allOf:
+            - $ref: '#/components/schemas/HalSelfLinks'
+            - $ref: '#/components/schemas/HalPaginationLinks'
+        page:
+          $ref: '#/components/schemas/PageMetadata'
+      required:
+        - _embedded
+        - _links
+        - page
+  responses:
+    BadRequest:
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/BadRequest'
+          example:
+            value:
+              type: https://pack-solutions.com/probs/bad-request
+              title: Bad Request
+              status: 400
+              detail: The request body contains invalid or malformed fields.
+              errors:
+                - code: INVALID
+                  detail: The value provided is not a valid date format. Expected YYYY-MM-DD.
+                  pointer: /birth/date_of_birth
+                - code: INVALID
+                  detail: The value provided is not a valid email address.
+                  pointer: /communication/email
+                - code: MISSING_FIELD
+                  detail: The last_name field is required.
+                  pointer: /last_name
+      description: Bad Request
+    Unauthorized:
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Unauthorized'
+          example:
+            value:
+              type: https://pack-solutions.com/probs/unauthorized
+              title: Unauthorized
+              status: 401
+              detail: The request requires user authentication.
+      description: Unauthorized
+    Forbidden:
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Forbidden'
+          example:
+            value:
+              type: https://pack-solutions.com/probs/forbidden
+              title: Forbidden
+              status: 403
+              detail: The server understood the request, but is refusing to fulfill it.
+      description: Forbidden
+    NotFound:
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/NotFound'
+          example:
+            value:
+              type: https://pack-solutions.com/probs/not-found
+              title: Not Found
+              status: 404
+              detail: The server has not found anything matching the Request-URI.
+      description: Not Found
+    InternalServerError:
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/InternalServerError'
+          example:
+            value:
+              type: https://pack-solutions.com/probs/internal-server-error
+              title: Internal Server Error
+              status: 500
+              detail: The server encountered an unexpected condition which prevented it from fulfilling the request.
+      description: Internal Server Error
+  parameters:
+    Page:
+      name: page
+      in: query
+      required: false
+      schema:
+        type: integer
+        format: int32
+        default: 1
+        minimum: 1
+        maximum: 10000
+        example: 1
+      description: Page number (one-based).
+    Limit:
+      name: limit
+      in: query
+      required: false
+      schema:
+        type: integer
+        format: int32
+        default: 20
+        minimum: 1
+        maximum: 100
+        example: 20
+      description: Maximum number of items per page.
+    OrderBookId:
+      name: order_book_id
+      in: path
+      required: true
+      description: Unique identifier of the order book.
+      schema:
+        type: string
+        format: uuid
+        minLength: 36
+        maxLength: 36
+      example: 4f1a8119-4e24-4460-a126-c79f8ed0017f
+    OrderId:
+      name: order_id
+      in: path
+      required: true
+      description: Unique identifier of the order line within its order book.
+      schema:
+        type: string
+        format: uuid
+        minLength: 36
+        maxLength: 36
+      example: 7c1b8119-4e24-4460-a126-c79f8ed0017f
+    OrderBookFileFormatQuery:
+      name: format
+      in: query
+      required: true
+      description: |
+        File layout to project the order book into:
+
+        - `JUMP1`, `STARCUST`, `STARCUST2`, `GAIA` — `text/csv`.
+        - `JUMP2` —
+          `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`
+          (XLSX).
+
+        The canonical JSON representation is not exposed here — it is
+        served by `GET /order-books/{order_book_id}`.
+      schema:
+        $ref: '#/components/schemas/OrderBookFormat'
+      example: JUMP1
+    OrderBookDepositaryQuery:
+      name: depositary_code
+      in: query
+      required: false
+      description: Filter order books by destination depositary code.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 16
+        pattern: ^[A-Z0-9_-]+$
+      example: DEP01
+    DateOfGenerationFromQuery:
+      name: date_of_generation_from
+      in: query
+      required: false
+      description: |
+        Inclusive lower bound on `date_of_generation`. Combined with
+        `date_of_generation_to` to query a date range.
+      schema:
+        type: string
+        format: date
+        minLength: 10
+        maxLength: 10
+      example: 2026-05-01
+    DateOfGenerationToQuery:
+      name: date_of_generation_to
+      in: query
+      required: false
+      description: |
+        Inclusive upper bound on `date_of_generation`. Combined with
+        `date_of_generation_from` to query a date range.
+      schema:
+        type: string
+        format: date
+        minLength: 10
+        maxLength: 10
+      example: 2026-05-07
+    OrderStatusQuery:
+      name: status
+      in: query
+      required: false
+      description: Filter order lines by reconciliation status (`CONFIRMED`, `ESTIMATED`, `DELTA`).
+      schema:
+        $ref: '#/components/schemas/OrderStatus'
+      example: CONFIRMED
+  examples:
+    OrderBookCollection:
+      summary: A paginated collection of order books
+      value:
+        _embedded:
+          order_books:
+            - id: 4f1a8119-4e24-4460-a126-c79f8ed0017f
+              date_of_generation: 2026-05-07
+              date_of_dispatch: 2026-05-07
+              date_of_treatment: 2026-05-06
+              depositary_code: DEP01
+              periodicity: DAILY
+              counters:
+                line_count: 124
+                estimated_total_amount:
+                  value: 12500000
+                  scale: 2
+                  currency: EUR
+                confirmed_total_amount:
+                  value: 9800000
+                  scale: 2
+                  currency: EUR
+                delta_total_amount:
+                  value: 0
+                  scale: 2
+                  currency: EUR
+              created_at: 2026-05-07T06:00:00Z
+              updated_at: 2026-05-07T06:00:00Z
+              _links:
+                self:
+                  href: /order-books/4f1a8119-4e24-4460-a126-c79f8ed0017f
+                  method: GET
+                file:
+                  href: /order-books/4f1a8119-4e24-4460-a126-c79f8ed0017f/file
+                  method: GET
+                orders:
+                  href: /order-books/4f1a8119-4e24-4460-a126-c79f8ed0017f/orders
+                  method: GET
+            - id: 8c2d4e6f-1a3b-5c7d-9e1f-3a5b7c9d1e3f
+              date_of_generation: 2026-05-07
+              date_of_dispatch: 2026-05-07
+              date_of_treatment: 2026-05-06
+              date_of_effect_max: 2026-05-10
+              depositary_code: DEP02
+              network_code: NET01
+              periodicity: DAILY
+              counters:
+                line_count: 87
+                estimated_total_amount:
+                  value: 5400000
+                  scale: 2
+                  currency: EUR
+                confirmed_total_amount:
+                  value: 7200000
+                  scale: 2
+                  currency: EUR
+                delta_total_amount:
+                  value: 150000
+                  scale: 2
+                  currency: EUR
+              created_at: 2026-05-07T06:05:00Z
+              updated_at: 2026-05-07T06:05:00Z
+              _links:
+                self:
+                  href: /order-books/8c2d4e6f-1a3b-5c7d-9e1f-3a5b7c9d1e3f
+                  method: GET
+                file:
+                  href: /order-books/8c2d4e6f-1a3b-5c7d-9e1f-3a5b7c9d1e3f/file
+                  method: GET
+                orders:
+                  href: /order-books/8c2d4e6f-1a3b-5c7d-9e1f-3a5b7c9d1e3f/orders
+                  method: GET
+            - id: a2b4c6d8-1e3f-5a7b-9c1d-3e5f7a9b1c3d
+              date_of_generation: 2026-05-07
+              date_of_dispatch: 2026-05-07
+              date_of_treatment: 2026-05-06
+              depositary_code: DEP03
+              network_code: NET02
+              periodicity: ON_DEMAND
+              counters:
+                line_count: 12
+                estimated_total_amount:
+                  value: 0
+                  scale: 2
+                  currency: EUR
+                confirmed_total_amount:
+                  value: 1250000
+                  scale: 2
+                  currency: EUR
+                delta_total_amount:
+                  value: 0
+                  scale: 2
+                  currency: EUR
+              created_at: 2026-05-07T09:30:00Z
+              updated_at: 2026-05-07T09:30:00Z
+              _links:
+                self:
+                  href: /order-books/a2b4c6d8-1e3f-5a7b-9c1d-3e5f7a9b1c3d
+                  method: GET
+                file:
+                  href: /order-books/a2b4c6d8-1e3f-5a7b-9c1d-3e5f7a9b1c3d/file
+                  method: GET
+                orders:
+                  href: /order-books/a2b4c6d8-1e3f-5a7b-9c1d-3e5f7a9b1c3d/orders
+                  method: GET
+        _links:
+          self:
+            href: /order-books?page=1&limit=20
+            method: GET
+          first:
+            href: /order-books?page=1&limit=20
+            method: GET
+          last:
+            href: /order-books?page=3&limit=20
+            method: GET
+          next:
+            href: /order-books?page=2&limit=20
+            method: GET
+        page:
+          size: 20
+          total_elements: 47
+          total_pages: 3
+          number: 1
+    OrderBookDetail:
+      summary: Canonical JSON envelope of an order book (metadata + embedded order lines)
+      value:
+        id: 4f1a8119-4e24-4460-a126-c79f8ed0017f
+        date_of_generation: 2026-05-07
+        date_of_dispatch: 2026-05-07
+        date_of_treatment: 2026-05-06
+        depositary_code: DEP01
+        periodicity: DAILY
+        counters:
+          line_count: 2
+          estimated_total_amount:
+            value: 80000
+            scale: 2
+            currency: EUR
+          confirmed_total_amount:
+            value: 250000
+            scale: 2
+            currency: EUR
+          delta_total_amount:
+            value: 0
+            scale: 2
+            currency: EUR
+        created_at: 2026-05-07T06:00:00Z
+        updated_at: 2026-05-07T06:00:00Z
+        _embedded:
+          orders:
+            - id: 7c1b8119-4e24-4460-a126-c79f8ed0017f
+              contract_number: CTR-0000123456
+              product_code: PROD-001
+              management_act_code: VER
+              direction: INVESTMENT
+              support_code: SUP-001
+              isin_code: FR0000123456
+              support_type: UNIT_LINKED
+              side: BUY
+              status: CONFIRMED
+              date_of_investment: 2026-05-06
+              invested_amount:
+                value: 250000
+                scale: 2
+                currency: EUR
+              currency: EUR
+              share_count: 24.56789
+              unit_price:
+                value: 10175
+                scale: 2
+                currency: EUR
+              date_of_price: 2026-05-06
+              date_of_dispatch: 2026-05-07
+              date_of_generation: 2026-05-07
+              reconciliation_key: REC-2026-05-07-000123
+              management_act_id: ACT-2026-000456
+              depositary_code: DEP01
+              _links:
+                self:
+                  href: /order-books/4f1a8119-4e24-4460-a126-c79f8ed0017f/orders/7c1b8119-4e24-4460-a126-c79f8ed0017f
+                  method: GET
+                order_book:
+                  href: /order-books/4f1a8119-4e24-4460-a126-c79f8ed0017f
+                  method: GET
+            - id: 8d2c9220-5f35-5571-b237-d8a09fe1128a
+              contract_number: CTR-0000987654
+              product_code: PROD-001
+              management_act_code: RCP
+              direction: DIVESTMENT
+              support_code: SUP-001
+              isin_code: FR0000123456
+              support_type: UNIT_LINKED
+              side: SELL
+              status: ESTIMATED
+              date_of_investment: 2026-05-06
+              invested_amount:
+                value: 80000
+                scale: 2
+                currency: EUR
+              currency: EUR
+              share_count: 7.864321
+              unit_price:
+                value: 10175
+                scale: 2
+                currency: EUR
+              date_of_price: 2026-05-06
+              date_of_dispatch: 2026-05-07
+              date_of_generation: 2026-05-07
+              reconciliation_key: REC-2026-05-07-000124
+              management_act_id: ACT-2026-000457
+              depositary_code: DEP01
+              _links:
+                self:
+                  href: /order-books/4f1a8119-4e24-4460-a126-c79f8ed0017f/orders/8d2c9220-5f35-5571-b237-d8a09fe1128a
+                  method: GET
+                order_book:
+                  href: /order-books/4f1a8119-4e24-4460-a126-c79f8ed0017f
+                  method: GET
+        _links:
+          self:
+            href: /order-books/4f1a8119-4e24-4460-a126-c79f8ed0017f
+            method: GET
+          file:
+            href: /order-books/4f1a8119-4e24-4460-a126-c79f8ed0017f/file?format=JUMP1
+            method: GET
+          orders:
+            href: /order-books/4f1a8119-4e24-4460-a126-c79f8ed0017f/orders
+            method: GET
+    OrderResource:
+      summary: An order line
+      value:
+        id: 7c1b8119-4e24-4460-a126-c79f8ed0017f
+        contract_number: CTR-0000123456
+        product_code: PROD-001
+        management_act_code: VER
+        direction: INVESTMENT
+        support_code: SUP-001
+        isin_code: FR0000123456
+        support_type: UNIT_LINKED
+        side: BUY
+        status: CONFIRMED
+        date_of_investment: 2026-05-06
+        invested_amount:
+          value: 250000
+          scale: 2
+          currency: EUR
+        currency: EUR
+        share_count: 24.56789
+        unit_price:
+          value: 10175
+          scale: 2
+          currency: EUR
+        date_of_price: 2026-05-06
+        date_of_dispatch: 2026-05-07
+        date_of_generation: 2026-05-07
+        reconciliation_key: REC-2026-05-07-000123
+        management_act_id: ACT-2026-000456
+        depositary_code: DEP01
+        _links:
+          self:
+            href: /order-books/4f1a8119-4e24-4460-a126-c79f8ed0017f/orders/7c1b8119-4e24-4460-a126-c79f8ed0017f
+            method: GET
+          order_book:
+            href: /order-books/4f1a8119-4e24-4460-a126-c79f8ed0017f
+            method: GET
+    OrderCollection:
+      summary: A paginated collection of order lines
+      value:
+        _embedded:
+          orders:
+            - id: 7c1b8119-4e24-4460-a126-c79f8ed0017f
+              contract_number: CTR-0000123456
+              product_code: PROD-001
+              management_act_code: VER
+              direction: INVESTMENT
+              support_code: SUP-001
+              isin_code: FR0000123456
+              support_type: UNIT_LINKED
+              side: BUY
+              status: CONFIRMED
+              date_of_investment: 2026-05-06
+              invested_amount:
+                value: 250000
+                scale: 2
+                currency: EUR
+              currency: EUR
+              share_count: 24.56789
+              unit_price:
+                value: 10175
+                scale: 2
+                currency: EUR
+              date_of_price: 2026-05-06
+              date_of_dispatch: 2026-05-07
+              date_of_generation: 2026-05-07
+              reconciliation_key: REC-2026-05-07-000123
+              management_act_id: ACT-2026-000456
+              depositary_code: DEP01
+              _links:
+                self:
+                  href: /order-books/4f1a8119-4e24-4460-a126-c79f8ed0017f/orders/7c1b8119-4e24-4460-a126-c79f8ed0017f
+                  method: GET
+                order_book:
+                  href: /order-books/4f1a8119-4e24-4460-a126-c79f8ed0017f
+                  method: GET
+            - id: 8d2c9220-5f35-5571-b237-d8a09fe1128a
+              contract_number: CTR-0000987654
+              product_code: PROD-001
+              management_act_code: RCP
+              direction: DIVESTMENT
+              support_code: SUP-001
+              isin_code: FR0000123456
+              support_type: UNIT_LINKED
+              side: SELL
+              status: ESTIMATED
+              date_of_investment: 2026-05-06
+              invested_amount:
+                value: 80000
+                scale: 2
+                currency: EUR
+              currency: EUR
+              share_count: 7.864321
+              unit_price:
+                value: 10175
+                scale: 2
+                currency: EUR
+              date_of_price: 2026-05-06
+              date_of_dispatch: 2026-05-07
+              date_of_generation: 2026-05-07
+              reconciliation_key: REC-2026-05-07-000124
+              management_act_id: ACT-2026-000457
+              depositary_code: DEP01
+              _links:
+                self:
+                  href: /order-books/4f1a8119-4e24-4460-a126-c79f8ed0017f/orders/8d2c9220-5f35-5571-b237-d8a09fe1128a
+                  method: GET
+                order_book:
+                  href: /order-books/4f1a8119-4e24-4460-a126-c79f8ed0017f
+                  method: GET
+        _links:
+          self:
+            href: /order-books/4f1a8119-4e24-4460-a126-c79f8ed0017f/orders?page=1&limit=20
+            method: GET
+          first:
+            href: /order-books/4f1a8119-4e24-4460-a126-c79f8ed0017f/orders?page=1&limit=20
+            method: GET
+          last:
+            href: /order-books/4f1a8119-4e24-4460-a126-c79f8ed0017f/orders?page=7&limit=20
+            method: GET
+          next:
+            href: /order-books/4f1a8119-4e24-4460-a126-c79f8ed0017f/orders?page=2&limit=20
+            method: GET
+        page:
+          size: 20
+          total_elements: 124
+          total_pages: 7
+          number: 1
+  securitySchemes:
+    oauth2:
+      type: oauth2
+      flows:
+        clientCredentials:
+          tokenUrl: https://iam.pack-solutions.com/oauth/token
+          scopes:
+            order-books:read: read access to order books

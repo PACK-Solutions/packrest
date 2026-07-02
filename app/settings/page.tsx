@@ -42,6 +42,16 @@ import {
   defaultContextPathFor,
   type EnvName,
 } from "@/lib/env";
+import { listApiSummaries } from "@/lib/specs";
+import {
+  getSpecsDir,
+  setSpecsDir as persistSpecsDir,
+  getGitlabConfigPublic,
+  saveGitlabConfig,
+} from "@/lib/config";
+import { copySpecs } from "@/lib/sync";
+import { listReleases, syncFromGitlab } from "@/lib/gitlab";
+import { pickDirectory } from "@/lib/dialog";
 import { cn } from "@/lib/utils";
 
 type SpecsStatus =
@@ -111,28 +121,24 @@ export default function SettingsPage() {
 
   useEffect(() => {
     setSettings(loadSettings());
-    fetch("/api/apis")
-      .then((r) => r.json())
-      .then((data) => setApis(data?.apis ?? []))
+    listApiSummaries()
+      .then((list) => setApis(list.map((a) => ({ id: a.id, title: a.title }))))
       .catch(() => {
         /* ignore — per-API config simply won't list any API */
       });
-    fetch("/api/config")
-      .then((r) => r.json())
-      .then((data) => {
-        setSpecsDir(data?.config?.specsDir ?? "");
-        setResolvedSpecsDir(data?.resolvedSpecsDir ?? "");
-        setConfigError(data?.configError ?? null);
+    getSpecsDir()
+      .then((dir) => {
+        setSpecsDir(dir);
+        setResolvedSpecsDir(dir);
       })
       .catch(() => {
         /* ignore — Settings page still usable without spec config */
       });
-    fetch("/api/gitlab")
-      .then((r) => r.json())
+    getGitlabConfigPublic()
       .then((data) => {
-        setGitlabProject(data?.projectPath ?? "");
-        setGitlabHost(data?.host ?? "");
-        setGitlabHasToken(Boolean(data?.hasToken));
+        setGitlabProject(data.projectPath ?? "");
+        setGitlabHost(data.host ?? "");
+        setGitlabHasToken(Boolean(data.hasToken));
       })
       .catch(() => {
         /* ignore — GitLab sync simply stays unconfigured */
@@ -176,30 +182,24 @@ export default function SettingsPage() {
     toast.success("Paramètres enregistrés");
   };
 
+  const onBrowseSpecsDir = async () => {
+    try {
+      const dir = await pickDirectory("Choisir le dossier des specs OpenAPI");
+      if (dir) setSpecsDir(dir);
+    } catch {
+      /* dialog unavailable outside Tauri — the text field still works */
+    }
+  };
+
   const onSaveSpecsPath = async () => {
     setSpecsStatus({ kind: "saving" });
     try {
-      const res = await fetch("/api/config", {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ specsDir }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        setSpecsStatus({
-          kind: "error",
-          message:
-            data.error_description ?? "Erreur lors de l'enregistrement.",
-        });
-        return;
-      }
-      const savedDir = data?.config?.specsDir ?? specsDir;
-      setSpecsDir(savedDir);
-      setResolvedSpecsDir(savedDir);
+      await persistSpecsDir(specsDir);
+      setResolvedSpecsDir(specsDir);
       setConfigError(null);
       setSpecsStatus({
         kind: "ok",
-        message: `Chemin enregistré : ${savedDir}`,
+        message: `Chemin enregistré : ${specsDir}`,
       });
     } catch (e) {
       setSpecsStatus({ kind: "error", message: String(e) });
@@ -210,22 +210,20 @@ export default function SettingsPage() {
     setSpecsStatus({ kind: "syncing" });
     setSpecsDiffs([]);
     try {
-      const res = await fetch("/api/sync-specs", { method: "POST" });
-      const data = await res.json();
-      if (!res.ok) {
+      const result = await copySpecs(specsDir || undefined);
+      if (result.missing) {
         setSpecsStatus({
           kind: "error",
           message:
-            data.error_description ??
-            "Échec de la synchronisation des specs.",
+            "Dossier source introuvable. Vérifiez le chemin et réessayez.",
         });
         return;
       }
-      const apis: string[] = data?.copied ?? [];
+      const apis = result.copied;
       const detail = apis.length
         ? ` — ${apis.join(", ")}`
         : " (aucun bundle v1 trouvé)";
-      setSpecsDiffs((data?.diffs as SpecDiff[]) ?? []);
+      setSpecsDiffs(result.diffs);
       setSpecsStatus({
         kind: "ok",
         message: `Synchronisé : ${apis.length} API${apis.length > 1 ? "s" : ""}${detail}`,
@@ -238,26 +236,14 @@ export default function SettingsPage() {
   const onSaveGitlab = async () => {
     setGitlabStatus({ kind: "saving" });
     try {
-      const res = await fetch("/api/gitlab", {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        // Empty token is omitted server-side, preserving the stored one.
-        body: JSON.stringify({
-          projectPath: gitlabProject,
-          token: gitlabToken,
-        }),
+      // Empty token is omitted, preserving the stored one.
+      const data = await saveGitlabConfig({
+        projectPath: gitlabProject,
+        token: gitlabToken,
       });
-      const data = await res.json();
-      if (!res.ok) {
-        setGitlabStatus({
-          kind: "error",
-          message: data.error_description ?? "Erreur lors de l'enregistrement.",
-        });
-        return;
-      }
-      setGitlabProject(data?.projectPath ?? gitlabProject);
-      setGitlabHost(data?.host ?? gitlabHost);
-      setGitlabHasToken(Boolean(data?.hasToken));
+      setGitlabProject(data.projectPath ?? gitlabProject);
+      setGitlabHost(data.host ?? gitlabHost);
+      setGitlabHasToken(Boolean(data.hasToken));
       setGitlabToken("");
       // Reset the list so the auto-load effect re-previews releases for the
       // (possibly changed) project.
@@ -269,7 +255,7 @@ export default function SettingsPage() {
       setSelectedTag("");
       setGitlabStatus({ kind: "ok", message: "Connexion GitLab enregistrée." });
     } catch (e) {
-      setGitlabStatus({ kind: "error", message: String(e) });
+      setGitlabStatus({ kind: "error", message: (e as Error).message });
     }
   };
 
@@ -280,25 +266,11 @@ export default function SettingsPage() {
     setLoadingReleases(true);
     setGitlabStatus({ kind: "idle" });
     try {
-      const qs = all ? "" : `?per_page=${RELEASES_PREVIEW}`;
-      const res = await fetch(`/api/gitlab/releases${qs}`);
-      const data = await res.json();
-      if (!res.ok) {
-        setReleases([]);
-        setReleasesTotal(null);
-        setReleasesHasMore(false);
-        setReleasesAll(false);
-        setGitlabStatus({
-          kind: "error",
-          message:
-            data.error_description ?? "Impossible de charger les releases.",
-        });
-        return;
-      }
-      const list: Release[] = data?.releases ?? [];
+      const data = await listReleases(all ? undefined : RELEASES_PREVIEW);
+      const list: Release[] = data.releases ?? [];
       setReleases(list);
-      setReleasesTotal(typeof data?.total === "number" ? data.total : null);
-      setReleasesHasMore(Boolean(data?.hasMore));
+      setReleasesTotal(typeof data.total === "number" ? data.total : null);
+      setReleasesHasMore(Boolean(data.hasMore));
       setReleasesAll(all);
       setSelectedTag((prev) =>
         prev && list.some((r) => r.tag === prev)
@@ -312,7 +284,7 @@ export default function SettingsPage() {
         });
       }
     } catch (e) {
-      setGitlabStatus({ kind: "error", message: String(e) });
+      setGitlabStatus({ kind: "error", message: (e as Error).message });
     } finally {
       setLoadingReleases(false);
       setReleasesLoaded(true);
@@ -332,22 +304,9 @@ export default function SettingsPage() {
     setGitlabStatus({ kind: "syncing" });
     setGitlabDiffs([]);
     try {
-      const res = await fetch("/api/gitlab/sync", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ tag: selectedTag }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        setGitlabStatus({
-          kind: "error",
-          message:
-            data.error_description ?? "Échec de la synchronisation GitLab.",
-        });
-        return;
-      }
-      const copied: string[] = data?.copied ?? [];
-      setGitlabDiffs((data?.diffs as SpecDiff[]) ?? []);
+      const data = await syncFromGitlab(selectedTag);
+      const copied = data.copied;
+      setGitlabDiffs(data.diffs);
       setGitlabStatus({
         kind: "ok",
         message: `Synchronisé depuis ${selectedTag} : ${copied.length} API${
@@ -355,7 +314,7 @@ export default function SettingsPage() {
         }${copied.length ? ` — ${copied.join(", ")}` : ""}`,
       });
     } catch (e) {
-      setGitlabStatus({ kind: "error", message: String(e) });
+      setGitlabStatus({ kind: "error", message: (e as Error).message });
     }
   };
 
@@ -379,11 +338,10 @@ export default function SettingsPage() {
     <div className="mx-auto max-w-2xl space-y-4">
       <h1 className="text-xl font-semibold">Paramètres</h1>
       <p className="text-muted-foreground text-sm">
-        La source des specs est stockée côté serveur dans{" "}
-        <code>.packrest.config.json</code>. Les identifiants OAuth2 et le
-        choix d&apos;environnement sont stockés dans votre navigateur
-        (localStorage) et envoyés uniquement à <code>/api/token</code> pour
-        obtenir un bearer.
+        La configuration (source des specs, connexion GitLab, identifiants
+        OAuth2 et environnement) est stockée localement sur cette machine par
+        l&apos;application (tauri-plugin-store). Le client secret et le token
+        sont envoyés directement à la passerelle, sans transiter par un serveur.
       </p>
 
       <Card>
@@ -399,15 +357,25 @@ export default function SettingsPage() {
           )}
           <Field
             label="Chemin du dossier"
-            hint="Dossier contenant les sous-dossiers <api>/v1/openapi.bundle.yaml. Stocké côté serveur dans .packrest.config.json."
+            hint="Dossier contenant les sous-dossiers <api>/v1/openapi.bundle.yaml. Stocké localement par l'application."
           >
-            <Input
-              value={specsDir}
-              onChange={(e) => setSpecsDir(e.target.value)}
-              placeholder={resolvedSpecsDir || "/chemin/vers/openapi/dist"}
-              className="font-mono"
-              spellCheck={false}
-            />
+            <div className="flex items-center gap-1.5">
+              <Input
+                value={specsDir}
+                onChange={(e) => setSpecsDir(e.target.value)}
+                placeholder={resolvedSpecsDir || "/chemin/vers/openapi/dist"}
+                className="font-mono"
+                spellCheck={false}
+              />
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={onBrowseSpecsDir}
+                className="h-9 shrink-0 text-xs"
+              >
+                <FolderSync className="size-3" /> Parcourir
+              </Button>
+            </div>
           </Field>
           {resolvedSpecsDir && !specsDir && (
             <p className="text-muted-foreground text-[11px]">
@@ -456,9 +424,8 @@ export default function SettingsPage() {
           )}
           <SyncDiff diffs={specsDiffs} />
           <p className="text-muted-foreground text-[11px]">
-            Équivalent en ligne de commande :{" "}
-            <code>npm run sync-specs</code> (depuis le dossier{" "}
-            <code>packrest/</code>).
+            Les specs synchronisées sont écrites dans le dossier de données de
+            l&apos;application et rechargées sans redémarrage.
           </p>
         </CardBody>
       </Card>
@@ -473,9 +440,9 @@ export default function SettingsPage() {
         <CardBody className="space-y-3 p-4">
           <p className="text-muted-foreground text-xs">
             Télécharge le <code>bundle.zip</code> de la release choisie et en
-            extrait les contrats OpenAPI dans <code>public/specs/</code>, puis
-            rafraîchit le cache. Le token est stocké côté serveur dans{" "}
-            <code>.packrest.config.json</code>, jamais renvoyé au navigateur.
+            extrait les contrats OpenAPI dans le stockage local des specs, puis
+            rafraîchit le cache. Le token est conservé localement par
+            l&apos;application.
           </p>
 
           <Field

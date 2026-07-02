@@ -1,24 +1,21 @@
-import fs from "node:fs/promises";
-import path from "node:path";
+// GitLab release source, client-side. Downloads the `bundle.zip` asset of a
+// chosen release via the Tauri HTTP plugin (PRIVATE-TOKEN header, no CORS),
+// unzips it in the browser with fflate, and writes each OpenAPI bundle into
+// the writable app-data spec store. Formerly a set of server routes; the
+// asset-matching, layout tolerance and spec-diff logic are reused unchanged.
+
 import { unzipSync } from "fflate";
-import { loadConfig, saveConfig, type GitlabConfig } from "./sync";
 import { diffSpec, type SpecDiff } from "./spec-diff";
+import {
+  getGitlabConfig,
+  GITLAB_DEFAULT_HOST,
+  GITLAB_DEFAULT_PROJECT,
+} from "./config";
+import { readSpecFile, writeSpecFile } from "./specs-fs";
+import { resetSpecCache } from "./specs";
+import { tauriFetch } from "./net";
 
-// Server-side GitLab release source. Downloads the `bundle.zip` asset of a
-// chosen release, unzips it in memory, and writes each OpenAPI bundle into
-// public/specs/<api>.yaml — the same destination scripts/copy-specs.mjs
-// targets, so the rest of the app is unaware of where the specs came from.
-//
-// The access token lives in .packrest.config.json (gitignored). It never
-// reaches the browser: every fetch here is server-to-GitLab with a
-// PRIVATE-TOKEN header.
-
-const DEST = path.join(process.cwd(), "public", "specs");
-
-const DEFAULT_HOST = "https://gitlab.com";
-const DEFAULT_PROJECT = "packsolutions/openapi";
-
-// Surfaced to the route with an HTTP status so the UI gets a useful message.
+// Surfaced to the UI with an HTTP-ish status so it can show a useful message.
 export class GitlabError extends Error {
   status: number;
   constructor(message: string, status = 400) {
@@ -32,13 +29,6 @@ interface ResolvedGitlab {
   host: string;
   projectPath: string;
   token: string;
-}
-
-export interface GitlabConfigPublic {
-  host: string;
-  projectPath: string;
-  /** Whether a token is stored. The token value itself is never returned. */
-  hasToken: boolean;
 }
 
 export interface ReleaseSummary {
@@ -66,39 +56,8 @@ export interface GitlabSyncResult {
   diffs: SpecDiff[];
 }
 
-export async function loadGitlabConfig(): Promise<GitlabConfig> {
-  const { config } = await loadConfig();
-  return config.gitlab ?? {};
-}
-
-export async function getGitlabConfigPublic(): Promise<GitlabConfigPublic> {
-  const g = await loadGitlabConfig();
-  return {
-    host: g.host?.trim() || DEFAULT_HOST,
-    projectPath: g.projectPath?.trim() || DEFAULT_PROJECT,
-    hasToken: Boolean(g.token && g.token.trim()),
-  };
-}
-
-// Merge a partial config in. `token` is only overwritten when a non-empty
-// value is supplied, so the UI can leave the masked field blank to keep the
-// existing token. host/projectPath clear back to their defaults when blanked.
-export async function saveGitlabConfig(
-  patch: GitlabConfig,
-): Promise<GitlabConfigPublic> {
-  const { config } = await loadConfig();
-  const next: GitlabConfig = { ...(config.gitlab ?? {}) };
-  if (patch.host !== undefined) next.host = patch.host.trim() || undefined;
-  if (patch.projectPath !== undefined)
-    next.projectPath = patch.projectPath.trim() || undefined;
-  if (patch.token !== undefined && patch.token.trim())
-    next.token = patch.token.trim();
-  await saveConfig({ ...config, gitlab: next });
-  return getGitlabConfigPublic();
-}
-
 async function resolveGitlab(): Promise<ResolvedGitlab> {
-  const g = await loadGitlabConfig();
+  const g = await getGitlabConfig();
   const token = (g.token ?? "").trim();
   if (!token) {
     throw new GitlabError(
@@ -107,8 +66,8 @@ async function resolveGitlab(): Promise<ResolvedGitlab> {
     );
   }
   return {
-    host: (g.host?.trim() || DEFAULT_HOST).replace(/\/+$/, ""),
-    projectPath: g.projectPath?.trim() || DEFAULT_PROJECT,
+    host: (g.host?.trim() || GITLAB_DEFAULT_HOST).replace(/\/+$/, ""),
+    projectPath: g.projectPath?.trim() || GITLAB_DEFAULT_PROJECT,
     token,
   };
 }
@@ -120,7 +79,7 @@ function projectApiBase(g: ResolvedGitlab): string {
 }
 
 function gitlabFetch(url: string, token: string): Promise<Response> {
-  return fetch(url, { headers: { "PRIVATE-TOKEN": token } });
+  return tauriFetch(url, { headers: { "PRIVATE-TOKEN": token } });
 }
 
 async function toError(res: Response, fallback: string): Promise<GitlabError> {
@@ -134,7 +93,6 @@ async function toError(res: Response, fallback: string): Promise<GitlabError> {
   const msg = detail
     ? `${fallback} (HTTP ${res.status} : ${detail})`
     : `${fallback} (HTTP ${res.status})`;
-  // 401/403 are the user's problem (bad/expired token); 5xx are GitLab's.
   const status =
     res.status === 401 || res.status === 403
       ? res.status
@@ -190,11 +148,8 @@ export async function listReleases(limit?: number): Promise<ReleaseListResult> {
     assets?: { links?: AssetLink[] };
   }>;
   const totalHeader = res.headers.get("x-total");
-  const total = totalHeader && /^\d+$/.test(totalHeader)
-    ? Number(totalHeader)
-    : null;
-  // X-Next-Page is the most reliable "more exist" signal; some endpoints omit
-  // X-Total. Fall back to comparing the count against the requested page size.
+  const total =
+    totalHeader && /^\d+$/.test(totalHeader) ? Number(totalHeader) : null;
   const hasMore =
     Boolean(res.headers.get("x-next-page")?.trim()) ||
     (total != null && total > data.length);
@@ -237,9 +192,6 @@ export async function syncFromGitlab(tag: string): Promise<GitlabSyncResult> {
   let buf: ArrayBuffer | null = null;
   let lastStatus = 0;
   for (const url of bundle.urls) {
-    // fetch follows GitLab's redirect to object storage; the PRIVATE-TOKEN
-    // header is dropped cross-origin, which is correct — that URL is
-    // pre-signed.
     const res = await gitlabFetch(url, g.token);
     if (res.ok) {
       buf = await res.arrayBuffer();
@@ -257,7 +209,7 @@ export async function syncFromGitlab(tag: string): Promise<GitlabSyncResult> {
   return extractBundle(tag, bundle.name, new Uint8Array(buf));
 }
 
-// Pull every OpenAPI bundle out of the zip and write public/specs/<api>.yaml.
+// Pull every OpenAPI bundle out of the zip and write it into the spec store.
 // Tolerant of two layouts: the nested `<api>/v1/openapi.bundle.yaml` mirror of
 // the local specs tree, and a flat set of `<api>.yaml` files. Nested matches
 // win when both are present.
@@ -278,7 +230,6 @@ async function extractBundle(
 
   const NESTED = /(?:^|\/)([^/]+)\/v1\/openapi\.bundle\.ya?ml$/i;
   const FLAT = /^([^/]+)\.ya?ml$/i;
-  // api id -> { content, priority }. Nested layout (2) beats flat (1).
   const picked = new Map<string, { content: Uint8Array; priority: number }>();
   const decoder = new TextDecoder();
 
@@ -289,7 +240,7 @@ async function extractBundle(
     const match = nested ?? flat;
     if (!match) continue;
     const api = match[1];
-    if (api === "." || api === "..") continue; // never write outside DEST
+    if (api === "." || api === "..") continue;
     const priority = nested ? 2 : 1;
     const existing = picked.get(api);
     if (!existing || priority > existing.priority) {
@@ -297,16 +248,12 @@ async function extractBundle(
     }
   }
 
-  await fs.mkdir(DEST, { recursive: true });
   const copied: string[] = [];
   const diffs: SpecDiff[] = [];
   for (const [api, { content }] of picked) {
-    const destFile = path.join(DEST, `${api}.yaml`);
     const decoded = decoder.decode(content);
-    // Read the previously-synced bundle before overwriting so we can report
-    // what moved. Missing file → null → the API reads as "added".
-    const previous = await fs.readFile(destFile, "utf8").catch(() => null);
-    await fs.writeFile(destFile, decoded);
+    const previous = await readSpecFile(api);
+    await writeSpecFile(api, decoded);
     copied.push(api);
     diffs.push(diffSpec(api, previous, decoded));
   }
@@ -321,5 +268,6 @@ async function extractBundle(
     );
   }
 
+  resetSpecCache();
   return { tag, bundleName, copied, skipped: [], diffs };
 }
