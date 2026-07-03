@@ -486,8 +486,9 @@ export default function SettingsPage() {
         </CardHeader>
         <CardBody className="space-y-3 p-4">
           <p className="text-muted-foreground text-xs">
-            Télécharge le <code>bundle.zip</code> de la release choisie et en
-            extrait les contrats OpenAPI dans le stockage local des specs, puis
+            Télécharge le <code>bundle.zip</code>{" "}
+            de la release choisie et en extrait les contrats OpenAPI dans le
+            stockage local des specs, puis
             rafraîchit le cache. Le token est conservé localement par
             l&apos;application.
           </p>

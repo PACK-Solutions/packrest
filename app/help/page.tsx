@@ -218,8 +218,8 @@ export default function HelpPage() {
         <CardBody className="space-y-2 p-4 text-sm">
           <p>
             Vos réglages (clientId, clientSecret, token, configuration GitLab)
-            sont conservés <strong>localement sur cette machine</strong> par
-            l&apos;application, sans transiter par un serveur.
+            sont conservés <strong>localement sur cette machine</strong>{" "}
+            par l&apos;application, sans transiter par un serveur.
           </p>
           <p className="text-muted-foreground">
             Les contrats synchronisés sont écrits dans le dossier de données de
