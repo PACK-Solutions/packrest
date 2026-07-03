@@ -7,7 +7,7 @@
 import { diffSpec, type SpecDiff } from "./spec-diff";
 import { readSpecFile, writeSpecFile } from "./specs-fs";
 import { resetSpecCache } from "./specs";
-import { getSpecsDir } from "./config";
+import { getSpecsDir, clearSpecsTag } from "./config";
 import { isTauri } from "./platform";
 import constants from "./sync-constants.json";
 
@@ -59,6 +59,11 @@ export async function copySpecs(specsDir?: string): Promise<SyncResult> {
   }
   copied.sort();
   diffs.sort((a, b) => a.api.localeCompare(b.api));
-  if (copied.length) resetSpecCache();
+  if (copied.length) {
+    // Local-dir specs have no GitLab release tag — drop any stale one so the
+    // UI shows "locales" rather than a tag these specs didn't come from.
+    await clearSpecsTag();
+    resetSpecCache();
+  }
   return { source, copied, skipped, missing: false, diffs };
 }

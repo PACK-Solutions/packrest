@@ -13,6 +13,7 @@ import {
   GitBranch,
   Download,
   Check,
+  Info,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -29,6 +30,7 @@ import {
 import { Card, CardBody, CardHeader } from "@/components/Card";
 import Field from "@/components/Field";
 import SyncDiff from "@/components/SyncDiff";
+import Markdown from "@/components/Markdown";
 import type { SpecDiff } from "@/lib/spec-diff";
 import {
   loadSettings,
@@ -51,6 +53,14 @@ import {
 } from "@/lib/config";
 import { copySpecs } from "@/lib/sync";
 import { listReleases, syncFromGitlab } from "@/lib/gitlab";
+import {
+  getLatestRelease,
+  compareVersions,
+  pickInstallerAsset,
+  type LatestRelease,
+} from "@/lib/github";
+import { openUrl } from "@/lib/opener";
+import { useAppVersion, useSpecsTag, specsTagLabel } from "@/hooks/use-app-info";
 import { pickDirectory } from "@/lib/dialog";
 import { cn } from "@/lib/utils";
 
@@ -59,6 +69,14 @@ type SpecsStatus =
   | { kind: "saving" }
   | { kind: "syncing" }
   | { kind: "ok"; message: string }
+  | { kind: "error"; message: string };
+
+// State of the in-app GitHub update check.
+type UpdateStatus =
+  | { kind: "idle" }
+  | { kind: "checking" }
+  | { kind: "current" }
+  | { kind: "available"; latest: LatestRelease }
   | { kind: "error"; message: string };
 
 interface Release {
@@ -343,6 +361,8 @@ export default function SettingsPage() {
         l&apos;application (tauri-plugin-store). Le client secret et le token
         sont envoyés directement à la passerelle, sans transiter par un serveur.
       </p>
+
+      <AboutUpdateCard />
 
       <Card>
         <CardHeader>
@@ -770,6 +790,116 @@ export default function SettingsPage() {
         )}
       </div>
     </div>
+  );
+}
+
+// App version + loaded APIs tag, plus the lightweight GitHub update check:
+// fetch the latest release, compare against the running version, and — when a
+// newer one exists — show its changelog and a button that opens the platform
+// installer's download URL in the system browser (manual install).
+function AboutUpdateCard() {
+  const appVersion = useAppVersion();
+  const specsTag = useSpecsTag();
+  const [status, setStatus] = useState<UpdateStatus>({ kind: "idle" });
+
+  const onCheck = async () => {
+    setStatus({ kind: "checking" });
+    try {
+      const latest = await getLatestRelease();
+      const newer = compareVersions(latest.tag, appVersion) > 0;
+      setStatus(newer ? { kind: "available", latest } : { kind: "current" });
+    } catch (e) {
+      setStatus({ kind: "error", message: (e as Error).message });
+    }
+  };
+
+  const onDownload = async (latest: LatestRelease) => {
+    const asset = pickInstallerAsset(latest.assets);
+    try {
+      await openUrl(asset?.url ?? latest.htmlUrl);
+    } catch (e) {
+      toast.error("Ouverture du lien impossible", {
+        description: (e as Error).message,
+      });
+    }
+  };
+
+  return (
+    <Card>
+      <CardHeader>
+        <Info className="text-muted-foreground size-3.5" />
+        <span className="font-semibold">À propos &amp; mises à jour</span>
+      </CardHeader>
+      <CardBody className="space-y-3 p-4">
+        <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-xs">
+          <dt className="text-muted-foreground">Version de l&apos;application</dt>
+          <dd className="font-mono">{appVersion ? `v${appVersion}` : "—"}</dd>
+          <dt className="text-muted-foreground">APIs chargées</dt>
+          <dd className="font-mono">
+            {specsTagLabel(specsTag)}
+            {specsTag?.releasedAt && (
+              <span className="text-muted-foreground ml-2 font-sans text-[11px]">
+                · release du {formatReleaseDate(specsTag.releasedAt)}
+              </span>
+            )}
+          </dd>
+        </dl>
+
+        <div className="flex flex-wrap items-center gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={onCheck}
+            disabled={status.kind === "checking"}
+            className="text-xs"
+          >
+            <RefreshCw
+              className={cn(
+                "size-3",
+                status.kind === "checking" && "animate-spin",
+              )}
+            />
+            Rechercher des mises à jour
+          </Button>
+          {status.kind === "current" && (
+            <span className="inline-flex items-center gap-1 text-[11px] font-medium text-emerald-700 dark:text-emerald-400">
+              <Check className="size-3" /> Vous êtes à jour.
+            </span>
+          )}
+        </div>
+
+        {status.kind === "error" && (
+          <p className="text-destructive text-xs">{status.message}</p>
+        )}
+
+        {status.kind === "available" && (
+          <div className="border-primary/30 bg-primary/5 space-y-2 rounded-md border p-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <span className="text-sm font-semibold">
+                Version {status.latest.tag} disponible
+              </span>
+              <Button
+                variant="gradient"
+                size="sm"
+                onClick={() => onDownload(status.latest)}
+                className="text-xs"
+              >
+                <Download className="size-3" /> Télécharger
+              </Button>
+            </div>
+            {status.latest.body && (
+              <div className="max-h-72 overflow-y-auto border-t pt-2">
+                <Markdown content={status.latest.body} collapsible />
+              </div>
+            )}
+            <p className="text-muted-foreground text-[11px]">
+              Le programme d&apos;installation s&apos;ouvre dans votre navigateur
+              ; lancez-le puis relancez PackRest une fois installé.
+            </p>
+          </div>
+        )}
+      </CardBody>
+    </Card>
   );
 }
 

@@ -27,9 +27,17 @@
         { "url": "https://*.pack-solutions.gravitee.cloud/*" },
         { "url": "https://gitlab.com/*" },
         { "url": "https://*.gitlab.com/*" },
+        { "url": "https://api.github.com/*" },
         { "url": "https://*.githubusercontent.com/*" },
         { "url": "https://storage.googleapis.com/*" },
         { "url": "https://*.amazonaws.com/*" }
+      ]
+    },
+    {
+      "identifier": "opener:allow-open-url",
+      "allow": [
+        { "url": "https://github.com/*" },
+        { "url": "https://*.githubusercontent.com/*" }
       ]
     }
   ]

@@ -21,7 +21,6 @@ import {
   SheetTrigger,
 } from "@/components/ui/sheet";
 import { Separator } from "@/components/ui/separator";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import {
   Tooltip,
   TooltipContent,
@@ -32,6 +31,7 @@ import ThemeToggle from "@/components/ThemeToggle";
 import { apiTheme } from "@/lib/design";
 import { listApiSummaries, SPECS_CHANGED_EVENT } from "@/lib/specs";
 import { copySpecs } from "@/lib/sync";
+import { useAppVersion, useSpecsTag, specsTagLabel } from "@/hooks/use-app-info";
 import { cn } from "@/lib/utils";
 
 export interface NavApiSummary {
@@ -68,7 +68,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       <div className="flex min-h-screen flex-col">
         <TopBar apis={apis} mobileOpen={open} onMobileOpenChange={setOpen} />
         <div className="flex flex-1 flex-col md:flex-row">
-          <aside className="bg-sidebar text-sidebar-foreground border-sidebar-border hidden w-64 shrink-0 flex-col border-r md:flex">
+          <aside className="bg-sidebar text-sidebar-foreground border-sidebar-border hidden w-64 shrink-0 flex-col border-r md:flex md:sticky md:top-14 md:h-[calc(100vh-3.5rem)] md:self-start">
             <NavBody apis={apis} />
           </aside>
           <main className="min-w-0 flex-1 p-4 md:p-6">{children}</main>
@@ -180,7 +180,7 @@ function NavBody({
 
   return (
     <div className="flex h-full flex-col">
-      <ScrollArea className="flex-1 px-3 pt-4 pb-3">
+      <div className="flex-1 px-3 pt-4 pb-3">
         <Section title="APIs">
           {apis.length === 0 ? (
             <p className="text-muted-foreground px-2 py-1 text-xs">
@@ -231,7 +231,25 @@ function NavBody({
             onNavigate={onNavigate}
           />
         </Section>
-      </ScrollArea>
+        <Separator className="my-3" />
+        <NavFooter />
+      </div>
+    </div>
+  );
+}
+
+// App version + which GitLab release the loaded specs came from ("locales" for
+// a local-directory sync), pinned at the bottom of the sidebar.
+function NavFooter() {
+  const version = useAppVersion();
+  const specsTag = useSpecsTag();
+
+  return (
+    <div className="text-muted-foreground px-2 pb-2 text-[11px] leading-tight">
+      <div className="font-medium">
+        PackRest{version ? ` v${version}` : ""}
+      </div>
+      <div className="mt-0.5">APIs : {specsTagLabel(specsTag)}</div>
     </div>
   );
 }

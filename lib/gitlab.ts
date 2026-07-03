@@ -8,6 +8,7 @@ import { unzipSync } from "fflate";
 import { diffSpec, type SpecDiff } from "./spec-diff";
 import {
   getGitlabConfig,
+  setSpecsTag,
   GITLAB_DEFAULT_HOST,
   GITLAB_DEFAULT_PROJECT,
 } from "./config";
@@ -173,6 +174,7 @@ export async function syncFromGitlab(tag: string): Promise<GitlabSyncResult> {
   );
   if (!relRes.ok) throw await toError(relRes, `Release introuvable : ${tag}`);
   const release = (await relRes.json()) as {
+    released_at?: string;
     assets?: { links?: AssetLink[] };
   };
 
@@ -206,7 +208,15 @@ export async function syncFromGitlab(tag: string): Promise<GitlabSyncResult> {
     );
   }
 
-  return extractBundle(tag, bundle.name, new Uint8Array(buf));
+  const result = await extractBundle(tag, bundle.name, new Uint8Array(buf));
+  // Remember which release the loaded specs came from (previously discarded),
+  // so the sidebar footer and Settings can show the current APIs tag.
+  await setSpecsTag({
+    tag,
+    releasedAt: release.released_at,
+    syncedAt: new Date().toISOString(),
+  });
+  return result;
 }
 
 // Pull every OpenAPI bundle out of the zip and write it into the spec store.

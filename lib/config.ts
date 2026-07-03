@@ -4,7 +4,7 @@
 // access token is kept here too — same protection level as the previous
 // gitignored file, but persisted per-user in the app-data store.
 
-import { storeGet, storeSet } from "./store";
+import { storeGet, storeSet, storeDelete } from "./store";
 
 export interface GitlabConfig {
   /** GitLab instance origin, e.g. https://gitlab.com. */
@@ -27,6 +27,27 @@ export const GITLAB_DEFAULT_PROJECT = "packsolutions/openapi";
 
 const KEY_SPECS_DIR = "packrest.specsDir";
 const KEY_GITLAB = "packrest.gitlab";
+const KEY_SPECS_TAG = "packrest.specsTag";
+
+// Which GitLab release the currently-loaded specs came from. Persisted after a
+// successful `syncFromGitlab` (the tag was previously discarded), and cleared
+// on a local-directory sync since those bundles have no release tag.
+export interface SpecsTag {
+  tag: string;
+  releasedAt?: string;
+  /** ISO timestamp of when the sync happened. */
+  syncedAt: string;
+}
+
+export async function getSpecsTag(): Promise<SpecsTag | null> {
+  return (await storeGet<SpecsTag>(KEY_SPECS_TAG)) ?? null;
+}
+export async function setSpecsTag(value: SpecsTag): Promise<void> {
+  await storeSet(KEY_SPECS_TAG, value);
+}
+export async function clearSpecsTag(): Promise<void> {
+  await storeDelete(KEY_SPECS_TAG);
+}
 
 export async function getSpecsDir(): Promise<string> {
   return (await storeGet<string>(KEY_SPECS_DIR)) ?? "";
