@@ -11,7 +11,7 @@ import { getSpecsDir, clearSpecsTag } from "./config";
 import { isTauri } from "./platform";
 import constants from "./sync-constants.json";
 
-const { EXCLUDED_APIS } = constants;
+const EXCLUDED_APIS: string[] = constants.EXCLUDED_APIS;
 
 export interface SyncResult {
   source: string;

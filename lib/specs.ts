@@ -19,7 +19,7 @@ import { dereference } from "./deref";
 import constants from "./sync-constants.json";
 import { listSpecFiles, readSpecFile } from "./specs-fs";
 
-const { EXCLUDED_APIS } = constants;
+const EXCLUDED_APIS: string[] = constants.EXCLUDED_APIS;
 
 // Dispatched on the window after the spec store changes (a sync wrote new
 // bundles and busted the cache), so the API grid / sidebar re-load without a

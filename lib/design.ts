@@ -17,6 +17,8 @@ import {
   ScrollText,
   MessageSquareWarning,
   Webhook,
+  CreditCard,
+  Package,
   Box,
   type LucideIcon,
 } from "lucide-react";
@@ -193,12 +195,40 @@ export const API_THEME: Record<string, ApiTheme> = {
     text: "text-fuchsia-800 dark:text-fuchsia-200",
     border: "border-fuchsia-200/80 dark:border-fuchsia-800/60",
   },
+  "payment-method": {
+    label: "Payment Method",
+    icon: CreditCard,
+    ring: "ring-teal-500/25 dark:ring-teal-400/25",
+    bg: "bg-teal-100 dark:bg-teal-900/40",
+    bgSoft: "bg-teal-50 dark:bg-teal-900/30",
+    text: "text-teal-800 dark:text-teal-200",
+    border: "border-teal-200/80 dark:border-teal-800/60",
+  },
+  product: {
+    label: "Product",
+    icon: Package,
+    ring: "ring-amber-500/25 dark:ring-amber-400/25",
+    bg: "bg-amber-100 dark:bg-amber-900/40",
+    bgSoft: "bg-amber-50 dark:bg-amber-900/30",
+    text: "text-amber-800 dark:text-amber-200",
+    border: "border-amber-200/80 dark:border-amber-800/60",
+  },
 };
+
+// kebab/snake id -> Title Case, e.g. "payment-method" -> "Payment Method".
+// Used as a last-resort label so an unknown API never shows a raw kebab id.
+function humanizeId(id: string): string {
+  return id
+    .split(/[-_]/)
+    .filter(Boolean)
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(" ");
+}
 
 export function apiTheme(id: string): ApiTheme {
   return (
     API_THEME[id] ?? {
-      label: id,
+      label: humanizeId(id),
       icon: Box,
       ring: "ring-muted-foreground/30",
       bg: "bg-muted",

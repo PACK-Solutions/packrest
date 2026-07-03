@@ -3,6 +3,7 @@
     "contract",
     "document",
     "order-book",
+    "payment-method",
     "person",
     "product",
     "service-request",

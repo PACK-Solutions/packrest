@@ -2,5 +2,5 @@
   "ENV_VAR_NAME": "PACKREST_SPECS_DIR",
   "CONFIG_FILENAME": ".packrest.config.json",
   "DEFAULT_RELATIVE_PARTS": ["..", "openapi", "dist"],
-  "EXCLUDED_APIS": ["payment-method"]
+  "EXCLUDED_APIS": []
 }
