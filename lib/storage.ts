@@ -6,6 +6,7 @@
 // call sites keep reading settings/token inline without awaiting.
 
 import { storeGet, storeSet, storeDelete } from "./store";
+import type { EnvName } from "./env";
 
 export interface SavedHeader {
   key: string;
@@ -13,17 +14,44 @@ export interface SavedHeader {
   enabled?: boolean;
 }
 
-export interface Settings {
-  // dev | rec use built-in Gravitee URL presets; custom honours baseUrl / tokenUrl.
-  environment: "dev" | "rec" | "custom";
-  baseUrl: string;
-  tokenUrl: string;
+// OAuth2 client credentials. Kept per environment (see Settings.credentials):
+// dev / rec / custom each have their own pair.
+export interface Credentials {
   clientId: string;
   clientSecret: string;
+}
+
+export interface Settings {
+  // dev | rec use built-in Gravitee URL presets; custom honours baseUrl / tokenUrl.
+  environment: EnvName;
+  baseUrl: string;
+  tokenUrl: string;
+  // Client credentials per environment — switching env swaps which pair the
+  // token request uses. Migrated from the former single global pair.
+  credentials: Record<EnvName, Credentials>;
   // Per-API context path overrides (apiId → path segment, e.g. "document-api").
   // Default path is the apiId itself. Applies to the dev/rec gateway presets;
   // the host stays the preset's, only the path segment is swapped.
   apiPaths?: Record<string, string>;
+}
+
+// A fresh, empty credential pair for every environment.
+export function emptyCredentials(): Record<EnvName, Credentials> {
+  return {
+    dev: { clientId: "", clientSecret: "" },
+    rec: { clientId: "", clientSecret: "" },
+    custom: { clientId: "", clientSecret: "" },
+  };
+}
+
+// The credential pair for an environment (the active one by default). Settings
+// are always normalized (bootstrapStorage → normalizeSettings), so every env
+// key is present.
+export function credentialsFor(
+  settings: Settings,
+  env: EnvName = settings.environment,
+): Credentials {
+  return settings.credentials[env];
 }
 
 export interface TokenState {
@@ -42,10 +70,48 @@ const DEFAULT_SETTINGS: Settings = {
   environment: "dev",
   baseUrl: "",
   tokenUrl: "",
-  clientId: "",
-  clientSecret: "",
+  credentials: emptyCredentials(),
   apiPaths: {},
 };
+
+// The persisted shape, tolerant of older data: pre-per-env settings stored a
+// single global clientId/clientSecret and no `credentials` map.
+type StoredSettings = Partial<Omit<Settings, "credentials">> & {
+  credentials?: Partial<Record<EnvName, Partial<Credentials>>>;
+  clientId?: string;
+  clientSecret?: string;
+};
+
+// Build a complete Settings from whatever was stored, filling defaults and
+// migrating the legacy global credentials onto the environment that was active
+// when they were saved.
+function normalizeSettings(raw: StoredSettings | undefined | null): Settings {
+  const r = raw ?? {};
+  const environment: EnvName = r.environment ?? DEFAULT_SETTINGS.environment;
+  const credentials = emptyCredentials();
+  if (r.credentials) {
+    for (const env of Object.keys(credentials) as EnvName[]) {
+      const c = r.credentials[env];
+      if (c)
+        credentials[env] = {
+          clientId: c.clientId ?? "",
+          clientSecret: c.clientSecret ?? "",
+        };
+    }
+  } else if (r.clientId || r.clientSecret) {
+    credentials[environment] = {
+      clientId: r.clientId ?? "",
+      clientSecret: r.clientSecret ?? "",
+    };
+  }
+  return {
+    environment,
+    baseUrl: r.baseUrl ?? "",
+    tokenUrl: r.tokenUrl ?? "",
+    credentials,
+    apiPaths: { ...(r.apiPaths ?? {}) },
+  };
+}
 
 // Fired on the window after settings are written, so components mounted in the
 // same tab (the request builder, the settings page) can re-sync immediately.
@@ -65,8 +131,8 @@ let hydrated = false;
 export async function bootstrapStorage(): Promise<void> {
   if (hydrated) return;
   try {
-    const s = await storeGet<Partial<Settings>>(KEYS.settings);
-    settingsCache = { ...DEFAULT_SETTINGS, ...(s ?? {}) };
+    const s = await storeGet<StoredSettings>(KEYS.settings);
+    settingsCache = normalizeSettings(s);
     tokenCache = (await storeGet<TokenState>(KEYS.token)) ?? null;
   } catch {
     // keep defaults on any read/parse failure

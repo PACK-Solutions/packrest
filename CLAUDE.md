@@ -107,7 +107,7 @@ No test runner/ESLint/Prettier. `typecheck` + `next build` (static export) +
   import a Bruno `.zip`/`.yml` on `/collections`. Import supports the
   `opencollection` YAML format only. Imported requests match a spec endpoint by
   method + path and open via a one-shot `sessionStorage` seed (`IMPORT_SEED_KEY`).
-- `clientSecret`, token and the GitLab PAT live in the app-data store
-  (`packrest.json`), unencrypted — same protection level as the previous
-  localStorage / gitignored file. A hardened build would move secrets to the
-  OS keychain.
+- The per-environment `clientSecret`s (one per env — dev/rec/custom), token and
+  the GitLab PAT live in the app-data store (`packrest.json`), unencrypted —
+  same protection level as the previous localStorage / gitignored file. A
+  hardened build would move secrets to the OS keychain.

@@ -36,6 +36,7 @@ import {
 import {
   loadSettings,
   saveSettings,
+  credentialsFor,
   SETTINGS_CHANGED_EVENT,
   type SavedHeader,
 } from "@/lib/storage";
@@ -259,15 +260,16 @@ export default function RequestBuilder(props: Props) {
     setFetchingToken(true);
     try {
       const s = loadSettings();
-      if (!s.clientId || !s.clientSecret) {
+      const creds = credentialsFor(s);
+      if (!creds.clientId || !creds.clientSecret) {
         throw new Error(
           "Configurez clientId et clientSecret dans Paramètres avant de demander un token.",
         );
       }
       const fresh = await fetchToken({
         tokenUrl: resolveTokenUrl(s.environment, s.tokenUrl, tokenUrl),
-        clientId: s.clientId,
-        clientSecret: s.clientSecret,
+        clientId: creds.clientId,
+        clientSecret: creds.clientSecret,
         scopes: selectedScopes,
       });
       setToken(fresh);

@@ -35,8 +35,11 @@ import type { SpecDiff } from "@/lib/spec-diff";
 import {
   loadSettings,
   saveSettings,
+  credentialsFor,
+  emptyCredentials,
   SETTINGS_CHANGED_EVENT,
   type Settings,
+  type Credentials,
 } from "@/lib/storage";
 import {
   ENV_OPTIONS,
@@ -60,6 +63,7 @@ import {
   type LatestRelease,
 } from "@/lib/github";
 import { openUrl } from "@/lib/opener";
+import { clearToken } from "@/lib/token";
 import { useAppVersion, useSpecsTag, specsTagLabel } from "@/hooks/use-app-info";
 import { pickDirectory } from "@/lib/dialog";
 import { cn } from "@/lib/utils";
@@ -90,6 +94,12 @@ interface Release {
 // full list.
 const RELEASES_PREVIEW = 3;
 
+// Human label for an environment: the preset's own label, or "Personnalisé"
+// for the custom env (which has no preset).
+function envLabel(env: EnvName): string {
+  return env === "custom" ? "Personnalisé" : ENV_PRESETS[env].label;
+}
+
 function formatReleaseDate(iso?: string): string {
   if (!iso) return "";
   const d = new Date(iso);
@@ -107,8 +117,7 @@ export default function SettingsPage() {
     environment: "dev",
     baseUrl: "",
     tokenUrl: "",
-    clientId: "",
-    clientSecret: "",
+    credentials: emptyCredentials(),
   });
   const [saved, setSaved] = useState(false);
   const [apis, setApis] = useState<{ id: string; title: string }[]>([]);
@@ -194,7 +203,12 @@ export default function SettingsPage() {
   }, [gitlabStatus]);
 
   const onSave = () => {
+    // A token is issued by (and valid only for) one environment's auth server.
+    // If the environment changed, drop the cached token so a stale one isn't
+    // sent to the new gateway (RequestBuilder polls currentToken()).
+    const envChanged = loadSettings().environment !== settings.environment;
     saveSettings(settings);
+    if (envChanged) clearToken();
     setSaved(true);
     window.setTimeout(() => setSaved(false), 1500);
     toast.success("Paramètres enregistrés");
@@ -344,6 +358,19 @@ export default function SettingsPage() {
       else delete apiPaths[apiId];
       return { ...prev, apiPaths };
     });
+  };
+
+  // Credentials of the currently selected environment, and a setter that edits
+  // only that environment's pair (each env keeps its own).
+  const currentCreds = credentialsFor(settings);
+  const updateCred = (field: keyof Credentials, value: string) => {
+    setSettings((prev) => ({
+      ...prev,
+      credentials: {
+        ...prev.credentials,
+        [prev.environment]: { ...credentialsFor(prev), [field]: value },
+      },
+    }));
   };
 
   const isCustom = settings.environment === "custom";
@@ -748,17 +775,26 @@ export default function SettingsPage() {
       <Card>
         <CardHeader>
           <Lock className="text-muted-foreground size-3.5" />
-          <span className="font-semibold">Identifiants client OAuth2</span>
+          <span className="font-semibold">
+            Identifiants client OAuth2 — {envLabel(settings.environment)}
+          </span>
         </CardHeader>
         <CardBody className="space-y-3 p-4">
+          <p className="text-muted-foreground text-xs">
+            Propres à l&apos;environnement{" "}
+            <strong>{envLabel(settings.environment)}</strong> : chaque
+            environnement conserve ses propres identifiants. Changez
+            d&apos;environnement ci-dessus pour saisir les autres.
+          </p>
           <Field label="Client ID" required>
             <Input
-              value={settings.clientId}
-              onChange={(e) =>
-                setSettings({ ...settings, clientId: e.target.value })
-              }
+              value={currentCreds.clientId}
+              onChange={(e) => updateCred("clientId", e.target.value)}
               className="font-mono"
-              autoComplete="username"
+              // The same inputs are reused across environments (value swaps on
+              // env change), so disable autofill to avoid one env's credentials
+              // being cross-filled into another's.
+              autoComplete="off"
             />
           </Field>
           <Field
@@ -768,12 +804,10 @@ export default function SettingsPage() {
           >
             <Input
               type="password"
-              value={settings.clientSecret}
-              onChange={(e) =>
-                setSettings({ ...settings, clientSecret: e.target.value })
-              }
+              value={currentCreds.clientSecret}
+              onChange={(e) => updateCred("clientSecret", e.target.value)}
               className="font-mono"
-              autoComplete="current-password"
+              autoComplete="off"
             />
           </Field>
         </CardBody>
@@ -912,16 +946,13 @@ function EnvOption({
   active: boolean;
   onSelect: () => void;
 }) {
-  const meta =
-    env === "custom"
-      ? {
-          label: "Personnalisé",
-          description: "Renseignez vos propres URLs.",
-        }
-      : {
-          label: ENV_PRESETS[env].label,
-          description: ENV_PRESETS[env].description,
-        };
+  const meta = {
+    label: envLabel(env),
+    description:
+      env === "custom"
+        ? "Renseignez vos propres URLs."
+        : ENV_PRESETS[env].description,
+  };
   return (
     <button
       type="button"
