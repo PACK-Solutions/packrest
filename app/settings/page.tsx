@@ -1,11 +1,10 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import {
   Save,
   Lock,
   Globe,
-  KeyRound,
   Layers,
   FolderSync,
   RefreshCw,
@@ -14,6 +13,7 @@ import {
   Download,
   Check,
   Info,
+  AppWindow,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -56,12 +56,12 @@ import {
 } from "@/lib/config";
 import { copySpecs } from "@/lib/sync";
 import { listReleases, syncFromGitlab } from "@/lib/gitlab";
+import { pickInstallerAsset, type LatestRelease } from "@/lib/github";
 import {
-  getLatestRelease,
-  compareVersions,
-  pickInstallerAsset,
-  type LatestRelease,
-} from "@/lib/github";
+  checkForUpdates,
+  type UpdateCheckOutcome,
+} from "@/lib/update-check";
+import { TONE_CLASSES } from "@/lib/design";
 import { openUrl } from "@/lib/opener";
 import { clearToken } from "@/lib/token";
 import { useAppVersion, useSpecsTag, specsTagLabel } from "@/hooks/use-app-info";
@@ -75,13 +75,13 @@ type SpecsStatus =
   | { kind: "ok"; message: string }
   | { kind: "error"; message: string };
 
-// State of the in-app GitHub update check.
-type UpdateStatus =
+// State of the manual « Rechercher des mises à jour » action: one check
+// covers both channels (application + contrats d'API); each side of the
+// outcome renders in its own row.
+type CheckState =
   | { kind: "idle" }
   | { kind: "checking" }
-  | { kind: "current" }
-  | { kind: "available"; latest: LatestRelease }
-  | { kind: "error"; message: string };
+  | { kind: "done"; outcome: UpdateCheckOutcome };
 
 interface Release {
   tag: string;
@@ -380,109 +380,32 @@ export default function SettingsPage() {
       : ENV_PRESETS[settings.environment].host;
 
   return (
-    <div className="mx-auto max-w-2xl space-y-4">
-      <h1 className="text-xl font-semibold">Paramètres</h1>
-      <p className="text-muted-foreground text-sm">
-        La configuration (source des specs, connexion GitLab, identifiants
-        OAuth2 et environnement) est stockée localement sur cette machine par
-        l&apos;application (tauri-plugin-store). Le client secret et le token
-        sont envoyés directement à la passerelle, sans transiter par un serveur.
-      </p>
+    <div className="mx-auto max-w-2xl space-y-6">
+      <header>
+        <h1 className="from-foreground to-muted-foreground bg-gradient-to-r bg-clip-text text-2xl font-semibold text-transparent">
+          Paramètres
+        </h1>
+        <p className="text-muted-foreground mt-1 text-sm">
+          Configuration stockée localement sur cette machine : sources des
+          contrats d&apos;API, environnement et identifiants OAuth2. Le client
+          secret et le token sont envoyés directement à la passerelle, sans
+          transiter par un serveur.
+        </p>
+      </header>
 
-      <AboutUpdateCard />
+      <SettingsSection title="Mises à jour">
+        <AboutUpdateCard gitlabConnected={gitlabHasToken} />
+      </SettingsSection>
 
-      <Card>
-        <CardHeader>
-          <FolderSync className="text-muted-foreground size-3.5" />
-          <span className="font-semibold">Source des specs OpenAPI</span>
-        </CardHeader>
-        <CardBody className="space-y-3 p-4">
-          {configError && (
-            <Alert variant="warn">
-              <AlertDescription>{configError}</AlertDescription>
-            </Alert>
-          )}
-          <Field
-            label="Chemin du dossier"
-            hint="Dossier contenant les sous-dossiers <api>/v1/openapi.bundle.yaml. Stocké localement par l'application."
-          >
-            <div className="flex items-center gap-1.5">
-              <Input
-                value={specsDir}
-                onChange={(e) => setSpecsDir(e.target.value)}
-                placeholder={resolvedSpecsDir || "/chemin/vers/openapi/dist"}
-                className="font-mono"
-                spellCheck={false}
-              />
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={onBrowseSpecsDir}
-                className="h-9 shrink-0 text-xs"
-              >
-                <FolderSync className="size-3" /> Parcourir
-              </Button>
-            </div>
-          </Field>
-          {resolvedSpecsDir && !specsDir && (
-            <p className="text-muted-foreground text-[11px]">
-              Chemin actuellement résolu (variable d&apos;environnement ou
-              valeur par défaut) :{" "}
-              <code className="font-mono">{resolvedSpecsDir}</code>
-            </p>
-          )}
-          <div className="flex flex-wrap items-center gap-2">
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={onSaveSpecsPath}
-              disabled={specsStatus.kind === "saving" || !specsDir.trim()}
-              className="text-xs"
-            >
-              <Save className="size-3" /> Enregistrer le chemin
-            </Button>
-            <Button
-              variant="gradient"
-              size="sm"
-              onClick={onSyncSpecs}
-              disabled={specsStatus.kind === "syncing"}
-              className="text-xs"
-            >
-              <RefreshCw
-                className={cn(
-                  "size-3",
-                  specsStatus.kind === "syncing" && "animate-spin",
-                )}
-              />
-              Synchroniser maintenant
-            </Button>
-          </div>
-          {(specsStatus.kind === "ok" || specsStatus.kind === "error") && (
-            <p
-              className={cn(
-                "text-xs",
-                specsStatus.kind === "error"
-                  ? "text-destructive"
-                  : "text-emerald-700 dark:text-emerald-400",
-              )}
-            >
-              {specsStatus.message}
-            </p>
-          )}
-          <SyncDiff diffs={specsDiffs} />
-          <p className="text-muted-foreground text-[11px]">
-            Les specs synchronisées sont écrites dans le dossier de données de
-            l&apos;application et rechargées sans redémarrage.
-          </p>
-        </CardBody>
-      </Card>
-
+      <SettingsSection
+        title="Sources des contrats d'API"
+        description="D'où proviennent les specs OpenAPI chargées dans PackRest : une release GitLab (recommandé) ou un dossier local."
+      >
+      <div id="gitlab-sync" className="scroll-mt-16">
       <Card>
         <CardHeader>
           <GitBranch className="text-muted-foreground size-3.5" />
-          <span className="font-semibold">
-            Synchroniser depuis une release GitLab
-          </span>
+          <span className="font-semibold">Release GitLab</span>
         </CardHeader>
         <CardBody className="space-y-3 p-4">
           <p className="text-muted-foreground text-xs">
@@ -535,9 +458,7 @@ export default function SettingsPage() {
               <Save className="size-3" /> Enregistrer la connexion
             </Button>
             {gitlabHasToken && gitlabStatus.kind !== "saving" && (
-              <span className="inline-flex items-center gap-1 text-[11px] font-medium text-emerald-700 dark:text-emerald-400">
-                <Check className="size-3" /> Token enregistré
-              </span>
+              <InlineStatus kind="ok" message="Token enregistré" />
             )}
           </div>
 
@@ -616,7 +537,7 @@ export default function SettingsPage() {
                     size="sm"
                     onClick={onSyncGitlab}
                     disabled={!selectedTag || gitlabStatus.kind === "syncing"}
-                    className="w-full text-xs sm:w-auto"
+                    className="text-xs"
                   >
                     <Download
                       className={cn(
@@ -638,21 +559,98 @@ export default function SettingsPage() {
           )}
 
           {(gitlabStatus.kind === "ok" || gitlabStatus.kind === "error") && (
-            <p
-              className={cn(
-                "text-xs",
-                gitlabStatus.kind === "error"
-                  ? "text-destructive"
-                  : "text-emerald-700 dark:text-emerald-400",
-              )}
-            >
-              {gitlabStatus.message}
-            </p>
+            <InlineStatus
+              kind={gitlabStatus.kind === "error" ? "error" : "ok"}
+              message={gitlabStatus.message}
+            />
           )}
           <SyncDiff diffs={gitlabDiffs} />
         </CardBody>
       </Card>
+      </div>
 
+      <Card>
+        <CardHeader>
+          <FolderSync className="text-muted-foreground size-3.5" />
+          <span className="font-semibold">Dossier local</span>
+        </CardHeader>
+        <CardBody className="space-y-3 p-4">
+          {configError && (
+            <Alert variant="warn">
+              <AlertDescription>{configError}</AlertDescription>
+            </Alert>
+          )}
+          <Field
+            label="Chemin du dossier"
+            hint="Dossier contenant les sous-dossiers <api>/v1/openapi.bundle.yaml. Stocké localement par l'application."
+          >
+            <div className="flex items-center gap-1.5">
+              <Input
+                value={specsDir}
+                onChange={(e) => setSpecsDir(e.target.value)}
+                placeholder={resolvedSpecsDir || "/chemin/vers/openapi/dist"}
+                className="font-mono"
+                spellCheck={false}
+              />
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={onBrowseSpecsDir}
+                className="h-9 shrink-0 text-xs"
+              >
+                <FolderSync className="size-3" /> Parcourir
+              </Button>
+            </div>
+          </Field>
+          {resolvedSpecsDir && !specsDir && (
+            <p className="text-muted-foreground text-[11px]">
+              Chemin actuellement résolu (variable d&apos;environnement ou
+              valeur par défaut) :{" "}
+              <code className="font-mono">{resolvedSpecsDir}</code>
+            </p>
+          )}
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={onSaveSpecsPath}
+              disabled={specsStatus.kind === "saving" || !specsDir.trim()}
+              className="text-xs"
+            >
+              <Save className="size-3" /> Enregistrer le chemin
+            </Button>
+            <Button
+              variant="gradient"
+              size="sm"
+              onClick={onSyncSpecs}
+              disabled={specsStatus.kind === "syncing"}
+              className="text-xs"
+            >
+              <RefreshCw
+                className={cn(
+                  "size-3",
+                  specsStatus.kind === "syncing" && "animate-spin",
+                )}
+              />
+              Synchroniser maintenant
+            </Button>
+          </div>
+          {(specsStatus.kind === "ok" || specsStatus.kind === "error") && (
+            <InlineStatus
+              kind={specsStatus.kind === "error" ? "error" : "ok"}
+              message={specsStatus.message}
+            />
+          )}
+          <SyncDiff diffs={specsDiffs} />
+          <p className="text-muted-foreground text-[11px]">
+            Les specs synchronisées sont écrites dans le dossier de données de
+            l&apos;application et rechargées sans redémarrage.
+          </p>
+        </CardBody>
+      </Card>
+      </SettingsSection>
+
+      <SettingsSection title="Environnement & authentification">
       <Card>
         <CardHeader>
           <Layers className="text-muted-foreground size-3.5" />
@@ -814,38 +812,40 @@ export default function SettingsPage() {
         </CardBody>
       </Card>
 
-      <div className="flex items-center gap-3">
-        <Button variant="gradient" onClick={onSave}>
-          <Save className="size-3.5" /> Enregistrer
-        </Button>
-        {saved && (
-          <span className="inline-flex items-center gap-1 text-xs font-semibold text-emerald-700 dark:text-emerald-400">
-            <KeyRound className="size-3" /> Enregistré
-          </span>
-        )}
+      <div className="space-y-1.5">
+        <div className="flex flex-wrap items-center gap-3">
+          <Button variant="gradient" onClick={onSave}>
+            <Save className="size-3.5" /> Enregistrer l&apos;environnement et
+            les identifiants
+          </Button>
+          {saved && <InlineStatus kind="ok" message="Enregistré" />}
+        </div>
+        <p className="text-muted-foreground text-[11px]">
+          Enregistre l&apos;environnement, les context paths, les URLs
+          personnalisées et les identifiants OAuth2. Les sources de contrats
+          ci-dessus ont leurs propres boutons d&apos;enregistrement.
+        </p>
       </div>
+      </SettingsSection>
     </div>
   );
 }
 
-// App version + loaded APIs tag, plus the lightweight GitHub update check:
-// fetch the latest release, compare against the running version, and — when a
-// newer one exists — show its changelog and a button that opens the platform
-// installer's download URL in the system browser (manual install).
-function AboutUpdateCard() {
+// The « Mises à jour » card. PackRest updates on two independent channels —
+// the application itself (GitHub Releases, installed manually) and the API
+// contracts (GitLab release bundles, synced in-app) — so the card shows one
+// row per channel and a single button that checks both at once. This is the
+// loud surface (errors render inline), unlike the silent startup check in
+// hooks/use-update-notifier.ts.
+function AboutUpdateCard({ gitlabConnected }: { gitlabConnected: boolean }) {
   const appVersion = useAppVersion();
   const specsTag = useSpecsTag();
-  const [status, setStatus] = useState<UpdateStatus>({ kind: "idle" });
+  const [check, setCheck] = useState<CheckState>({ kind: "idle" });
+  const [syncing, setSyncing] = useState(false);
 
   const onCheck = async () => {
-    setStatus({ kind: "checking" });
-    try {
-      const latest = await getLatestRelease();
-      const newer = compareVersions(latest.tag, appVersion) > 0;
-      setStatus(newer ? { kind: "available", latest } : { kind: "current" });
-    } catch (e) {
-      setStatus({ kind: "error", message: (e as Error).message });
-    }
+    setCheck({ kind: "checking" });
+    setCheck({ kind: "done", outcome: await checkForUpdates() });
   };
 
   const onDownload = async (latest: LatestRelease) => {
@@ -859,6 +859,33 @@ function AboutUpdateCard() {
     }
   };
 
+  // Sync the newer release directly from the card. syncFromGitlab persists the
+  // new SpecsTag and fires SPECS_CHANGED_EVENT, so the displayed tag and the
+  // sidebar dot refresh on their own; only this row's « disponible » state
+  // needs patching locally.
+  const onSyncLatest = async (tag: string) => {
+    setSyncing(true);
+    try {
+      await syncFromGitlab(tag);
+      toast.success(`Contrats d'API ${tag} synchronisés`);
+      setCheck((prev) =>
+        prev.kind === "done"
+          ? { ...prev, outcome: { ...prev.outcome, specs: null } }
+          : prev,
+      );
+    } catch (e) {
+      toast.error("Synchronisation échouée", {
+        description: (e as Error).message,
+      });
+    } finally {
+      setSyncing(false);
+    }
+  };
+
+  const outcome = check.kind === "done" ? check.outcome : null;
+  const appUpdate = outcome?.app ?? null;
+  const specsUpdate = outcome?.specs ?? null;
+
   return (
     <Card>
       <CardHeader>
@@ -866,75 +893,198 @@ function AboutUpdateCard() {
         <span className="font-semibold">À propos &amp; mises à jour</span>
       </CardHeader>
       <CardBody className="space-y-3 p-4">
-        <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-xs">
-          <dt className="text-muted-foreground">Version de l&apos;application</dt>
-          <dd className="font-mono">{appVersion ? `v${appVersion}` : "—"}</dd>
-          <dt className="text-muted-foreground">APIs chargées</dt>
-          <dd className="font-mono">
-            {specsTagLabel(specsTag)}
-            {specsTag?.releasedAt && (
-              <span className="text-muted-foreground ml-2 font-sans text-[11px]">
-                · release du {formatReleaseDate(specsTag.releasedAt)}
-              </span>
-            )}
-          </dd>
-        </dl>
+        <p className="text-muted-foreground text-xs">
+          PackRest se met à jour à deux niveaux indépendants :{" "}
+          <strong>l&apos;application</strong> elle-même (le logiciel installé
+          sur votre poste, publié sur GitHub) et les{" "}
+          <strong>contrats d&apos;API</strong> (les specs OpenAPI qui décrivent
+          les endpoints, publiées dans les releases GitLab).
+        </p>
 
-        <div className="flex flex-wrap items-center gap-2">
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={onCheck}
-            disabled={status.kind === "checking"}
-            className="text-xs"
-          >
-            <RefreshCw
-              className={cn(
-                "size-3",
-                status.kind === "checking" && "animate-spin",
-              )}
-            />
-            Rechercher des mises à jour
-          </Button>
-          {status.kind === "current" && (
-            <span className="inline-flex items-center gap-1 text-[11px] font-medium text-emerald-700 dark:text-emerald-400">
-              <Check className="size-3" /> Vous êtes à jour.
+        <div className="space-y-1.5 rounded-md border p-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <AppWindow className="text-muted-foreground size-3.5" />
+            <span className="text-xs font-semibold">Application</span>
+            <span className="font-mono text-xs">
+              {appVersion ? `v${appVersion}` : "—"}
             </span>
+          </div>
+          <p className="text-muted-foreground text-[11px]">
+            Le logiciel de bureau PackRest. Nouvelles versions publiées sur
+            GitHub Releases — installation manuelle.
+          </p>
+          {outcome?.appError && (
+            <InlineStatus kind="error" message={outcome.appError} />
+          )}
+          {outcome && !outcome.appError && !appUpdate && (
+            <InlineStatus kind="ok" message="À jour" />
+          )}
+          {appUpdate && (
+            <div className="border-primary/30 bg-primary/5 space-y-2 rounded-md border p-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="text-sm font-semibold">
+                  Version {appUpdate.latest.tag} disponible
+                </span>
+                <Button
+                  variant="gradient"
+                  size="sm"
+                  onClick={() => onDownload(appUpdate.latest)}
+                  className="text-xs"
+                >
+                  <Download className="size-3" /> Télécharger
+                </Button>
+              </div>
+              {appUpdate.latest.body && (
+                <div className="max-h-72 overflow-y-auto border-t pt-2">
+                  <Markdown content={appUpdate.latest.body} collapsible />
+                </div>
+              )}
+              <p className="text-muted-foreground text-[11px]">
+                Le programme d&apos;installation s&apos;ouvre dans votre
+                navigateur ; lancez-le puis relancez PackRest une fois
+                installé.
+              </p>
+            </div>
           )}
         </div>
 
-        {status.kind === "error" && (
-          <p className="text-destructive text-xs">{status.message}</p>
-        )}
-
-        {status.kind === "available" && (
-          <div className="border-primary/30 bg-primary/5 space-y-2 rounded-md border p-3">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <span className="text-sm font-semibold">
-                Version {status.latest.tag} disponible
+        <div className="space-y-1.5 rounded-md border p-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <GitBranch className="text-muted-foreground size-3.5" />
+            <span className="text-xs font-semibold">Contrats d&apos;API</span>
+            <span className="font-mono text-xs">{specsTagLabel(specsTag)}</span>
+            {specsTag?.releasedAt && (
+              <span className="text-muted-foreground text-[11px]">
+                · release du {formatReleaseDate(specsTag.releasedAt)}
               </span>
-              <Button
-                variant="gradient"
-                size="sm"
-                onClick={() => onDownload(status.latest)}
-                className="text-xs"
-              >
-                <Download className="size-3" /> Télécharger
-              </Button>
-            </div>
-            {status.latest.body && (
-              <div className="max-h-72 overflow-y-auto border-t pt-2">
-                <Markdown content={status.latest.body} collapsible />
-              </div>
             )}
-            <p className="text-muted-foreground text-[11px]">
-              Le programme d&apos;installation s&apos;ouvre dans votre navigateur
-              ; lancez-le puis relancez PackRest une fois installé.
-            </p>
           </div>
-        )}
+          <p className="text-muted-foreground text-[11px]">
+            Les définitions d&apos;endpoints et exemples chargés dans
+            l&apos;application. Synchronisées depuis les releases GitLab —
+            indépendantes de la version de l&apos;application.
+          </p>
+          {!specsTag ? (
+            <p className="text-muted-foreground text-[11px]">
+              Specs synchronisées depuis un dossier local — aucune version à
+              comparer.
+            </p>
+          ) : !gitlabConnected ? (
+            <p className="text-muted-foreground text-[11px]">
+              Connectez GitLab (section « Release GitLab » ci-dessous) pour
+              vérifier les nouvelles releases.
+            </p>
+          ) : (
+            <>
+              {outcome?.specsError && (
+                <InlineStatus kind="error" message={outcome.specsError} />
+              )}
+              {outcome && !outcome.specsError && !specsUpdate && (
+                <InlineStatus kind="ok" message="À jour" />
+              )}
+              {specsUpdate && (
+                <div className="border-primary/30 bg-primary/5 space-y-2 rounded-md border p-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="text-sm font-semibold">
+                      Release {specsUpdate.latestTag} disponible
+                      {specsUpdate.latestReleasedAt && (
+                        <span className="text-muted-foreground ml-2 text-[11px] font-normal">
+                          · {formatReleaseDate(specsUpdate.latestReleasedAt)}
+                        </span>
+                      )}
+                    </span>
+                    <Button
+                      variant="gradient"
+                      size="sm"
+                      onClick={() => onSyncLatest(specsUpdate.latestTag)}
+                      disabled={syncing}
+                      className="text-xs"
+                    >
+                      <Download
+                        className={cn("size-3", syncing && "animate-spin")}
+                      />
+                      Synchroniser {specsUpdate.latestTag}
+                    </Button>
+                  </div>
+                  <p className="text-muted-foreground text-[11px]">
+                    <a href="#gitlab-sync" className="underline">
+                      ou choisir un autre tag
+                    </a>{" "}
+                    dans la section « Release GitLab ».
+                  </p>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={onCheck}
+          disabled={check.kind === "checking"}
+          className="text-xs"
+        >
+          <RefreshCw
+            className={cn(
+              "size-3",
+              check.kind === "checking" && "animate-spin",
+            )}
+          />
+          Rechercher des mises à jour
+        </Button>
       </CardBody>
     </Card>
+  );
+}
+
+// Groups related cards under an uppercase label (same idiom as the sidebar
+// sections), with an optional one-line description.
+function SettingsSection({
+  title,
+  description,
+  children,
+}: {
+  title: string;
+  description?: string;
+  children: ReactNode;
+}) {
+  return (
+    <section className="space-y-3">
+      <div>
+        <h2 className="text-muted-foreground text-[10px] font-semibold tracking-wider uppercase">
+          {title}
+        </h2>
+        {description && (
+          <p className="text-muted-foreground mt-0.5 text-xs">{description}</p>
+        )}
+      </div>
+      <div className="space-y-4">{children}</div>
+    </section>
+  );
+}
+
+// Uniform inline feedback next to the button that triggered it (toasts are
+// reserved for events not initiated from this page, like the startup update
+// check).
+function InlineStatus({
+  kind,
+  message,
+}: {
+  kind: "ok" | "error";
+  message: string;
+}) {
+  return kind === "ok" ? (
+    <p
+      className={cn(
+        "inline-flex items-center gap-1 text-xs font-medium",
+        TONE_CLASSES.success.text,
+      )}
+    >
+      <Check className="size-3 shrink-0" /> {message}
+    </p>
+  ) : (
+    <p className="text-destructive text-xs">{message}</p>
   );
 }
 

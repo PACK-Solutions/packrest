@@ -32,6 +32,10 @@ import { apiTheme } from "@/lib/design";
 import { listApiSummaries, SPECS_CHANGED_EVENT } from "@/lib/specs";
 import { copySpecs } from "@/lib/sync";
 import { useAppVersion, useSpecsTag, specsTagLabel } from "@/hooks/use-app-info";
+import {
+  useUpdateNotifier,
+  type UpdateAvailability,
+} from "@/hooks/use-update-notifier";
 import { cn } from "@/lib/utils";
 
 export interface NavApiSummary {
@@ -47,6 +51,8 @@ export interface NavApiSummary {
 export function AppShell({ children }: { children: React.ReactNode }) {
   const [open, setOpen] = React.useState(false);
   const [apis, setApis] = React.useState<NavApiSummary[]>([]);
+  // Startup update check (app + specs); drives the dot on « Paramètres ».
+  const updates = useUpdateNotifier();
 
   React.useEffect(() => {
     let cancelled = false;
@@ -66,10 +72,15 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   return (
     <TooltipProvider delayDuration={200}>
       <div className="flex min-h-screen flex-col">
-        <TopBar apis={apis} mobileOpen={open} onMobileOpenChange={setOpen} />
+        <TopBar
+          apis={apis}
+          updates={updates}
+          mobileOpen={open}
+          onMobileOpenChange={setOpen}
+        />
         <div className="flex flex-1 flex-col md:flex-row">
           <aside className="bg-sidebar text-sidebar-foreground border-sidebar-border hidden w-64 shrink-0 flex-col border-r md:flex md:sticky md:top-14 md:h-[calc(100vh-3.5rem)] md:self-start">
-            <NavBody apis={apis} />
+            <NavBody apis={apis} updates={updates} />
           </aside>
           <main className="min-w-0 flex-1 p-4 md:p-6">{children}</main>
         </div>
@@ -80,10 +91,12 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
 function TopBar({
   apis,
+  updates,
   mobileOpen,
   onMobileOpenChange,
 }: {
   apis: NavApiSummary[];
+  updates: UpdateAvailability;
   mobileOpen: boolean;
   onMobileOpenChange: (v: boolean) => void;
 }) {
@@ -105,7 +118,11 @@ function TopBar({
           className="bg-sidebar text-sidebar-foreground w-72 p-0"
         >
           <SheetTitle className="sr-only">Navigation</SheetTitle>
-          <NavBody apis={apis} onNavigate={() => onMobileOpenChange(false)} />
+          <NavBody
+            apis={apis}
+            updates={updates}
+            onNavigate={() => onMobileOpenChange(false)}
+          />
         </SheetContent>
       </Sheet>
       <Brand />
@@ -163,9 +180,11 @@ function SyncButton() {
 
 function NavBody({
   apis,
+  updates,
   onNavigate,
 }: {
   apis: NavApiSummary[];
+  updates: UpdateAvailability;
   onNavigate?: () => void;
 }) {
   const pathname = usePathname();
@@ -222,6 +241,7 @@ function NavBody({
             icon={SettingsIcon}
             active={pathname === "/settings"}
             onNavigate={onNavigate}
+            badge={updates.app || updates.specs}
           />
           <NavLink
             href="/help"
@@ -232,7 +252,7 @@ function NavBody({
           />
         </Section>
         <Separator className="my-3" />
-        <NavFooter />
+        <NavFooter appUpdate={updates.app} />
       </div>
     </div>
   );
@@ -240,7 +260,7 @@ function NavBody({
 
 // App version + which GitLab release the loaded specs came from ("locales" for
 // a local-directory sync), pinned at the bottom of the sidebar.
-function NavFooter() {
+function NavFooter({ appUpdate }: { appUpdate: boolean }) {
   const version = useAppVersion();
   const specsTag = useSpecsTag();
 
@@ -248,6 +268,14 @@ function NavFooter() {
     <div className="text-muted-foreground px-2 pb-2 text-[11px] leading-tight">
       <div className="font-medium">
         PackRest{version ? ` v${version}` : ""}
+        {appUpdate && (
+          <Link
+            href="/settings"
+            className="ml-1.5 font-medium text-amber-600 hover:underline dark:text-amber-400"
+          >
+            · mise à jour disponible
+          </Link>
+        )}
       </div>
       <div className="mt-0.5">APIs : {specsTagLabel(specsTag)}</div>
     </div>
@@ -320,6 +348,7 @@ function NavLink({
   iconBg,
   active,
   onNavigate,
+  badge,
 }: {
   href: string;
   label: string;
@@ -327,6 +356,8 @@ function NavLink({
   iconBg?: string;
   active: boolean;
   onNavigate?: () => void;
+  /** Show an “update available” dot after the label. */
+  badge?: boolean;
 }) {
   return (
     <Tooltip>
@@ -350,6 +381,12 @@ function NavLink({
             <Icon size={13} />
           </span>
           <span className="truncate">{label}</span>
+          {badge && (
+            <span
+              className="ml-auto size-1.5 shrink-0 rounded-full bg-amber-500"
+              aria-label="Mise à jour disponible"
+            />
+          )}
         </Link>
       </TooltipTrigger>
       <TooltipContent side="right" className="md:hidden">

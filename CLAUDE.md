@@ -3,7 +3,7 @@
 A **Tauri v2 desktop app** wrapping a Next.js 16 frontend. The frontend is a
 **static export** (`output: "export"` → `out/`) loaded by the Tauri webview;
 there is **no Node server at runtime**. What used to be Next.js API routes now
-runs client-side through Tauri plugins (`http`, `fs`, `store`, `dialog`).
+runs client-side through Tauri plugins (`http`, `fs`, `store`, `dialog`, `opener`).
 
 The flow is unchanged: pick an API → pick an endpoint → form pre-populated from
 the contract's `examples` → get a token with selectable scopes → execute →
@@ -25,7 +25,7 @@ http/dialog) are unavailable there — see the fallback note below.
 
 ## Layout
 
-- `src-tauri/` — Rust. `src/lib.rs` registers the 4 plugins and exposes two
+- `src-tauri/` — Rust. `src/lib.rs` registers the 5 plugins and exposes two
   commands: `read_source_specs(dir)` (reads a user-picked local source dir for
   the local sync) and `write_file(path, contents)` (saves Bruno exports to a
   user-chosen path). `tauri.conf.json`: `beforeDevCommand: npm run dev`,
@@ -35,7 +35,7 @@ http/dialog) are unavailable there — see the fallback note below.
   - `page.tsx` — API grid (`?` none) → links to `/api-view?id=<api>`.
   - `api-view/page.tsx` — endpoints by tag; reads `?id=<api>`.
   - `endpoint/page.tsx` — hosts `RequestBuilder`; reads `?api=<api>&op=<operationId>`.
-  - `collections/`, `settings/` — client pages.
+  - `collections/`, `settings/`, `help/` — client pages.
   - `layout.tsx` — wraps `TauriProvider` (startup gate) + `AppShell`; the
     `<Suspense>` boundary satisfies static export's `useSearchParams` rule.
   - **No `app/api/*`** — deleted; that logic is client-side now.
@@ -44,6 +44,7 @@ http/dialog) are unavailable there — see the fallback note below.
   list client-side, refreshes on `SPECS_CHANGED_EVENT`), plus `Card`, `Field`,
   `Tabs`, `MethodBadge`, `SchemaField`, `JsonEditor`, `ResponsePanel`,
   `ScopeSelector`, `TokenStatus`, `HeaderEditor`, `BrunoExportButton`, `SyncDiff`.
+  `components/ui/` holds the shadcn/radix primitives.
 - `lib/`
   - `platform.ts` — `isTauri()` runtime detection.
   - `store.ts` — shared tauri-plugin-store handle (localStorage fallback).
@@ -57,6 +58,9 @@ http/dialog) are unavailable there — see the fallback note below.
   - `gitlab.ts` — GitLab release download (tauriFetch) + `fflate` unzip → `specs-fs`.
   - `bruno.ts` / `bruno-export.ts` — Bruno collection (pure JS, unchanged).
   - `dialog.ts` (folder/save pickers), `exporter.ts` (save via `write_file`).
+  - `github.ts` (GitHub Releases update check), `app-version.ts` (running app
+    version), `opener.ts` (open URL in OS browser), `status-help.ts` (HTTP
+    status explanations for ResponsePanel + `/help`).
   - `deref.ts`, `spec-diff.ts`, `example-extractor.ts`, `env.ts`, `types.ts`,
     `hal.ts`, `jwt.ts`, `design.ts`, `utils.ts`.
 - `public/specs/` — bundled seed specs + `manifest.json` (generated; gitignored).

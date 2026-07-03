@@ -49,6 +49,26 @@ export async function clearSpecsTag(): Promise<void> {
   await storeDelete(KEY_SPECS_TAG);
 }
 
+// Newest release the user has already been notified about (startup toast),
+// one slot per update kind. Same version never re-toasts across launches; a
+// strictly newer release does. Distinct from SpecsTag, which tracks what is
+// *installed* — these track what was *announced*.
+const KEY_NOTIFIED_APP = "packrest.notifiedAppVersion";
+const KEY_NOTIFIED_SPECS = "packrest.notifiedSpecsTag";
+
+export async function getNotifiedAppVersion(): Promise<string> {
+  return (await storeGet<string>(KEY_NOTIFIED_APP)) ?? "";
+}
+export async function setNotifiedAppVersion(version: string): Promise<void> {
+  await storeSet(KEY_NOTIFIED_APP, version);
+}
+export async function getNotifiedSpecsTag(): Promise<string> {
+  return (await storeGet<string>(KEY_NOTIFIED_SPECS)) ?? "";
+}
+export async function setNotifiedSpecsTag(tag: string): Promise<void> {
+  await storeSet(KEY_NOTIFIED_SPECS, tag);
+}
+
 export async function getSpecsDir(): Promise<string> {
   return (await storeGet<string>(KEY_SPECS_DIR)) ?? "";
 }
