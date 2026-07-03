@@ -26,14 +26,18 @@ jobs:
           - platform: macos-latest
             args: "--target universal-apple-darwin"
             rust-targets: "aarch64-apple-darwin,x86_64-apple-darwin"
-          # Windows x64 (Intel/AMD). Produces the NSIS per-user setup + the MSI.
+          # Windows x64 (Intel/AMD). Produces the NSIS per-user setup.
           - platform: windows-latest
             args: ""
             rust-targets: ""
 
     runs-on: ${{ matrix.platform }}
+    # Incremental compilation is useless in CI (clean checkouts) and only bloats
+    # the rust-cache; disable it for smaller caches and more deterministic builds.
+    env:
+      CARGO_INCREMENTAL: 0
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # The bundled seed specs (public/specs/*.yaml) are gitignored and
       # generated from an external repo, so they may be absent on a fresh CI
@@ -48,7 +52,7 @@ jobs:
             exit 1
           fi
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
@@ -58,7 +62,7 @@ jobs:
           targets: ${{ matrix.rust-targets }}
 
       # Cache the Rust build (crate compilation is the slow part).
-      - uses: swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2
         with:
           workspaces: "./src-tauri -> target"
 
@@ -86,4 +90,3 @@ jobs:
           path: |
             src-tauri/target/**/release/bundle/dmg/*.dmg
             src-tauri/target/**/release/bundle/nsis/*-setup.exe
-            src-tauri/target/**/release/bundle/msi/*.msi

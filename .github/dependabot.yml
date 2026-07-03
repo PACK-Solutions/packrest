@@ -1,0 +1,33 @@
+# Keeps GitHub Actions, npm and Cargo dependencies current with weekly PRs.
+# Minor/patch bumps are grouped to cut PR noise; majors come as individual PRs.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+
+  - package-ecosystem: npm
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    groups:
+      minor-patch:
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: cargo
+    directory: "/src-tauri"
+    schedule:
+      interval: weekly
+    groups:
+      minor-patch:
+        update-types:
+          - minor
+          - patch

@@ -1,6 +1,6 @@
 [package]
 name = "packrest"
-version = "0.2.0"
+version = "0.2.1"
 description = "PackRest — client REST guidé pour les APIs Pack Solutions"
 authors = ["Pack Solutions"]
 edition = "2021"
@@ -31,3 +31,15 @@ serde_json = "1"
 default = ["custom-protocol"]
 # this feature is used for production builds where `devPath` points to the filesystem
 custom-protocol = ["tauri/custom-protocol"]
+
+# Balanced release profile: meaningful size reduction on the shipped binary with
+# a modest hit to compile time. `codegen-units = 16` keeps compilation parallel
+# (CI dependency compilation stays cached via rust-cache); `lto = "thin"` +
+# `opt-level = "s"` trim the final crate; `strip` and `panic = "abort"` are
+# near-free size wins.
+[profile.release]
+opt-level = "s"
+lto = "thin"
+codegen-units = 16
+strip = true
+panic = "abort"
