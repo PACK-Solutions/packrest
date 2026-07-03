@@ -17,6 +17,10 @@ interface Props {
   // level-1 heading), only the preamble is shown by default and the rest
   // is hidden behind a "Voir plus" toggle. No-op for `inline`.
   collapsible?: boolean;
+  // When true, block text renders at the muted, extra-small "field hint" scale
+  // instead of the default body scale — so an OpenAPI description used as a
+  // form-field hint stays subtle rather than competing with the field label.
+  dense?: boolean;
 }
 
 const blockComponents: Components = {
@@ -113,6 +117,48 @@ const blockComponents: Components = {
   hr: () => <hr className="border-border my-3" />,
 };
 
+// Compact variant: same structure, smaller + muted text so a description
+// rendered as a form-field hint reads as a subtle sub-label. Headings, lists
+// and paragraphs all drop to text-xs / muted-foreground.
+const denseComponents: Components = {
+  ...blockComponents,
+  p: ({ children }) => (
+    <p className="text-muted-foreground text-xs leading-relaxed [&:not(:last-child)]:mb-1.5">
+      {children}
+    </p>
+  ),
+  ul: ({ children }) => (
+    <ul className="text-muted-foreground my-1.5 ml-4 list-disc space-y-0.5 text-xs">
+      {children}
+    </ul>
+  ),
+  ol: ({ children }) => (
+    <ol className="text-muted-foreground my-1.5 ml-4 list-decimal space-y-0.5 text-xs">
+      {children}
+    </ol>
+  ),
+  h1: ({ children }) => (
+    <h3 className="text-foreground mt-2 mb-0.5 text-xs font-semibold">
+      {children}
+    </h3>
+  ),
+  h2: ({ children }) => (
+    <h4 className="text-foreground mt-2 mb-0.5 text-xs font-semibold">
+      {children}
+    </h4>
+  ),
+  h3: ({ children }) => (
+    <h5 className="text-foreground mt-1.5 mb-0.5 text-xs font-semibold">
+      {children}
+    </h5>
+  ),
+  h4: ({ children }) => (
+    <h6 className="text-foreground mt-1.5 mb-0.5 text-xs font-semibold">
+      {children}
+    </h6>
+  ),
+};
+
 // Same component map, but block elements collapse to fragments so the
 // output stays a single inline run. Bold/code/em/link still style.
 const inlineComponents: Components = {
@@ -145,9 +191,11 @@ function splitOverview(content: string): {
   rest: string | null;
 } {
   const lines = content.split("\n");
-  // Pass 1: first ## heading (skip line 0 — it may be the doc's # title).
+  // Pass 1: first sub-heading of any level (## … ######) — skip line 0, which
+  // may be the doc's # title. Catching ### too lets catalogs that jump
+  // straight to level-3 sections still fold.
   for (let i = 1; i < lines.length; i++) {
-    if (/^##\s/.test(lines[i])) {
+    if (/^#{2,6}\s/.test(lines[i])) {
       return {
         overview: lines.slice(0, i).join("\n").trim(),
         rest: lines.slice(i).join("\n").trim(),
@@ -176,10 +224,15 @@ export default function Markdown({
   className,
   inline = false,
   collapsible = false,
+  dense = false,
 }: Props) {
   const [expanded, setExpanded] = useState(false);
   if (!content) return null;
-  const components = inline ? inlineComponents : blockComponents;
+  const components = inline
+    ? inlineComponents
+    : dense
+      ? denseComponents
+      : blockComponents;
   const Wrapper = inline ? "span" : "div";
 
   if (!inline && collapsible) {

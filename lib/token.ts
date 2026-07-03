@@ -2,7 +2,7 @@
 
 import { saveToken, loadToken, type TokenState } from "./storage";
 import { checkUrl } from "./url-policy";
-import { tauriFetch } from "./net";
+import { tauriFetchWithTimeout } from "./net";
 
 // OAuth2 Client Credentials, run directly against the IAM token endpoint via
 // the Tauri HTTP plugin (no CORS, no server hop). Formerly proxied through
@@ -47,19 +47,28 @@ export async function fetchToken(opts: {
   // with the token endpoint's own origin (same-origin), which the gateway
   // accepts. Requires the `unsafe-headers` feature on tauri-plugin-http —
   // `Origin` is a forbidden header the plugin would otherwise drop.
-  const res = await tauriFetch(check.url.toString(), {
-    method: "POST",
-    headers: {
-      Authorization: `Basic ${basic}`,
-      "Content-Type": "application/x-www-form-urlencoded",
-      Accept: "application/json",
-      Origin: check.url.origin,
+  const timed = await tauriFetchWithTimeout(
+    check.url.toString(),
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Basic ${basic}`,
+        "Content-Type": "application/x-www-form-urlencoded",
+        Accept: "application/json",
+        Origin: check.url.origin,
+      },
+      body: form.toString(),
     },
-    body: form.toString(),
-    signal: AbortSignal.timeout(30_000),
-  });
+    30_000,
+  );
+  const res = timed.res;
 
-  const text = await res.text();
+  let text: string;
+  try {
+    text = await res.text();
+  } finally {
+    timed.done();
+  }
   let data: TokenResponse | null = null;
   try {
     data = JSON.parse(text) as TokenResponse;

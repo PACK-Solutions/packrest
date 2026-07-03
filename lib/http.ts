@@ -16,7 +16,13 @@ import {
   PROXY_MAX_RESPONSE_BYTES,
   PROXY_TIMEOUT_MS,
 } from "./url-policy";
-import { tauriFetch, bytesToBase64 } from "./net";
+import {
+  tauriFetchWithTimeout,
+  FetchTimeoutError,
+  bytesToBase64,
+  base64ToBytes,
+} from "./net";
+import { formatFileSize } from "./utils";
 
 // Set when the upstream returned a file download (binary or attachment).
 // The body is a short placeholder in that case; the bytes live here as
@@ -107,12 +113,6 @@ function deleteHeader(headers: Record<string, string>, name: string): void {
   }
 }
 
-function formatBytes(n: number): string {
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
-}
-
 export async function executeRequest(opts: {
   method: string;
   url: string;
@@ -137,17 +137,35 @@ export async function executeRequest(opts: {
 
   const start = Date.now();
   let upstream: Response;
+  let rawBytes: Uint8Array;
   try {
-    upstream = await tauriFetch(urlCheck.url.toString(), {
-      ...init,
-      signal: AbortSignal.timeout(PROXY_TIMEOUT_MS),
-    });
+    // Read the full body while the request resource is still alive, then let
+    // `done()` cancel the timeout so it can't fire on a consumed resource.
+    const timed = await tauriFetchWithTimeout(
+      urlCheck.url.toString(),
+      init,
+      PROXY_TIMEOUT_MS,
+    );
+    upstream = timed.res;
+    try {
+      rawBytes = new Uint8Array(await upstream.arrayBuffer());
+    } finally {
+      timed.done();
+    }
   } catch (err) {
-    const message =
-      (err as Error).name === "TimeoutError" ||
-      (err as Error).name === "AbortError"
-        ? `Timeout après ${PROXY_TIMEOUT_MS}ms`
-        : (err as Error).message;
+    // The deadline can fire while `arrayBuffer()` is still reading the body,
+    // i.e. after tauriFetchWithTimeout has returned: the AbortController then
+    // rejects the read with a bare AbortError rather than FetchTimeoutError.
+    // Map both (and TimeoutError) to the friendly timeout message, as the old
+    // AbortSignal.timeout path did.
+    const name = (err as Error)?.name;
+    const isTimeout =
+      err instanceof FetchTimeoutError ||
+      name === "AbortError" ||
+      name === "TimeoutError";
+    const message = isTimeout
+      ? `Timeout après ${PROXY_TIMEOUT_MS}ms`
+      : (err as Error).message;
     return {
       status: 0,
       statusText: "Fetch failed",
@@ -157,7 +175,6 @@ export async function executeRequest(opts: {
     };
   }
 
-  const rawBytes = new Uint8Array(await upstream.arrayBuffer());
   const truncated = rawBytes.byteLength > PROXY_MAX_RESPONSE_BYTES;
   const bytes = truncated ? new Uint8Array(0) : rawBytes;
   const durationMs = Date.now() - start;
@@ -278,20 +295,15 @@ function applyMultipartBody(
       }),
       f.filename,
     );
-    parts.push(`${f.field}=${f.filename} (${formatBytes(bytes.byteLength)})`);
+    parts.push(
+      `${f.field}=${f.filename} (${formatFileSize(bytes.byteLength)})`,
+    );
   }
   init.body = form;
   // Let the HTTP layer derive the multipart boundary — a caller-supplied
   // Content-Type would clobber it and break the upstream parse.
   deleteHeader(headers, "content-type");
   return `[multipart] ${parts.join("; ")}`;
-}
-
-function base64ToBytes(b64: string): Uint8Array {
-  const binary = atob(b64);
-  const out = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i);
-  return out;
 }
 
 // Read a browser File into a base64 string (no data: prefix) for the multipart

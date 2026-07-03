@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Plus, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -12,7 +12,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import Field from "@/components/Field";
+import Field, { FieldHint } from "@/components/Field";
 import type { JsonSchema } from "@/lib/types";
 import { defaultFromSchema } from "@/lib/example-extractor";
 import { cn } from "@/lib/utils";
@@ -103,6 +103,23 @@ export default function SchemaField({
           </SelectContent>
         </Select>
       </Field>
+    );
+  }
+
+  // Free-form key-value map (object with `additionalProperties` and no fixed
+  // `properties`, e.g. a `metadata` bag). ObjectField would render an empty
+  // fieldset — the user reported "nowhere to enter metadata" — so we render a
+  // dedicated add/remove row editor instead.
+  if (isMapSchema(effective)) {
+    return (
+      <MapField
+        schema={effective}
+        value={value}
+        onChange={onChange}
+        label={label}
+        hint={hint}
+        required={required}
+      />
     );
   }
 
@@ -206,9 +223,9 @@ function ObjectField({
           {label}
         </legend>
       )}
-      {hint && (
-        <p className="text-muted-foreground -mt-1 text-[11px]">{hint}</p>
-      )}
+      <div className="-mt-1">
+        <FieldHint hint={hint} />
+      </div>
       {visible.map(([propName, sub]) => (
         <SchemaField
           key={propName}
@@ -283,6 +300,211 @@ function ArrayField({
         </Button>
       </div>
     </Field>
+  );
+}
+
+interface MapRow {
+  id: number;
+  key: string;
+  val: unknown;
+}
+
+function objectToRows(value: unknown): MapRow[] {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+  return Object.entries(value as Record<string, unknown>).map(
+    ([key, val], i) => ({ id: i, key, val }),
+  );
+}
+
+// Editor for a free-form key-value map (object with `additionalProperties`).
+// Rows are held in local state so a half-typed / empty key doesn't destroy the
+// object representation mid-edit; the parent object is rebuilt from the rows on
+// every change (blank keys skipped). Duplicate keys are flagged inline — a JS
+// object can't hold them, so the emitted object keeps the last (documented).
+function MapField({
+  schema,
+  value,
+  onChange,
+  label,
+  hint,
+  required,
+}: {
+  schema: JsonSchema;
+  value: unknown;
+  onChange: (next: unknown) => void;
+  label: string;
+  hint?: string;
+  required?: boolean;
+}) {
+  const valueSchema: JsonSchema =
+    schema.additionalProperties && typeof schema.additionalProperties === "object"
+      ? schema.additionalProperties
+      : {};
+  const keyMax = schema.propertyNames?.maxLength;
+  const maxEntries = schema.maxProperties;
+
+  const [rows, setRows] = useState<MapRow[]>(() => objectToRows(value));
+  const nextId = useRef(rows.length);
+  // Tracks the object we last emitted, so we can tell an external value change
+  // (import seed, oneOf variant switch, array reorder) apart from our own
+  // round-trip. Only external changes resync the rows.
+  const lastEmitted = useRef<unknown>(value);
+  useEffect(() => {
+    if (value !== lastEmitted.current) {
+      const next = objectToRows(value);
+      nextId.current = next.length;
+      setRows(next);
+      lastEmitted.current = value;
+    }
+  }, [value]);
+
+  const commit = (next: MapRow[]) => {
+    setRows(next);
+    const obj: Record<string, unknown> = {};
+    for (const r of next) {
+      if (r.key.trim() === "") continue;
+      obj[r.key] = r.val;
+    }
+    lastEmitted.current = obj;
+    onChange(obj);
+  };
+
+  const atMax = maxEntries != null && rows.length >= maxEntries;
+  const keyCounts = new Map<string, number>();
+  for (const r of rows) {
+    const k = r.key.trim();
+    if (k) keyCounts.set(k, (keyCounts.get(k) ?? 0) + 1);
+  }
+  const hasDuplicate = [...keyCounts.values()].some((c) => c > 1);
+
+  return (
+    <Field label={label} hint={hint} required={required}>
+      <div className="space-y-2">
+        {rows.length === 0 && (
+          <p className="text-muted-foreground text-xs">Aucune entrée.</p>
+        )}
+        {rows.map((r, i) => {
+          const dup = r.key.trim() !== "" && (keyCounts.get(r.key.trim()) ?? 0) > 1;
+          return (
+            <div key={r.id} className="flex items-start gap-2">
+              <Input
+                value={r.key}
+                placeholder="clé"
+                maxLength={keyMax}
+                aria-label={`Clé de l'entrée ${i + 1}`}
+                aria-invalid={dup}
+                onChange={(e) =>
+                  commit(
+                    rows.map((x) =>
+                      x.id === r.id ? { ...x, key: e.target.value } : x,
+                    ),
+                  )
+                }
+                className={cn(
+                  "w-1/3 font-mono text-xs",
+                  dup && "border-destructive focus-visible:ring-destructive",
+                )}
+              />
+              <div className="flex-1">
+                <MapValueInput
+                  schema={valueSchema}
+                  value={r.val}
+                  ariaLabel={`Valeur de l'entrée ${i + 1}`}
+                  onChange={(v) =>
+                    commit(
+                      rows.map((x) => (x.id === r.id ? { ...x, val: v } : x)),
+                    )
+                  }
+                />
+              </div>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                onClick={() => commit(rows.filter((x) => x.id !== r.id))}
+                aria-label={`Supprimer l'entrée ${i + 1}`}
+                className="text-destructive hover:text-destructive mt-0.5 size-7"
+              >
+                <Trash2 className="size-3.5" />
+              </Button>
+            </div>
+          );
+        })}
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          disabled={atMax}
+          onClick={() =>
+            commit([...rows, { id: nextId.current++, key: "", val: "" }])
+          }
+          className="border-dashed text-xs"
+        >
+          <Plus className="size-3" /> Ajouter une entrée
+        </Button>
+        {hasDuplicate && (
+          <p className="text-destructive text-[11px]">
+            Clés en double : seule la dernière valeur sera envoyée.
+          </p>
+        )}
+        {atMax && (
+          <p className="text-muted-foreground text-[11px]">
+            Maximum {maxEntries} entrées.
+          </p>
+        )}
+      </div>
+    </Field>
+  );
+}
+
+function MapValueInput({
+  schema,
+  value,
+  onChange,
+  ariaLabel,
+}: {
+  schema: JsonSchema;
+  value: unknown;
+  onChange: (next: unknown) => void;
+  ariaLabel?: string;
+}) {
+  const type = Array.isArray(schema.type) ? schema.type[0] : schema.type;
+  if (type === "boolean") {
+    return (
+      <Checkbox
+        checked={!!value}
+        aria-label={ariaLabel}
+        onCheckedChange={(c) => onChange(Boolean(c))}
+      />
+    );
+  }
+  if (type === "integer" || type === "number") {
+    // Coerce to "" when the value isn't a finite number, so a blank/seeded
+    // non-numeric value doesn't render as `0` or trigger React's NaN warning.
+    const num = typeof value === "number" ? value : Number(value);
+    return (
+      <Input
+        type="number"
+        aria-label={ariaLabel}
+        value={value === null || value === undefined || !Number.isFinite(num) ? "" : num}
+        onChange={(e) => {
+          const raw = e.target.value;
+          if (raw === "") return onChange(null);
+          const n = type === "integer" ? parseInt(raw, 10) : parseFloat(raw);
+          onChange(Number.isNaN(n) ? null : n);
+        }}
+      />
+    );
+  }
+  return (
+    <Input
+      type={inputTypeForFormat(schema.format)}
+      aria-label={ariaLabel}
+      value={value === null || value === undefined ? "" : String(value)}
+      maxLength={schema.maxLength}
+      placeholder="valeur"
+      onChange={(e) => onChange(e.target.value)}
+    />
   );
 }
 
@@ -382,6 +604,17 @@ function coerceString(raw: string, schema: JsonSchema): unknown {
     return Number.isNaN(n) ? raw : n;
   }
   return raw;
+}
+
+// A "map" schema is an object whose shape is open (`additionalProperties` is a
+// value schema) with no fixed `properties` — rendered as a key-value editor.
+function isMapSchema(s: JsonSchema): boolean {
+  const ap = s.additionalProperties;
+  if (!ap || typeof ap !== "object") return false;
+  const types = Array.isArray(s.type) ? s.type : s.type ? [s.type] : [];
+  const objectish = types.length === 0 || types.includes("object");
+  const hasProps = !!s.properties && Object.keys(s.properties).length > 0;
+  return objectish && !hasProps;
 }
 
 function mergeAllOf(schema: JsonSchema): JsonSchema {

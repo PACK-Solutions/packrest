@@ -154,6 +154,9 @@ export interface JsonSchema {
   properties?: Record<string, JsonSchema>;
   required?: string[];
   additionalProperties?: boolean | JsonSchema;
+  propertyNames?: JsonSchema;
+  maxProperties?: number;
+  minProperties?: number;
   // array
   items?: JsonSchema;
   minItems?: number;

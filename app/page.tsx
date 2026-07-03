@@ -34,8 +34,8 @@ export default function Home() {
           Choisissez une API
         </h1>
         <p className="text-muted-foreground mt-1 text-sm">
-          Toutes les APIs Pack Solutions, prêtes à être appelées depuis votre
-          navigateur. Les exemples du contrat servent de point de départ.
+          Toutes les APIs Pack Solutions, prêtes à être appelées depuis cette
+          application. Les exemples du contrat servent de point de départ.
         </p>
       </header>
 

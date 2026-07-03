@@ -18,6 +18,7 @@ import TokenInspector from "@/components/TokenInspector";
 import HeaderEditor from "@/components/HeaderEditor";
 import Markdown from "@/components/Markdown";
 import { Button } from "@/components/ui/button";
+import { Progress } from "@/components/ui/progress";
 import { Input } from "@/components/ui/input";
 import {
   Select,
@@ -60,7 +61,7 @@ import type {
   JsonSchema,
 } from "@/lib/types";
 import { saveText } from "@/lib/exporter";
-import { cn } from "@/lib/utils";
+import { cn, formatFileSize } from "@/lib/utils";
 
 interface Props {
   apiId: string;
@@ -199,6 +200,10 @@ export default function RequestBuilder(props: Props) {
   const [response, setResponse] = useState<ProxyResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
+  // True while a multipart request with at least one file is in flight. The
+  // Tauri HTTP plugin can't report upload byte progress, so we show an
+  // indeterminate bar rather than a fake percentage.
+  const [uploading, setUploading] = useState(false);
   // HAL navigation: every "Suivre" pushes a {url, label, response} entry;
   // back/jump pops without re-fetching (each response is cached). When the
   // stack is non-empty the user is "off" the operation — handleSave /
@@ -293,13 +298,16 @@ export default function RequestBuilder(props: Props) {
   };
 
   const handleRun = async () => {
+    const wantsBody = !["GET", "HEAD"].includes(method.toUpperCase());
+    const hasUpload =
+      isMultipart && wantsBody && Object.values(files).some(Boolean);
     setRunning(true);
+    setUploading(hasUpload);
     setError(null);
     setResponse(null);
     setFollowStack([]);
     try {
       const headers = buildLiveHeaders();
-      const wantsBody = !["GET", "HEAD"].includes(method.toUpperCase());
       const res = await executeRequest({
         method,
         url: composedUrl,
@@ -315,6 +323,7 @@ export default function RequestBuilder(props: Props) {
       setError((e as Error).message);
     } finally {
       setRunning(false);
+      setUploading(false);
     }
   };
 
@@ -595,7 +604,7 @@ export default function RequestBuilder(props: Props) {
         <CardBody className="space-y-3 p-3">
           <Field
             label="Scopes OAuth2"
-            hint="Sélectionnez les scopes à demander à l'IAM. Les scopes requis par l'opération sont marqués."
+            hint="Les scopes requis par l'opération sont déjà cochés — en cas de doute, laissez tel quel."
           >
             <ScopeSelector
               available={scopes}
@@ -702,6 +711,19 @@ export default function RequestBuilder(props: Props) {
         </Button>
       </div>
 
+      {uploading && (
+        <div className="border-border bg-muted/40 space-y-1.5 rounded-md border p-3">
+          <div className="text-muted-foreground flex items-center justify-between text-xs">
+            <span className="flex items-center gap-1.5">
+              <Loader2 className="size-3.5 animate-spin" />
+              Envoi du fichier en cours…
+            </span>
+            <span className="font-mono">{formatUploadSize(files)}</span>
+          </div>
+          <Progress />
+        </div>
+      )}
+
       <ResponsePanel
         response={currentResponse}
         error={error}
@@ -714,6 +736,12 @@ export default function RequestBuilder(props: Props) {
       />
     </div>
   );
+}
+
+// Total size of the picked files, formatted for the upload progress label.
+function formatUploadSize(files: Record<string, File | null>): string {
+  const n = Object.values(files).reduce((sum, f) => sum + (f?.size ?? 0), 0);
+  return formatFileSize(n);
 }
 
 // Assemble a MultipartPayload from the metadata object + picked files. Empty

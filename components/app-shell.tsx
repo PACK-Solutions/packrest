@@ -5,6 +5,7 @@ import Link from "next/link";
 import { usePathname, useSearchParams } from "next/navigation";
 import {
   FolderOpen,
+  HelpCircle,
   Menu,
   RefreshCw,
   Settings as SettingsIcon,
@@ -71,27 +72,6 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             <NavBody apis={apis} />
           </aside>
           <main className="min-w-0 flex-1 p-4 md:p-6">{children}</main>
-          {/* Filigrane décoratif — pâquerette, clin d'œil au nom PackRest */}
-          <svg
-            viewBox="0 0 200 200"
-            aria-hidden="true"
-            className="pointer-events-none fixed bottom-4 right-4 z-30 size-12 select-none opacity-80 drop-shadow-sm sm:bottom-6 sm:right-6 sm:size-16"
-          >
-            <g fill="#fcd34d" stroke="#b45309" strokeWidth="4" strokeLinejoin="round">
-              {Array.from({ length: 18 }).map((_, i) => (
-                <ellipse
-                  key={i}
-                  cx="100"
-                  cy="50"
-                  rx="11"
-                  ry="37"
-                  transform={`rotate(${i * 20} 100 100)`}
-                />
-              ))}
-            </g>
-            <circle cx="100" cy="100" r="27" fill="#92400e" />
-            <circle cx="100" cy="100" r="14" fill="#fcd34d" />
-          </svg>
         </div>
       </div>
     </TooltipProvider>
@@ -241,6 +221,13 @@ function NavBody({
             label="Paramètres"
             icon={SettingsIcon}
             active={pathname === "/settings"}
+            onNavigate={onNavigate}
+          />
+          <NavLink
+            href="/help"
+            label="Aide & diagnostic"
+            icon={HelpCircle}
+            active={pathname === "/help"}
             onNavigate={onNavigate}
           />
         </Section>

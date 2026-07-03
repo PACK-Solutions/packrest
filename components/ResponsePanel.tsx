@@ -15,6 +15,8 @@ import HalLinks from "@/components/HalLinks";
 import FileResponse from "@/components/FileResponse";
 import { Button } from "@/components/ui/button";
 import { toneForStatusCode } from "@/lib/design";
+import { statusHelp } from "@/lib/status-help";
+import { cn } from "@/lib/utils";
 import {
   extractHalLinks,
   isHalHrefPath,
@@ -97,18 +99,46 @@ export default function ResponsePanel({
       </Card>
     );
   }
-  const tone = toneForStatusCode(response.status);
+  // `status: 0` is our synthetic "the request never completed" marker (network
+  // down, host unreachable, timeout — see lib/http.ts). Treat it as an error
+  // (danger tone) rather than the neutral grey a raw 0 would map to.
+  const isNetworkError = response.status === 0;
+  const tone = toneForStatusCode(isNetworkError ? 500 : response.status);
+  // Plain-language diagnosis for non-devs — non-null for the network error and
+  // every 4xx/5xx; the full raw response stays available in the tabs below.
+  const help = statusHelp(response.status);
   const showNav = navStack && navStack.length > 0;
   return (
     <Card tone={tone.tone}>
       <CardHeader tone={tone.tone}>
-        <StatusBadge code={response.status} size="md" />
-        <span className="font-semibold">{response.statusText}</span>
+        {isNetworkError ? (
+          <StatusBadge label="Échec réseau" tone="danger" size="md" />
+        ) : (
+          <StatusBadge code={response.status} size="md" />
+        )}
+        {!isNetworkError && (
+          <span className="font-semibold">{response.statusText}</span>
+        )}
         <span className="text-muted-foreground ml-auto font-mono text-xs">
           {response.durationMs} ms
         </span>
       </CardHeader>
       <CardBody className="space-y-3 p-3">
+        {help && (
+          <div
+            className={cn(
+              "rounded-md border px-3 py-2 text-xs",
+              tone.soft,
+              tone.border,
+            )}
+          >
+            <p className={cn("font-semibold", tone.textStrong)}>{help.title}</p>
+            <p className="text-muted-foreground mt-0.5">{help.explanation}</p>
+            {help.action && (
+              <p className="text-foreground/80 mt-1">→ {help.action}</p>
+            )}
+          </div>
+        )}
         {showNav && (
           <NavBreadcrumb
             stack={navStack}

@@ -1,10 +1,10 @@
 # packrest
 
-Client web REST pour utilisateurs non-développeurs. L'app charge les
-contrats OpenAPI de Pack Solutions et permet d'exécuter chaque endpoint depuis
-le navigateur : choix de l'API → choix de l'endpoint → formulaire pré-rempli à
-partir des `examples` du contrat → obtention d'un token OAuth2 → exécution →
-panneau de réponse.
+Client REST **de bureau** (application Tauri) pour utilisateurs
+non-développeurs. L'app charge les contrats OpenAPI de Pack Solutions et permet
+d'exécuter chaque endpoint depuis une fenêtre native : choix de l'API → choix
+de l'endpoint → formulaire pré-rempli à partir des `examples` du contrat →
+obtention d'un token OAuth2 → exécution → panneau de réponse.
 
 ## Collections Bruno
 
@@ -24,16 +24,19 @@ Les requêtes ne sont pas persistées ; l'échange se fait via des collections
 
 ```bash
 npm install
-npm run dev      # http://localhost:3001
+npm run tauri:dev   # application de bureau (webview + next dev sur :3001)
 ```
+
+`npm run dev` seul ouvre le frontend dans un navigateur, mais les
+fonctionnalités Tauri (stockage local, fs, http, dialogues) y sont désactivées.
 
 Au premier lancement, aucune API n'apparaît tant que les specs n'ont pas été
 synchronisées (voir ci-dessous).
 
 ## Sources des specs OpenAPI
 
-Les contrats sont copiés dans `public/specs/<api>.yaml`. Deux sources, au
-choix, disponibles dans **Paramètres** :
+Les contrats synchronisés sont écrits dans le dossier de données de
+l'application. Deux sources, au choix, disponibles dans **Paramètres** :
 
 1. **Dossier local** — un répertoire contenant `<api>/v1/openapi.bundle.yaml`
    (utile en développement). Voir `CLAUDE.md` pour l'ordre de résolution.
@@ -44,9 +47,9 @@ choix, disponibles dans **Paramètres** :
 ## Configurer le token GitLab
 
 La synchro depuis une release GitLab nécessite un token d'accès, car le projet
-`packsolutions/openapi` est privé. Le téléchargement se fait **côté serveur** :
-le token est stocké dans `.packrest.config.json` (à la racine, gitignoré) et
-n'est **jamais** renvoyé au navigateur.
+`packsolutions/openapi` est privé. Le token est conservé **localement sur cette
+machine** par l'application (stockage local Tauri), sans transiter par un
+serveur.
 
 ### 1. Créer le token
 
@@ -76,28 +79,18 @@ Plus large : couvre tous vos projets accessibles.
 
 ### 2. Enregistrer le token dans packrest
 
-1. Lancer l'app (`npm run dev`) et ouvrir **Paramètres**
-   (`http://localhost:3001/settings`).
+1. Lancer l'app (`npm run tauri:dev`) et ouvrir **Paramètres** depuis le menu
+   **Outils**.
 2. Carte **« Synchroniser depuis une release GitLab »** :
    - **Projet GitLab** : `packsolutions/openapi` (valeur par défaut).
    - **Token d'accès** : coller le token.
 3. Cliquer **« Enregistrer la connexion »**.
 
-Le token est écrit côté serveur dans `.packrest.config.json` :
-
-```json
-{
-  "gitlab": {
-    "host": "https://gitlab.com",
-    "projectPath": "packsolutions/openapi",
-    "token": "glpat-…"
-  }
-}
-```
+Le token est conservé localement par l'application (stockage local Tauri), sans
+transiter par un serveur.
 
 > Le champ token reste masqué ensuite : laissez-le vide pour conserver le token
-> déjà enregistré, ou saisissez-en un nouveau pour le remplacer. Vous pouvez
-> aussi éditer `.packrest.config.json` directement.
+> déjà enregistré, ou saisissez-en un nouveau pour le remplacer.
 
 ### 3. Synchroniser
 
@@ -107,13 +100,13 @@ Le token est écrit côté serveur dans `.packrest.config.json` :
    **« Rafraîchir »** la recharge.
 2. Choisir un tag puis **« Synchroniser ce tag »**.
 
-Les contrats sont extraits dans `public/specs/` et le cache est rafraîchi sans
-redémarrage : les APIs apparaissent immédiatement.
+Les contrats sont extraits dans le dossier de données de l'application et le
+cache est rafraîchi sans redémarrage : les APIs apparaissent immédiatement.
 
 ### Sécurité
 
-- Le token vit uniquement côté serveur, dans un fichier **gitignoré**. Ne le
-  commitez pas et ne le collez pas dans un canal partagé.
+- Le token vit uniquement **sur cette machine**, dans le stockage local de
+  l'application. Ne le collez pas dans un canal partagé.
 - Utilisez `read_api` et la date d'expiration la plus courte possible.
 - En cas de fuite, révoquez-le (projet/profil → Access Tokens → *Revoke*) et
   régénérez-en un.
@@ -121,8 +114,10 @@ redémarrage : les APIs apparaissent immédiatement.
 ## Commandes
 
 ```bash
-npm run dev          # serveur de dev (port 3001)
-npm run build        # build de production
-npm run sync-specs   # re-copie depuis le dossier local (sans redémarrer)
-npm run typecheck    # tsc --noEmit (seul contrôle automatisé)
+npm run tauri:dev    # application de bureau (webview + next dev :3001)
+npm run tauri:build  # bundle l'app de bureau (installeurs)
+npm run dev          # frontend seul dans un navigateur (APIs Tauri désactivées)
+npm run build        # export statique → out/
+npm run sync-specs   # re-copie les specs bundlées depuis le dossier local
+npm run typecheck    # tsc --noEmit
 ```

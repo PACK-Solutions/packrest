@@ -1,8 +1,11 @@
 "use client";
 
+import { Upload, X } from "lucide-react";
+
 import SchemaField from "@/components/SchemaField";
 import Field from "@/components/Field";
-import { Input } from "@/components/ui/input";
+import { Button, buttonVariants } from "@/components/ui/button";
+import { cn, formatFileSize } from "@/lib/utils";
 import type { JsonSchema } from "@/lib/types";
 
 interface Props {
@@ -38,12 +41,6 @@ function anyOfRequiredNames(schema: JsonSchema): string[] {
   return [...names];
 }
 
-function formatBytes(n: number): string {
-  if (n < 1024) return `${n} o`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} Ko`;
-  return `${(n / (1024 * 1024)).toFixed(1)} Mo`;
-}
-
 export default function MultipartBodySection({
   schema,
   encoding,
@@ -77,21 +74,55 @@ export default function MultipartBodySection({
               hint={sub.description}
               required={required.has(name)}
             >
-              <Input
-                type="file"
-                accept={accept || undefined}
-                onChange={(e) =>
-                  onFilesChange({
-                    ...files,
-                    [name]: e.target.files?.[0] ?? null,
-                  })
-                }
-              />
-              {picked && (
-                <p className="text-muted-foreground mt-1 text-[11px]">
-                  {picked.name} — {formatBytes(picked.size)}
-                </p>
-              )}
+              <div className="flex items-center gap-2">
+                {/* Native <input type=file> renders an English, unstyled
+                    "Choose File / No file chosen" control. We hide it and drive
+                    it from a French, styled label instead. */}
+                <label
+                  className={cn(
+                    buttonVariants({ variant: "outline", size: "sm" }),
+                    "h-8 shrink-0 cursor-pointer text-xs",
+                  )}
+                >
+                  <Upload className="size-3.5" />
+                  {picked ? "Changer de fichier" : "Choisir un fichier"}
+                  <input
+                    type="file"
+                    accept={accept || undefined}
+                    className="sr-only"
+                    // Reset so re-picking the same file still fires onChange.
+                    onClick={(e) => {
+                      (e.currentTarget as HTMLInputElement).value = "";
+                    }}
+                    onChange={(e) =>
+                      onFilesChange({
+                        ...files,
+                        [name]: e.target.files?.[0] ?? null,
+                      })
+                    }
+                  />
+                </label>
+                <span
+                  className="text-muted-foreground min-w-0 flex-1 truncate text-xs"
+                  title={picked?.name}
+                >
+                  {picked
+                    ? `${picked.name} — ${formatFileSize(picked.size)}`
+                    : "Aucun fichier sélectionné"}
+                </span>
+                {picked && (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    className="text-muted-foreground hover:text-destructive size-7 shrink-0"
+                    aria-label="Retirer le fichier"
+                    onClick={() => onFilesChange({ ...files, [name]: null })}
+                  >
+                    <X className="size-3.5" />
+                  </Button>
+                )}
+              </div>
             </Field>
           );
         }

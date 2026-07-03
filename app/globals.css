@@ -128,3 +128,14 @@ body {
     background: transparent;
   }
 }
+
+/* Indeterminate progress bar: a short segment sliding left→right. Used for
+   file uploads, where the Tauri HTTP plugin can't report byte progress. */
+@keyframes progress-slide {
+  0% {
+    transform: translateX(-150%);
+  }
+  100% {
+    transform: translateX(350%);
+  }
+}

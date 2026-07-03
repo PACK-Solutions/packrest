@@ -743,7 +743,7 @@ export default function SettingsPage() {
           </Field>
           <Field
             label="Client Secret"
-            hint="Stocké dans le navigateur (localStorage). À ne pas saisir sur une machine partagée."
+            hint="Conservé localement sur cette machine par l'application, sans transiter par un serveur. À ne pas saisir sur une machine partagée."
             required
           >
             <Input
