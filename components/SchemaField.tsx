@@ -190,7 +190,12 @@ export default function SchemaField({
             minLength={effective.minLength}
             maxLength={effective.maxLength}
             pattern={effective.pattern}
-            onChange={(e) => onChange(e.target.value)}
+            // Clearing an optional field should omit it from the payload
+            // (`undefined` → JSON.stringify drops the key), not send `""`.
+            onChange={(e) => {
+              const v = e.target.value;
+              onChange(v === "" && !required ? undefined : v);
+            }}
           />
         </Field>
       );
