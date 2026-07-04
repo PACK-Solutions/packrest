@@ -26,9 +26,18 @@ interface Props {
   defaultId?: string;
   activeId?: string;
   onChange?: (id: string) => void;
+  // At xl, stretch to fill the parent flex column and scroll each tab's
+  // content internally (used by the fixed-height response panel).
+  fill?: boolean;
 }
 
-export default function Tabs({ tabs, defaultId, activeId, onChange }: Props) {
+export default function Tabs({
+  tabs,
+  defaultId,
+  activeId,
+  onChange,
+  fill = false,
+}: Props) {
   const [internal, setInternal] = useState(defaultId ?? tabs[0]?.id);
   const active = activeId ?? internal;
 
@@ -52,6 +61,7 @@ export default function Tabs({ tabs, defaultId, activeId, onChange }: Props) {
         setInternal(id);
         onChange?.(id);
       }}
+      className={fill ? "xl:min-h-0 xl:flex-1" : undefined}
     >
       <TabsList>
         {tabs.map((t) => (
@@ -70,7 +80,13 @@ export default function Tabs({ tabs, defaultId, activeId, onChange }: Props) {
         ))}
       </TabsList>
       {tabs.map((t) => (
-        <TabsContent key={t.id} value={t.id} className="pt-2">
+        <TabsContent
+          key={t.id}
+          value={t.id}
+          className={
+            fill ? "scrollbar-thin pt-2 xl:min-h-0 xl:overflow-y-auto" : "pt-2"
+          }
+        >
           {t.content}
         </TabsContent>
       ))}

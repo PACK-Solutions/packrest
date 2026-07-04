@@ -5,9 +5,9 @@ A **Tauri v2 desktop app** wrapping a Next.js 16 frontend. The frontend is a
 there is **no Node server at runtime**. What used to be Next.js API routes now
 runs client-side through Tauri plugins (`http`, `fs`, `store`, `dialog`, `opener`).
 
-The flow is unchanged: pick an API → pick an endpoint → form pre-populated from
-the contract's `examples` → get a token with selectable scopes → execute →
-response panel.
+The flow is unchanged: pick an API → pick an endpoint → form generated from
+the contract (fields start empty by design) → get a token with selectable
+scopes → execute → response panel.
 
 Run it with **`npm run tauri:dev`** (launches `next dev` on :3001 + the webview).
 Plain `npm run dev` opens the frontend in a browser but Tauri APIs (store/fs/

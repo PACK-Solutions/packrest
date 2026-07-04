@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Download, KeyRound, Loader2, Play, Save, Terminal } from "lucide-react";
 import { toast } from "sonner";
 
@@ -63,6 +63,10 @@ import type {
 } from "@/lib/types";
 import { saveText } from "@/lib/exporter";
 import { cn, formatFileSize } from "@/lib/utils";
+
+// Static per-session; read once at module scope (guarded for prerender).
+const isMac =
+  typeof navigator !== "undefined" && /Mac/.test(navigator.platform);
 
 interface Props {
   apiId: string;
@@ -300,6 +304,9 @@ export default function RequestBuilder(props: Props) {
   };
 
   const handleRun = async () => {
+    // Re-entrancy guard — the keyboard shortcut bypasses the button's
+    // `disabled`, so hammering ⌘+Entrée must not double-run.
+    if (running) return;
     const wantsBody = !["GET", "HEAD"].includes(method.toUpperCase());
     const hasUpload =
       isMultipart && wantsBody && Object.values(files).some(Boolean);
@@ -370,6 +377,32 @@ export default function RequestBuilder(props: Props) {
     setError(null);
     setFollowStack([]);
   };
+
+  // Keyboard shortcuts: ⌘/Ctrl+Entrée exécute, Échap ferme la navigation HAL.
+  // Refs keep the document-level listener subscribed once without stale
+  // closures over `running` / `followStack`.
+  const runRef = useRef<() => void>(() => {});
+  runRef.current = () => {
+    void handleRun();
+  };
+  const escRef = useRef<() => void>(() => {});
+  escRef.current = () => {
+    if (followStack.length > 0) handleNavToOperation();
+  };
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      // Radix (Select/Dialog/Sheet) claims Escape first — don't fight it.
+      if (e.defaultPrevented) return;
+      if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+        e.preventDefault();
+        runRef.current();
+      } else if (e.key === "Escape") {
+        escRef.current();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   // When the user is mid-navigation (followStack non-empty), Save and
   // Copy-curl describe the *currently visible* request — a GET on the
@@ -556,6 +589,12 @@ export default function RequestBuilder(props: Props) {
         )}
       </header>
 
+      {/* Stacked below xl; at xl the form and the response sit side-by-side
+          (header above spans both columns so the response panel aligns with
+          the first card), the response column sticky + independently
+          scrollable so it stays at eye level while the form scrolls. */}
+      <div className="space-y-4 xl:grid xl:grid-cols-2 xl:items-start xl:gap-6 xl:space-y-0">
+        <div className="min-w-0 space-y-4">
       <Card>
         <CardHeader>
           <span className="font-semibold">URL composée</span>
@@ -617,7 +656,7 @@ export default function RequestBuilder(props: Props) {
           </Field>
           <div className="flex flex-wrap items-center gap-2">
             <Button
-              variant="gradient"
+              variant="default"
               size="sm"
               onClick={handleGetToken}
               disabled={fetchingToken}
@@ -697,13 +736,23 @@ export default function RequestBuilder(props: Props) {
       </Card>
 
       <div className="flex flex-wrap gap-2">
-        <Button variant="success" onClick={handleRun} disabled={running}>
+        <Button
+          variant="success"
+          onClick={handleRun}
+          disabled={running}
+          title={
+            isMac ? "Exécuter (⌘ + Entrée)" : "Exécuter (Ctrl + Entrée)"
+          }
+        >
           {running ? (
             <Loader2 className="size-3.5 animate-spin" />
           ) : (
             <Play className="size-3.5" />
           )}
           {running ? "Exécution…" : "Exécuter"}
+          <kbd className="ml-1 hidden rounded border border-white/40 bg-white/15 px-1 font-mono text-[10px] font-medium sm:inline-block">
+            {isMac ? "⌘↵" : "Ctrl↵"}
+          </kbd>
         </Button>
         <Button variant="outline" onClick={handleExportBruno}>
           <Download className="size-3.5" /> Exporter (Bruno)
@@ -714,7 +763,10 @@ export default function RequestBuilder(props: Props) {
       </div>
 
       {uploading && (
-        <div className="border-border bg-muted/40 space-y-1.5 rounded-md border p-3">
+        <div
+          role="status"
+          className="border-border bg-muted/40 space-y-1.5 rounded-md border p-3"
+        >
           <div className="text-muted-foreground flex items-center justify-between text-xs">
             <span className="flex items-center gap-1.5">
               <Loader2 className="size-3.5 animate-spin" />
@@ -722,20 +774,29 @@ export default function RequestBuilder(props: Props) {
             </span>
             <span className="font-mono">{formatUploadSize(files)}</span>
           </div>
-          <Progress />
+          <Progress aria-label="Envoi du fichier en cours" />
         </div>
       )}
+        </div>
 
-      <ResponsePanel
-        response={currentResponse}
-        error={error}
-        apiBaseUrl={baseUrl}
-        onFollowLink={handleFollowLink}
-        navStack={followStack.map((e) => ({ url: e.url, label: e.label }))}
-        onNavBack={handleNavBack}
-        onNavJumpTo={handleNavJumpTo}
-        onNavToOperation={handleNavToOperation}
-      />
+        {/* Fixed working height at xl: the response card fills it and each
+            tab scrolls internally, so the panel's bottom edge stays aligned
+            with the left column instead of ending wherever content runs out. */}
+        <div className="min-w-0 xl:sticky xl:top-[4.5rem] xl:self-start">
+          <div className="xl:flex xl:h-[calc(100vh-5.5rem)] xl:flex-col">
+          <ResponsePanel
+            response={currentResponse}
+            error={error}
+            apiBaseUrl={baseUrl}
+            onFollowLink={handleFollowLink}
+            navStack={followStack.map((e) => ({ url: e.url, label: e.label }))}
+            onNavBack={handleNavBack}
+            onNavJumpTo={handleNavJumpTo}
+            onNavToOperation={handleNavToOperation}
+          />
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
@@ -881,7 +942,10 @@ function ParamGroup({
                 value={values[p.name] ?? ""}
                 onValueChange={(v) => onChange({ ...values, [p.name]: v })}
               >
-                <SelectTrigger className="w-full">
+                <SelectTrigger
+                  className="w-full"
+                  aria-required={p.required || undefined}
+                >
                   <SelectValue placeholder="—" />
                 </SelectTrigger>
                 <SelectContent>
@@ -895,6 +959,7 @@ function ParamGroup({
             ) : (
               <Input
                 value={values[p.name] ?? ""}
+                aria-required={p.required || undefined}
                 onChange={(e) =>
                   onChange({ ...values, [p.name]: e.target.value })
                 }

@@ -533,7 +533,7 @@ export default function SettingsPage() {
                   </div>
 
                   <Button
-                    variant="gradient"
+                    variant="default"
                     size="sm"
                     onClick={onSyncGitlab}
                     disabled={!selectedTag || gitlabStatus.kind === "syncing"}
@@ -620,7 +620,7 @@ export default function SettingsPage() {
               <Save className="size-3" /> Enregistrer le chemin
             </Button>
             <Button
-              variant="gradient"
+              variant="default"
               size="sm"
               onClick={onSyncSpecs}
               disabled={specsStatus.kind === "syncing"}
@@ -814,7 +814,7 @@ export default function SettingsPage() {
 
       <div className="space-y-1.5">
         <div className="flex flex-wrap items-center gap-3">
-          <Button variant="gradient" onClick={onSave}>
+          <Button variant="default" onClick={onSave}>
             <Save className="size-3.5" /> Enregistrer l&apos;environnement et
             les identifiants
           </Button>
@@ -926,7 +926,7 @@ function AboutUpdateCard({ gitlabConnected }: { gitlabConnected: boolean }) {
                   Version {appUpdate.latest.tag} disponible
                 </span>
                 <Button
-                  variant="gradient"
+                  variant="default"
                   size="sm"
                   onClick={() => onDownload(appUpdate.latest)}
                   className="text-xs"
@@ -994,7 +994,7 @@ function AboutUpdateCard({ gitlabConnected }: { gitlabConnected: boolean }) {
                       )}
                     </span>
                     <Button
-                      variant="gradient"
+                      variant="default"
                       size="sm"
                       onClick={() => onSyncLatest(specsUpdate.latestTag)}
                       disabled={syncing}

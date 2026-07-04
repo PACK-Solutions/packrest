@@ -2,6 +2,7 @@
 
 import { Fragment, useMemo, useState } from "react";
 import { ChevronLeft, ChevronRight, Copy, X } from "lucide-react";
+import { toast } from "sonner";
 
 import { Card, CardHeader, CardBody } from "@/components/Card";
 import StatusBadge from "@/components/StatusBadge";
@@ -14,7 +15,7 @@ import {
 import HalLinks from "@/components/HalLinks";
 import FileResponse from "@/components/FileResponse";
 import { Button } from "@/components/ui/button";
-import { toneForStatusCode } from "@/lib/design";
+import { CODE_SURFACE, toneForStatusCode } from "@/lib/design";
 import { statusHelp } from "@/lib/status-help";
 import { cn } from "@/lib/utils";
 import {
@@ -109,7 +110,7 @@ export default function ResponsePanel({
   const help = statusHelp(response.status);
   const showNav = navStack && navStack.length > 0;
   return (
-    <Card tone={tone.tone}>
+    <Card tone={tone.tone} className="xl:h-full xl:min-h-0">
       <CardHeader tone={tone.tone}>
         {isNetworkError ? (
           <StatusBadge label="Échec réseau" tone="danger" size="md" />
@@ -123,7 +124,7 @@ export default function ResponsePanel({
           {response.durationMs} ms
         </span>
       </CardHeader>
-      <CardBody className="space-y-3 p-3">
+      <CardBody className="space-y-3 p-3 xl:flex xl:min-h-0 xl:flex-1 xl:flex-col">
         {help && (
           <div
             className={cn(
@@ -148,6 +149,7 @@ export default function ResponsePanel({
           />
         )}
         <Tabs
+          fill
           tabs={[
             {
               id: "body",
@@ -255,7 +257,7 @@ function BodyView({
     );
   }
   return (
-    <div className="space-y-2">
+    <div className="space-y-2 xl:flex xl:h-full xl:min-h-0 xl:flex-col">
       <div className="flex items-center gap-1.5">
         <ViewToggle
           active={view === "json"}
@@ -277,7 +279,12 @@ function BodyView({
           variant="outline"
           size="sm"
           className="ml-auto h-7 text-xs"
-          onClick={() => navigator.clipboard.writeText(pretty)}
+          onClick={() =>
+            navigator.clipboard.writeText(pretty).then(
+              () => toast.success("Corps de la réponse copié"),
+              () => toast.error("Échec de la copie"),
+            )
+          }
         >
           <Copy className="size-3" /> Copier
         </Button>
@@ -285,6 +292,7 @@ function BodyView({
       {view === "tree" && isStructured ? (
         <JsonTree
           value={parsedBody}
+          className="xl:max-h-none xl:min-h-0 xl:flex-1"
           linkResolver={linkResolver}
           onLinkClick={onLinkClick}
           templatedDetector={isHalHrefPath}
@@ -292,6 +300,7 @@ function BodyView({
       ) : (
         <JsonHighlighted
           value={parsedBody}
+          className="xl:max-h-none xl:min-h-0 xl:flex-1"
           linkResolver={linkResolver}
           onLinkClick={onLinkClick}
           templatedDetector={isHalHrefPath}
@@ -361,9 +370,16 @@ function RequestBody({ body }: { body: string }) {
   const isStructured =
     parsed !== null && (typeof parsed === "object" || Array.isArray(parsed));
   if (isStructured)
-    return <JsonHighlighted value={parsed} className="max-h-[40vh]" />;
+    return (
+      <JsonHighlighted value={parsed} className="max-h-[40vh] xl:max-h-none" />
+    );
   return (
-    <pre className="scrollbar-thin max-h-[40vh] overflow-auto rounded-md border border-slate-800 bg-slate-900 p-3 text-xs leading-relaxed text-slate-100 dark:bg-slate-950">
+    <pre
+      className={cn(
+        CODE_SURFACE,
+        "scrollbar-thin max-h-[40vh] overflow-auto p-3 text-xs leading-relaxed xl:max-h-none",
+      )}
+    >
       {body}
     </pre>
   );

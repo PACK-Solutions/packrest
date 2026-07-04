@@ -91,7 +91,7 @@ export default function SchemaField({
           value={current}
           onValueChange={(v) => onChange(coerceString(v, effective))}
         >
-          <SelectTrigger className="w-full">
+          <SelectTrigger className="w-full" aria-required={required || undefined}>
             <SelectValue placeholder="—" />
           </SelectTrigger>
           <SelectContent>
@@ -132,6 +132,7 @@ export default function SchemaField({
           <Checkbox
             checked={!!value}
             onCheckedChange={(c) => onChange(Boolean(c))}
+            aria-required={required || undefined}
           />
         </Field>
       );
@@ -141,6 +142,7 @@ export default function SchemaField({
         <Field label={label} hint={hint} required={required}>
           <Input
             type="number"
+            aria-required={required || undefined}
             value={value === null || value === undefined ? "" : Number(value)}
             min={effective.minimum}
             max={effective.maximum}
@@ -186,6 +188,7 @@ export default function SchemaField({
         <Field label={label} hint={hint} required={required}>
           <Input
             type={inputTypeForFormat(effective.format)}
+            aria-required={required || undefined}
             value={value === null || value === undefined ? "" : String(value)}
             minLength={effective.minLength}
             maxLength={effective.maxLength}

@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { ArrowRight, FolderSync, KeyRound } from "lucide-react";
 import { Card, CardBody } from "@/components/Card";
+import { Skeleton } from "@/components/ui/skeleton";
 import { listApiSummaries, SPECS_CHANGED_EVENT } from "@/lib/specs";
 import type { ApiSummary } from "@/lib/types";
 import { apiTheme } from "@/lib/design";
@@ -11,12 +12,17 @@ import { cn } from "@/lib/utils";
 
 export default function Home() {
   const [apis, setApis] = useState<ApiSummary[]>([]);
+  // First load only — stays false afterwards so SPECS_CHANGED refreshes
+  // don't flash skeletons over live content.
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     let cancelled = false;
     const load = () => {
       listApiSummaries().then((list) => {
-        if (!cancelled) setApis(list);
+        if (cancelled) return;
+        setApis(list);
+        setLoading(false);
       });
     };
     load();
@@ -35,11 +41,36 @@ export default function Home() {
         </h1>
         <p className="text-muted-foreground mt-1 text-sm">
           Toutes les APIs Pack Solutions, prêtes à être appelées depuis cette
-          application. Les exemples du contrat servent de point de départ.
+          application. Les formulaires sont générés à partir des contrats
+          OpenAPI.
         </p>
       </header>
 
-      {apis.length === 0 && (
+      {loading && (
+        <div
+          role="status"
+          aria-label="Chargement des APIs"
+          className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3"
+        >
+          {Array.from({ length: 6 }).map((_, i) => (
+            <div
+              key={i}
+              className="bg-card flex flex-col gap-3 rounded-xl border p-4 shadow-sm"
+            >
+              <div className="flex items-center gap-3">
+                <Skeleton className="h-10 w-10 rounded-md" />
+                <div className="min-w-0 flex-1 space-y-1.5">
+                  <Skeleton className="h-4 w-3/5" />
+                  <Skeleton className="h-3 w-2/5" />
+                </div>
+              </div>
+              <Skeleton className="h-3 w-4/5" />
+            </div>
+          ))}
+        </div>
+      )}
+
+      {!loading && apis.length === 0 && (
         <Card>
           <CardBody className="flex flex-col items-center gap-5 p-10 text-center sm:p-14">
             <span className="bg-primary text-primary-foreground inline-flex h-16 w-16 items-center justify-center rounded-2xl shadow-sm">

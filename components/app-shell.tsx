@@ -14,6 +14,7 @@ import {
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import {
   Sheet,
   SheetContent,
@@ -189,6 +190,7 @@ function NavBody({
 }) {
   const pathname = usePathname();
   const searchParams = useSearchParams();
+  const [apiFilter, setApiFilter] = React.useState("");
   // An API is "active" while viewing its endpoint list or one of its endpoints.
   const activeApiId =
     pathname === "/api-view"
@@ -197,10 +199,32 @@ function NavBody({
         ? searchParams.get("api")
         : null;
 
+  // Typing beats scanning only once the list gets long; below that the
+  // input is just chrome.
+  const filterable = apis.length > 8;
+  const q = apiFilter.trim().toLowerCase();
+  const visibleApis =
+    filterable && q
+      ? apis.filter(
+          (api) =>
+            api.title.toLowerCase().includes(q) ||
+            api.id.toLowerCase().includes(q),
+        )
+      : apis;
+
   return (
-    <div className="flex h-full flex-col">
-      <div className="flex-1 px-3 pt-4 pb-3">
+    <div className="flex h-full min-h-0 flex-col">
+      <nav className="scrollbar-thin min-h-0 flex-1 overflow-y-auto px-3 pt-4 pb-3">
         <Section title="APIs">
+          {filterable && (
+            <Input
+              value={apiFilter}
+              onChange={(e) => setApiFilter(e.target.value)}
+              placeholder="Filtrer les APIs…"
+              aria-label="Filtrer les APIs"
+              className="mb-2 h-8 text-xs"
+            />
+          )}
           {apis.length === 0 ? (
             <p className="text-muted-foreground px-2 py-1 text-xs">
               Aucune spec trouvée. Utilisez le bouton de synchronisation ou{" "}
@@ -209,8 +233,12 @@ function NavBody({
               </Link>
               .
             </p>
+          ) : visibleApis.length === 0 ? (
+            <p className="text-muted-foreground px-2 py-1 text-xs">
+              Aucune API ne correspond.
+            </p>
           ) : (
-            apis.map((api) => {
+            visibleApis.map((api) => {
               const theme = apiTheme(api.id);
               return (
                 <NavLink
@@ -251,7 +279,8 @@ function NavBody({
             onNavigate={onNavigate}
           />
         </Section>
-        <Separator className="my-3" />
+      </nav>
+      <div className="border-sidebar-border shrink-0 border-t px-3 pt-2 pb-3">
         <NavFooter appUpdate={updates.app} />
       </div>
     </div>

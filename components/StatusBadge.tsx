@@ -1,6 +1,6 @@
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
-import type { StatusTone } from "@/lib/design";
+import { TONE_CLASSES, type StatusTone } from "@/lib/design";
 
 function variantForStatus(code: number): StatusTone {
   if (code === 0) return "neutral";
@@ -10,14 +10,6 @@ function variantForStatus(code: number): StatusTone {
   if (code >= 500) return "danger";
   return "neutral";
 }
-
-const DOT_COLOR: Record<StatusTone, string> = {
-  neutral: "bg-muted-foreground",
-  info: "bg-sky-500 dark:bg-sky-400",
-  success: "bg-emerald-500 dark:bg-emerald-400",
-  warn: "bg-amber-500 dark:bg-amber-400",
-  danger: "bg-rose-500 dark:bg-rose-400",
-};
 
 interface Props {
   code?: number;
@@ -50,7 +42,7 @@ export default function StatusBadge({
     >
       {withDot && (
         <span
-          className={cn("h-1.5 w-1.5 rounded-full", DOT_COLOR[resolved])}
+          className={cn("h-1.5 w-1.5 rounded-full", TONE_CLASSES[resolved].dot)}
           aria-hidden
         />
       )}

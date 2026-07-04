@@ -75,6 +75,11 @@ export function toneClasses(tone: StatusTone): ToneClasses {
   return TONE_CLASSES[tone];
 }
 
+// Dark "terminal" surface shared by the JSON viewers, raw response bodies and
+// the token dump. Deliberately dark in BOTH themes so payloads read as code.
+export const CODE_SURFACE =
+  "rounded-md border border-slate-800 bg-slate-900 text-slate-100 dark:border-slate-800 dark:bg-slate-950";
+
 // Legacy shape kept for backward compatibility with <Card tone="…">.
 // Reads from TONE_CLASSES so a tweak there flows everywhere.
 export interface StatusToken {

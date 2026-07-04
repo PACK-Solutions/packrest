@@ -12,6 +12,8 @@ import {
   Circle,
   ExternalLink,
 } from "lucide-react";
+import { CODE_SURFACE } from "@/lib/design";
+import { cn } from "@/lib/utils";
 
 // Both views render onto the same dark background (bg-slate-900/950) so the
 // palette is light-on-dark in BOTH themes — this is intentional for code
@@ -74,7 +76,11 @@ export function JsonHighlighted({
 }: HighlightedProps) {
   return (
     <pre
-      className={`scrollbar-thin max-h-[60vh] overflow-auto rounded-md border border-slate-800 bg-slate-900 p-3 text-xs leading-relaxed text-slate-100 dark:border-slate-800 dark:bg-slate-950 ${className}`}
+      className={cn(
+        CODE_SURFACE,
+        "scrollbar-thin max-h-[60vh] overflow-auto p-3 text-xs leading-relaxed",
+        className,
+      )}
     >
       {renderHighlighted(value, 0, [], linkResolver, onLinkClick, templatedDetector)}
     </pre>
@@ -246,7 +252,11 @@ export function JsonTree({
 
   return (
     <div
-      className={`scrollbar-thin max-h-[60vh] overflow-auto rounded-md border border-slate-800 bg-slate-900 p-3 font-mono text-[12px] leading-6 text-slate-100 dark:border-slate-800 dark:bg-slate-950 ${className}`}
+      className={cn(
+        CODE_SURFACE,
+        "scrollbar-thin max-h-[60vh] overflow-auto p-3 font-mono text-[12px] leading-6",
+        className,
+      )}
     >
       {!isObject ? (
         <LeafRow

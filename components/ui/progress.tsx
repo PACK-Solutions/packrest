@@ -8,15 +8,18 @@ import { cn } from "@/lib/utils";
 export function Progress({
   value,
   className,
+  "aria-label": ariaLabel,
 }: {
   value?: number;
   className?: string;
+  "aria-label"?: string;
 }) {
   const indeterminate = value == null;
   const pct = indeterminate ? 0 : Math.max(0, Math.min(100, value));
   return (
     <div
       role="progressbar"
+      aria-label={ariaLabel}
       aria-valuemin={0}
       aria-valuemax={100}
       aria-valuenow={indeterminate ? undefined : Math.round(pct)}

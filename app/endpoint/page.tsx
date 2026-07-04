@@ -13,6 +13,7 @@ import {
   BreadcrumbSeparator,
 } from "@/components/ui/breadcrumb";
 import RequestBuilder from "@/components/RequestBuilder";
+import { Skeleton } from "@/components/ui/skeleton";
 import {
   extractOAuth2,
   findEndpoint,
@@ -61,7 +62,24 @@ function Endpoint() {
 
   if (loading) {
     return (
-      <p className="text-muted-foreground animate-pulse text-sm">Chargement…</p>
+      <div
+        role="status"
+        aria-label="Chargement de l'endpoint"
+        className="mx-auto max-w-5xl space-y-4"
+      >
+        <Skeleton className="h-4 w-64" />
+        <div className="flex items-center gap-2">
+          <Skeleton className="h-6 w-14 rounded-full" />
+          <Skeleton className="h-5 w-56" />
+        </div>
+        {[0, 1, 2].map((i) => (
+          <div key={i} className="bg-card space-y-3 rounded-xl border p-4">
+            <Skeleton className="h-5 w-36" />
+            <Skeleton className="h-8 w-full" />
+            <Skeleton className="h-8 w-4/5" />
+          </div>
+        ))}
+      </div>
     );
   }
   if (!state) {
@@ -81,7 +99,7 @@ function Endpoint() {
   const { spec, entry, scopes, tokenUrl } = state;
 
   return (
-    <div className="mx-auto max-w-5xl space-y-4">
+    <div className="mx-auto max-w-5xl space-y-4 xl:max-w-none 2xl:max-w-[1600px]">
       <Breadcrumb>
         <BreadcrumbList>
           <BreadcrumbItem>

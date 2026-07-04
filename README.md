@@ -3,7 +3,7 @@
 Client REST **de bureau** (application Tauri) pour utilisateurs
 non-développeurs. L'app charge les contrats OpenAPI de Pack Solutions et permet
 d'exécuter chaque endpoint depuis une fenêtre native : choix de l'API → choix
-de l'endpoint → formulaire pré-rempli à partir des `examples` du contrat →
+de l'endpoint → formulaire généré à partir du contrat →
 obtention d'un token OAuth2 → exécution → panneau de réponse.
 
 ## Collections Bruno

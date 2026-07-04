@@ -55,9 +55,10 @@ export default function HelpPage() {
             n&apos;y a pas de serveur intermédiaire.
           </p>
           <p className="text-muted-foreground">
-            Les exemples déclarés dans chaque contrat pré-remplissent les
-            formulaires : dans la plupart des cas, vous n&apos;avez qu&apos;à
-            obtenir un token puis exécuter.
+            Les formulaires sont générés à partir du contrat de chaque API :
+            champs, types, valeurs autorisées et descriptions viennent
+            directement du contrat. Renseignez les valeurs à envoyer, obtenez
+            un token, puis exécutez.
           </p>
         </CardBody>
       </Card>
@@ -76,8 +77,9 @@ export default function HelpPage() {
               Choisissez un <strong>endpoint</strong> (une action) dans la liste.
             </Step>
             <Step n={3}>
-              Vérifiez le <strong>formulaire</strong> pré-rempli à partir des
-              exemples du contrat, et ajustez si besoin.
+              Renseignez le <strong>formulaire</strong> — les champs, leurs
+              descriptions et les valeurs autorisées viennent du contrat de
+              l&apos;API.
             </Step>
             <Step n={4}>
               Cliquez sur <strong>« Obtenir un token »</strong> (les scopes

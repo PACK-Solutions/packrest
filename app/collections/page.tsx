@@ -246,7 +246,7 @@ export default function CollectionsPage() {
               </p>
             </div>
             <Button
-              variant="gradient"
+              variant="default"
               size="lg"
               onClick={() => fileInput.current?.click()}
             >

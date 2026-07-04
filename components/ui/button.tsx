@@ -11,8 +11,8 @@ const buttonVariants = cva(
       variant: {
         default:
           "bg-primary text-primary-foreground shadow-xs hover:bg-primary/90",
-        gradient:
-          "bg-primary text-primary-foreground shadow-sm hover:bg-primary/90",
+        // Deliberate bespoke emerald — the "green = execute" affordance,
+        // matching TONE_CLASSES.success in lib/design.ts.
         success:
           "bg-emerald-600 text-white shadow-sm hover:bg-emerald-700 dark:bg-emerald-600 dark:hover:bg-emerald-500",
         destructive:

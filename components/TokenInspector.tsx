@@ -2,6 +2,7 @@
 
 import { useMemo, useState } from "react";
 import { ChevronDown, ChevronRight, Copy, Eye, EyeOff } from "lucide-react";
+import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -13,6 +14,7 @@ import {
 import { decodeJwt, scopesFromClaims } from "@/lib/jwt";
 import type { TokenState } from "@/lib/storage";
 import { cn } from "@/lib/utils";
+import { CODE_SURFACE } from "@/lib/design";
 
 interface Props {
   token: TokenState | null;
@@ -88,15 +90,20 @@ export default function TokenInspector({ token }: Props) {
             className="h-6 px-2 text-[10px]"
             onClick={() =>
               navigator.clipboard.writeText(token.accessToken).then(
-                () => undefined,
-                () => undefined,
+                () => toast.success("Token copié"),
+                () => toast.error("Échec de la copie"),
               )
             }
           >
             <Copy className="size-3" /> Copier
           </Button>
         </div>
-        <pre className="bg-slate-900 dark:bg-slate-950 max-h-32 overflow-auto rounded border border-slate-800 p-2 font-mono text-[10px] leading-relaxed text-slate-100">
+        <pre
+          className={cn(
+            CODE_SURFACE,
+            "max-h-32 overflow-auto p-2 font-mono text-[10px] leading-relaxed",
+          )}
+        >
           {reveal
             ? token.accessToken
             : `${token.accessToken.slice(0, 20)}…${token.accessToken.slice(-12)}`}

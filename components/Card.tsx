@@ -22,7 +22,13 @@ interface CardProps {
 
 export function Card({ tone, className = "", children }: CardProps) {
   const border = tone ? TONE[tone].border : "";
-  return <ShadcnCard className={cn(border, className)}>{children}</ShadcnCard>;
+  // overflow-hidden: the tonal CardHeader paints a square background; without
+  // clipping it bleeds past the card's rounded corners and the top looks cut.
+  return (
+    <ShadcnCard className={cn("overflow-hidden", border, className)}>
+      {children}
+    </ShadcnCard>
+  );
 }
 
 interface CardHeaderProps {
