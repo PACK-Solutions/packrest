@@ -24,9 +24,11 @@ const REC_HOST = "https://rec.apim.gateway.pack-solutions.gravitee.cloud";
 // before the OpenAPI path. The request URL is `baseUrl + <openapi path>`, and
 // most bundles already carry their resource segment (contract.yaml paths start
 // with /contracts, etc.), so those APIs sit at the gateway root (""). Only
-// person and webhook add a prefix their bundles omit. An API absent from this
-// map falls back to its apiId (the historical default). Overridable per API in
-// Settings ("context paths des APIs").
+// person, webhook and payment-method add a prefix their bundles omit
+// (payment-method is deployed under the person context path, per the upstream
+// Bruno collection). An API absent from this map is served at the gateway
+// root — the code never invents a segment; only this map and the per-API
+// override in Settings ("context paths des APIs") decide.
 const DEFAULT_CONTEXT_PATHS: Record<string, string> = {
   contract: "",
   "service-request": "",
@@ -34,15 +36,14 @@ const DEFAULT_CONTEXT_PATHS: Record<string, string> = {
   "order-book": "",
   product: "",
   person: "person",
+  "payment-method": "person",
   webhook: "webhooks",
 };
 
 // The gateway context-path segment for an API in the absence of a user
-// override. Returns "" for APIs served at the gateway root; falls back to the
-// apiId for anything not listed above.
+// override. Unlisted APIs are served at the gateway root ("").
 export function defaultContextPathFor(apiId: string): string {
-  const def = DEFAULT_CONTEXT_PATHS[apiId];
-  return def !== undefined ? def : apiId;
+  return DEFAULT_CONTEXT_PATHS[apiId] ?? "";
 }
 
 // Join a gateway host with a context path, avoiding a trailing/double slash
