@@ -321,7 +321,10 @@ export default function RequestBuilder(props: Props) {
         method,
         url: composedUrl,
         headers,
-        body: wantsBody && !isMultipart ? (bodyValue as object) : undefined,
+        body:
+          wantsBody && !isMultipart && bodySchema
+            ? ((bodyValue ?? {}) as object)
+            : undefined,
         multipart:
           isMultipart && wantsBody
             ? await buildMultipart(bodyValue, files)
@@ -471,8 +474,8 @@ export default function RequestBuilder(props: Props) {
       params: params.length ? params : undefined,
       headers: headers.length ? headers : undefined,
       body:
-        !asMultipart && wantsBody && effectiveBody != null
-          ? { type: "json", data: JSON.stringify(effectiveBody, null, 2) }
+        !asMultipart && wantsBody && bodySchema
+          ? { type: "json", data: JSON.stringify(effectiveBody ?? {}, null, 2) }
           : undefined,
       docs,
     };
@@ -516,7 +519,11 @@ export default function RequestBuilder(props: Props) {
     // A multipart upload only applies to the operation request, not to a
     // followed GET (isFollowing collapses effectiveMethod to GET).
     const asMultipart = wantsBody && isMultipart && !isFollowing;
-    if (wantsBody && effectiveBody && !asMultipart) {
+    // Mirror handleRun: an op that declares a JSON body sends `{}` when empty,
+    // so the preview must too (otherwise the curl omits the body upstream).
+    const jsonBody =
+      wantsBody && !asMultipart && bodySchema ? (effectiveBody ?? {}) : undefined;
+    if (jsonBody !== undefined) {
       headers["Content-Type"] = headers["Content-Type"] ?? "application/json";
     }
     const form = asMultipart ? curlForm(bodyValue, files) : undefined;
@@ -524,10 +531,7 @@ export default function RequestBuilder(props: Props) {
       method: effectiveMethod,
       url: effectiveUrl,
       headers,
-      body:
-        wantsBody && effectiveBody && !asMultipart
-          ? JSON.stringify(effectiveBody, null, 2)
-          : null,
+      body: jsonBody !== undefined ? JSON.stringify(jsonBody, null, 2) : null,
       form,
     });
     navigator.clipboard.writeText(curl).then(
