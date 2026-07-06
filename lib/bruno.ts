@@ -39,6 +39,11 @@ export interface BrunoRequest {
   headers?: BrunoHeader[];
   body?: BrunoBody;
   docs?: string;
+  // OAuth2 scopes for this request. When present, the request is serialized
+  // with its own oauth2 auth block (instead of `auth: "inherit"`) so scopes
+  // round-trip through a single-request export/import. Parsed back from a
+  // request-level `http.auth` oauth2 block.
+  scopes?: string[];
 }
 
 export interface BrunoOAuth2 {
@@ -81,6 +86,9 @@ export interface ImportSeed {
   params?: Record<string, string>;
   headers?: { key: string; value: string; enabled?: boolean }[];
   body?: unknown;
+  // OAuth2 scopes recovered from the imported collection/request. The builder
+  // pre-selects these, intersected with the scopes the operation declares.
+  scopes?: string[];
 }
 
 // Default per-request execution block, verbatim from the reference files.
@@ -153,7 +161,11 @@ export function serializeRequestYml(req: BrunoRequest): string {
     }));
   }
   if (req.body) http.body = { type: req.body.type, data: req.body.data };
-  http.auth = "inherit";
+  // Carry scopes in a request-level oauth2 block so a single-request export
+  // round-trips them; otherwise inherit auth from the collection.
+  http.auth = req.scopes?.length
+    ? brunoOAuth2(req.scopes.join(" "))
+    : "inherit";
 
   const doc: Record<string, unknown> = {
     info,
@@ -220,6 +232,38 @@ function asString(v: unknown): string {
   return typeof v === "string" ? v : String(v);
 }
 
+// Pull the space-separated `scope` out of an oauth2 auth block. Returns [] for
+// anything that isn't an oauth2 object (e.g. the "inherit" string). Shared by
+// request-level (http.auth) and collection-level (request.auth) parsing.
+function oauth2Scopes(auth: unknown): string[] {
+  if (!auth || typeof auth !== "object") return [];
+  const o = auth as Record<string, unknown>;
+  if (o.type !== "oauth2") return [];
+  return asString(o.scope).split(/\s+/).filter(Boolean);
+}
+
+// Read the collection-level OAuth2 scopes from an `opencollection.yml`.
+// Returns [] when the collection has no oauth2 auth block.
+export function parseCollectionScopes(text: string): string[] {
+  const doc = (yaml.load(text) ?? {}) as Record<string, unknown>;
+  const request = (doc.request ?? {}) as Record<string, unknown>;
+  return oauth2Scopes(request.auth);
+}
+
+// Derive the API a Bruno request originated from: the zip's top-level directory
+// segment (the export layout is `<apiId>/v1/...`), falling back to the first
+// tag (single-request exports set `tags: [apiId]`). Returns undefined when
+// neither yields a non-empty value.
+export function candidateApiId(opts: {
+  dirApiId?: string;
+  tags?: string[];
+}): string | undefined {
+  const fromDir = opts.dirApiId?.trim();
+  if (fromDir) return fromDir;
+  const fromTag = opts.tags?.[0]?.trim();
+  return fromTag || undefined;
+}
+
 // Parse a request `.yml`. Tolerant of missing optional blocks; `examples`,
 // `vars`, `script`, `assert` are ignored (only the live request is kept).
 export function parseRequestYml(text: string): BrunoRequest {
@@ -260,6 +304,8 @@ export function parseRequestYml(text: string): BrunoRequest {
     body = { type, data };
   }
 
+  const scopes = oauth2Scopes(http.auth);
+
   return {
     name: info.name ? asString(info.name) : "request",
     seq: typeof info.seq === "number" ? info.seq : undefined,
@@ -270,6 +316,7 @@ export function parseRequestYml(text: string): BrunoRequest {
     headers: headers.length ? headers : undefined,
     body,
     docs: typeof doc.docs === "string" ? doc.docs : undefined,
+    scopes: scopes.length ? scopes : undefined,
   };
 }
 

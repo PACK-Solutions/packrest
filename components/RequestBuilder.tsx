@@ -238,6 +238,13 @@ export default function RequestBuilder(props: Props) {
     if (seed.params) setParamValues((prev) => ({ ...prev, ...seed.params }));
     if (seed.headers) setCustomHeaders(seed.headers);
     if (seed.body !== undefined) setBodyValue(seed.body);
+    // Pre-select imported scopes, limited to those this operation declares so
+    // a stale/foreign scope can't be selected.
+    if (seed.scopes?.length) {
+      const allowed = new Set(Object.keys(scopes));
+      const applied = seed.scopes.filter((s) => allowed.has(s));
+      if (applied.length) setSelectedScopes(applied);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -501,6 +508,9 @@ export default function RequestBuilder(props: Props) {
           ? { type: "json", data: JSON.stringify(effectiveBody ?? {}, null, 2) }
           : undefined,
       docs,
+      // Carry the selected scopes so a single-request export round-trips them
+      // (a followed HAL URL inherits auth, so no scopes there).
+      scopes: !isFollowing && selectedScopes.length ? selectedScopes : undefined,
     };
     const name = `${effectiveDefaultName.replace(/[/\\]+/g, "-").trim() || "request"}.yml`;
     saveText(name, serializeRequestYml(req), [
