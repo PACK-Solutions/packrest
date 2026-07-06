@@ -833,6 +833,10 @@ function AboutUpdateCard({ gitlabConnected }: { gitlabConnected: boolean }) {
   // version shows without a manual click, and self-corrects on SPECS_CHANGED.
   const { outcome, checking, recheck } = useUpdateOutcome();
   const [syncing, setSyncing] = useState(false);
+  // Structural diff of the sync triggered from this card's « Synchroniser »
+  // button — surfaced here so the update path shows the same added/modified
+  // summary as the GitLab/local sync cards below.
+  const [latestDiffs, setLatestDiffs] = useState<SpecDiff[]>([]);
 
   const onDownload = async (latest: LatestRelease) => {
     const asset = pickInstallerAsset(latest.assets);
@@ -851,8 +855,10 @@ function AboutUpdateCard({ gitlabConnected }: { gitlabConnected: boolean }) {
   // specs re-check) all refresh on their own — no local patch needed.
   const onSyncLatest = async (tag: string) => {
     setSyncing(true);
+    setLatestDiffs([]);
     try {
-      await syncFromGitlab(tag);
+      const data = await syncFromGitlab(tag);
+      setLatestDiffs(data.diffs);
       toast.success(`Contrats d'API ${tag} synchronisés`);
     } catch (e) {
       toast.error("Synchronisation échouée", {
@@ -986,6 +992,11 @@ function AboutUpdateCard({ gitlabConnected }: { gitlabConnected: boolean }) {
                       Synchroniser {specsUpdate.latestTag}
                     </Button>
                   </div>
+                  {specsUpdate.latestNotes && (
+                    <div className="max-h-72 overflow-y-auto border-t pt-2">
+                      <Markdown content={specsUpdate.latestNotes} collapsible />
+                    </div>
+                  )}
                   <p className="text-muted-foreground text-[11px]">
                     <a href="#gitlab-sync" className="underline">
                       ou choisir un autre tag
@@ -994,6 +1005,8 @@ function AboutUpdateCard({ gitlabConnected }: { gitlabConnected: boolean }) {
                   </p>
                 </div>
               )}
+              {/* Survives after a sync clears specsUpdate (now « à jour »). */}
+              <SyncDiff diffs={latestDiffs} />
             </>
           )}
         </div>

@@ -28,6 +28,7 @@ import {
 } from "@/components/ui/tooltip";
 import ThemeToggle from "@/components/ThemeToggle";
 import { IdCollector } from "@/components/IdCollector";
+import { UuidGenerator } from "@/components/UuidGenerator";
 import { apiTheme } from "@/lib/design";
 import { listApiSummaries, SPECS_CHANGED_EVENT } from "@/lib/specs";
 import { useAppVersion, useSpecsTag, specsTagLabel } from "@/hooks/use-app-info";
@@ -126,6 +127,7 @@ function TopBar({
       </Sheet>
       <Brand />
       <div className="ml-auto flex items-center gap-1">
+        <UuidGenerator />
         <IdCollector />
         <ThemeToggle variant="icon" />
       </div>

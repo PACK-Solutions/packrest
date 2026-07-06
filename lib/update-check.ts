@@ -18,6 +18,8 @@ export interface SpecsUpdate {
   currentTag: string;
   latestTag: string;
   latestReleasedAt?: string;
+  /** Release notes of the newest release (GitLab description), when present. */
+  latestNotes?: string;
 }
 
 export interface UpdateCheckOutcome {
@@ -65,6 +67,7 @@ export async function checkSpecsUpdate(): Promise<SpecsUpdate | null> {
     currentTag: specsTag.tag,
     latestTag: latest.tag,
     latestReleasedAt: latest.releasedAt,
+    latestNotes: latest.notes,
   };
 }
 

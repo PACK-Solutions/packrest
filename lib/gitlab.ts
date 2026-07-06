@@ -36,6 +36,8 @@ export interface ReleaseSummary {
   tag: string;
   name: string;
   releasedAt?: string;
+  /** Release notes (GitLab `description`, Markdown), when the release has any. */
+  notes?: string;
   /** True when the release exposes a downloadable bundle.zip asset. */
   hasBundle: boolean;
 }
@@ -146,6 +148,7 @@ export async function listReleases(limit?: number): Promise<ReleaseListResult> {
     tag_name: string;
     name?: string;
     released_at?: string;
+    description?: string;
     assets?: { links?: AssetLink[] };
   }>;
   const totalHeader = res.headers.get("x-total");
@@ -161,6 +164,7 @@ export async function listReleases(limit?: number): Promise<ReleaseListResult> {
       tag: r.tag_name,
       name: r.name?.trim() || r.tag_name,
       releasedAt: r.released_at,
+      notes: r.description?.trim() || undefined,
       hasBundle: findBundleLink(r) != null,
     })),
   };

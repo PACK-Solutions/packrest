@@ -191,15 +191,24 @@ function splitOverview(content: string): {
   rest: string | null;
 } {
   const lines = content.split("\n");
-  // Pass 1: first sub-heading of any level (## … ######) — skip line 0, which
-  // may be the doc's # title. Catching ### too lets catalogs that jump
-  // straight to level-3 sections still fold.
-  for (let i = 1; i < lines.length; i++) {
+  // Pass 1: first sub-heading of any level (## … ######) — skip the first
+  // non-blank line, which may be the doc's # title. Catching ### too lets
+  // catalogs that jump straight to level-3 sections still fold. Starting after
+  // the first *non-blank* line (rather than line 0) means a body that opens
+  // with a blank line before its title doesn't yield an empty overview.
+  let firstContent = 0;
+  while (firstContent < lines.length && lines[firstContent].trim() === "") {
+    firstContent++;
+  }
+  for (let i = firstContent + 1; i < lines.length; i++) {
     if (/^#{2,6}\s/.test(lines[i])) {
-      return {
-        overview: lines.slice(0, i).join("\n").trim(),
-        rest: lines.slice(i).join("\n").trim(),
-      };
+      const overview = lines.slice(0, i).join("\n").trim();
+      // An empty overview would render as a blank block with only the toggle;
+      // prefer showing the whole content unfolded in that case.
+      if (overview) {
+        return { overview, rest: lines.slice(i).join("\n").trim() };
+      }
+      break;
     }
   }
   // Pass 2: second # heading.

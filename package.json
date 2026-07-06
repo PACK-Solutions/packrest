@@ -1,6 +1,6 @@
 {
   "name": "packrest",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "private": true,
   "scripts": {
     "predev": "node scripts/copy-specs.mjs",
