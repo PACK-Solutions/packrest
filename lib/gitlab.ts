@@ -216,6 +216,10 @@ export async function syncFromGitlab(tag: string): Promise<GitlabSyncResult> {
     releasedAt: release.released_at,
     syncedAt: new Date().toISOString(),
   });
+  // Fire SPECS_CHANGED_EVENT only now — after the new tag is persisted — so
+  // listeners that re-read the tag on the event (sidebar, Settings card) see
+  // the new value rather than racing against setSpecsTag.
+  resetSpecCache();
   return result;
 }
 
@@ -278,6 +282,5 @@ async function extractBundle(
     );
   }
 
-  resetSpecCache();
   return { tag, bundleName, copied, skipped: [], diffs };
 }

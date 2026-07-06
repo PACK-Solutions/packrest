@@ -41,7 +41,7 @@ info:
 
     ## Navigation & HAL
     This API follows **HAL (Hypertext Application Language)** principles. Most resources include a `_links` object, allowing you to discover related actions and navigate the API programmatically.
-  version: 0.0.59
+  version: 0.0.60
   contact:
     email: support@pack-solutions.com
     name: Pack Solutions Support
@@ -49,9 +49,7 @@ info:
     name: Proprietary
     url: https://pack-solutions.com/license
 security:
-  - oauth2:
-      - persons:read
-      - persons:write
+  - oauth2: []
 tags:
   - name: individual
     description: |
@@ -74,6 +72,9 @@ paths:
   /individuals:
     get:
       operationId: listIndividuals
+      security:
+        - oauth2:
+            - persons:read
       summary: List Individuals
       description: |
         Returns a paginated list of all natural persons.
@@ -242,6 +243,9 @@ paths:
         - individual
     get:
       operationId: getIndividualById
+      security:
+        - oauth2:
+            - persons:read
       description: Retrieve detailed information about a specific individual using their unique identifier.
       parameters:
         - $ref: '#/components/parameters/PersonId'
@@ -406,6 +410,9 @@ paths:
   /individuals/{person_id}/fiscal-informations:
     get:
       operationId: listPersonFiscalInformations
+      security:
+        - oauth2:
+            - persons:read
       summary: List Fiscal Records
       description: |
         Returns a collection of all fiscal and tax reporting records
@@ -445,6 +452,9 @@ paths:
       - $ref: '#/components/parameters/FiscalType'
     get:
       operationId: getPersonFiscalInformationByType
+      security:
+        - oauth2:
+            - persons:read
       summary: Retrieve Fiscal Information by Type
       description: |
         Retrieve specific fiscal information for a person based on the type
@@ -537,6 +547,9 @@ paths:
   /individuals/{person_id}/addresses:
     get:
       operationId: getPersonAddresses
+      security:
+        - oauth2:
+            - persons:read
       summary: List Addresses
       description: |
         Returns all physical addresses associated with a specific person.
@@ -579,6 +592,9 @@ paths:
       - $ref: '#/components/parameters/AddressType'
     get:
       operationId: getPersonAddressByType
+      security:
+        - oauth2:
+            - persons:read
       summary: Retrieve Address by Type
       description: |
         Retrieve a specific address for a person based on the address type
@@ -785,6 +801,9 @@ paths:
   /individuals/{person_id}/bank-accounts:
     get:
       operationId: listBankAccounts
+      security:
+        - oauth2:
+            - persons:read
       summary: List Bank Accounts
       description: |
         Returns the complete list of bank accounts associated with a specific person.
@@ -907,6 +926,9 @@ paths:
   /individuals/{person_id}/bank-accounts/{bank_account_id}:
     get:
       operationId: getBankAccountById
+      security:
+        - oauth2:
+            - persons:read
       summary: Retrieve a Bank Account
       description: Retrieve detailed information about a specific bank account.
       tags:

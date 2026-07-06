@@ -7,11 +7,9 @@ import {
   FolderOpen,
   HelpCircle,
   Menu,
-  RefreshCw,
   Settings as SettingsIcon,
   type LucideIcon,
 } from "lucide-react";
-import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -29,9 +27,9 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import ThemeToggle from "@/components/ThemeToggle";
+import { IdCollector } from "@/components/IdCollector";
 import { apiTheme } from "@/lib/design";
 import { listApiSummaries, SPECS_CHANGED_EVENT } from "@/lib/specs";
-import { copySpecs } from "@/lib/sync";
 import { useAppVersion, useSpecsTag, specsTagLabel } from "@/hooks/use-app-info";
 import {
   useUpdateNotifier,
@@ -128,54 +126,10 @@ function TopBar({
       </Sheet>
       <Brand />
       <div className="ml-auto flex items-center gap-1">
-        <SyncButton />
+        <IdCollector />
         <ThemeToggle variant="icon" />
       </div>
     </header>
-  );
-}
-
-function SyncButton() {
-  const [busy, setBusy] = React.useState(false);
-  const handleClick = async () => {
-    if (busy) return;
-    setBusy(true);
-    try {
-      const result = await copySpecs();
-      if (result.missing) {
-        toast.error("Synchronisation impossible", {
-          description:
-            "Aucun dossier source configuré. Renseignez-le dans Paramètres.",
-        });
-        return;
-      }
-      const n = result.copied.length;
-      toast.success(`${n} spec${n > 1 ? "s" : ""} synchronisée(s)`, {
-        description: result.source || undefined,
-      });
-    } catch (e) {
-      toast.error("Synchronisation échouée", {
-        description: (e as Error).message,
-      });
-    } finally {
-      setBusy(false);
-    }
-  };
-  return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <Button
-          variant="ghost"
-          size="icon"
-          aria-label="Synchroniser les specs"
-          onClick={handleClick}
-          disabled={busy}
-        >
-          <RefreshCw className={cn("size-4", busy && "animate-spin")} />
-        </Button>
-      </TooltipTrigger>
-      <TooltipContent side="bottom">Synchroniser les specs</TooltipContent>
-    </Tooltip>
   );
 }
 

@@ -33,6 +33,7 @@ import {
   type MultipartPayload,
   type ProxyResponse,
 } from "@/lib/http";
+import { recordCreatedId } from "@/lib/id-collector";
 import {
   loadSettings,
   saveSettings,
@@ -331,6 +332,28 @@ export default function RequestBuilder(props: Props) {
             : undefined,
       });
       setResponse(res);
+      // ID collector: a POST that created a resource returns its id in the JSON
+      // body's `id` field. Capture it so it can be reused across APIs. The 2xx
+      // guard skips the network-error case (status 0, non-object body).
+      const bodyId =
+        res.body && typeof res.body === "object" && !Array.isArray(res.body)
+          ? (res.body as Record<string, unknown>).id
+          : undefined;
+      if (
+        method.toUpperCase() === "POST" &&
+        res.status >= 200 &&
+        res.status < 300 &&
+        (typeof bodyId === "string" || typeof bodyId === "number") &&
+        String(bodyId).trim()
+      ) {
+        recordCreatedId({
+          apiId,
+          operationId,
+          method,
+          id: String(bodyId).trim(),
+          label: operation.summary?.trim() || path,
+        });
+      }
     } catch (e) {
       setError((e as Error).message);
     } finally {

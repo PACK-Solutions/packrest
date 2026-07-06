@@ -165,7 +165,7 @@ info:
     ## Navigation & HAL
     This API follows **HAL (Hypertext Application Language)** principles. Resources include a `_links`
     object for programmatic navigation. Available links depend on the current status of the service request.
-  version: 0.0.59
+  version: 0.0.60
   contact:
     email: support@pack-solutions.com
     name: Pack Solutions Support
@@ -173,9 +173,7 @@ info:
     name: Proprietary
     url: https://pack-solutions.com/license
 security:
-  - oauth2:
-      - service-requests:read
-      - service-requests:write
+  - oauth2: []
 tags:
   - name: service-request
     description: |
@@ -201,6 +199,9 @@ paths:
   /service-requests:
     get:
       operationId: listServiceRequests
+      security:
+        - oauth2:
+            - service-requests:read
       summary: List service requests
       description: |
         Retrieve a paginated list of service requests.
@@ -318,6 +319,9 @@ paths:
   /service-requests/{service_request_id}:
     get:
       operationId: getServiceRequestById
+      security:
+        - oauth2:
+            - service-requests:read
       summary: Retrieve a service request by id
       description: |
         Retrieve detailed information about a specific service request using its unique identifier.
@@ -485,6 +489,9 @@ paths:
   /service-requests/{service_request_id}/documents:
     get:
       operationId: listServiceRequestDocuments
+      security:
+        - oauth2:
+            - service-requests:read
       summary: List documents of a service request
       description: |
         Retrieve the list of documents currently attached to a specific service request.
@@ -580,6 +587,9 @@ paths:
   /service-requests/{service_request_id}/events:
     get:
       operationId: listServiceRequestEvents
+      security:
+        - oauth2:
+            - service-requests:read
       summary: List events of a service request
       description: |
         Retrieve the immutable audit trail of events for a specific service request.

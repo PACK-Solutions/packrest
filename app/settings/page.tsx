@@ -57,14 +57,11 @@ import {
 import { copySpecs } from "@/lib/sync";
 import { listReleases, syncFromGitlab } from "@/lib/gitlab";
 import { pickInstallerAsset, type LatestRelease } from "@/lib/github";
-import {
-  checkForUpdates,
-  type UpdateCheckOutcome,
-} from "@/lib/update-check";
 import { TONE_CLASSES } from "@/lib/design";
 import { openUrl } from "@/lib/opener";
 import { clearToken } from "@/lib/token";
 import { useAppVersion, useSpecsTag, specsTagLabel } from "@/hooks/use-app-info";
+import { useUpdateOutcome } from "@/hooks/use-update-notifier";
 import { pickDirectory } from "@/lib/dialog";
 import { cn } from "@/lib/utils";
 
@@ -74,14 +71,6 @@ type SpecsStatus =
   | { kind: "syncing" }
   | { kind: "ok"; message: string }
   | { kind: "error"; message: string };
-
-// State of the manual « Rechercher des mises à jour » action: one check
-// covers both channels (application + contrats d'API); each side of the
-// outcome renders in its own row.
-type CheckState =
-  | { kind: "idle" }
-  | { kind: "checking" }
-  | { kind: "done"; outcome: UpdateCheckOutcome };
 
 interface Release {
   tag: string;
@@ -836,17 +825,14 @@ export default function SettingsPage() {
 // contracts (GitLab release bundles, synced in-app) — so the card shows one
 // row per channel and a single button that checks both at once. This is the
 // loud surface (errors render inline), unlike the silent startup check in
-// hooks/use-update-notifier.ts.
+// hooks/use-update-notifier.tsx.
 function AboutUpdateCard({ gitlabConnected }: { gitlabConnected: boolean }) {
   const appVersion = useAppVersion();
   const specsTag = useSpecsTag();
-  const [check, setCheck] = useState<CheckState>({ kind: "idle" });
+  // Shared session check (same source as the sidebar dot): the available
+  // version shows without a manual click, and self-corrects on SPECS_CHANGED.
+  const { outcome, checking, recheck } = useUpdateOutcome();
   const [syncing, setSyncing] = useState(false);
-
-  const onCheck = async () => {
-    setCheck({ kind: "checking" });
-    setCheck({ kind: "done", outcome: await checkForUpdates() });
-  };
 
   const onDownload = async (latest: LatestRelease) => {
     const asset = pickInstallerAsset(latest.assets);
@@ -860,19 +846,14 @@ function AboutUpdateCard({ gitlabConnected }: { gitlabConnected: boolean }) {
   };
 
   // Sync the newer release directly from the card. syncFromGitlab persists the
-  // new SpecsTag and fires SPECS_CHANGED_EVENT, so the displayed tag and the
-  // sidebar dot refresh on their own; only this row's « disponible » state
-  // needs patching locally.
+  // new SpecsTag and fires SPECS_CHANGED_EVENT, so the displayed tag, the
+  // sidebar dot AND this card's « disponible » state (via the shared store's
+  // specs re-check) all refresh on their own — no local patch needed.
   const onSyncLatest = async (tag: string) => {
     setSyncing(true);
     try {
       await syncFromGitlab(tag);
       toast.success(`Contrats d'API ${tag} synchronisés`);
-      setCheck((prev) =>
-        prev.kind === "done"
-          ? { ...prev, outcome: { ...prev.outcome, specs: null } }
-          : prev,
-      );
     } catch (e) {
       toast.error("Synchronisation échouée", {
         description: (e as Error).message,
@@ -882,7 +863,6 @@ function AboutUpdateCard({ gitlabConnected }: { gitlabConnected: boolean }) {
     }
   };
 
-  const outcome = check.kind === "done" ? check.outcome : null;
   const appUpdate = outcome?.app ?? null;
   const specsUpdate = outcome?.specs ?? null;
 
@@ -1021,16 +1001,11 @@ function AboutUpdateCard({ gitlabConnected }: { gitlabConnected: boolean }) {
         <Button
           variant="outline"
           size="sm"
-          onClick={onCheck}
-          disabled={check.kind === "checking"}
+          onClick={recheck}
+          disabled={checking}
           className="text-xs"
         >
-          <RefreshCw
-            className={cn(
-              "size-3",
-              check.kind === "checking" && "animate-spin",
-            )}
-          />
+          <RefreshCw className={cn("size-3", checking && "animate-spin")} />
           Rechercher des mises à jour
         </Button>
       </CardBody>

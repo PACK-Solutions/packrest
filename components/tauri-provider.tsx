@@ -3,6 +3,7 @@
 import * as React from "react";
 
 import { bootstrapStorage } from "@/lib/storage";
+import { bootstrapIdCollector } from "@/lib/id-collector";
 import { seedSpecsIfEmpty } from "@/lib/specs-fs";
 
 // Startup gate. Hydrates the synchronous storage cache from tauri-plugin-store
@@ -17,6 +18,7 @@ export function TauriProvider({ children }: { children: React.ReactNode }) {
     let cancelled = false;
     (async () => {
       await bootstrapStorage();
+      await bootstrapIdCollector();
       try {
         await seedSpecsIfEmpty();
       } catch {

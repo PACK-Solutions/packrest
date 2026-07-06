@@ -50,7 +50,7 @@ info:
 
     ## Navigation & HAL
     This API follows **HAL (Hypertext Application Language)** principles.
-  version: 0.0.59
+  version: 0.0.60
   contact:
     email: support@pack-solutions.com
     name: Pack Solutions Support

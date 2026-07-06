@@ -119,7 +119,7 @@ info:
     require:
     - `documents:read` for `GET` operations (metadata and binary downloads).
     - `documents:write` for `POST` and `DELETE` operations (uploads, replacements, deletions).
-  version: 0.0.59
+  version: 0.0.60
   contact:
     name: Pack Solutions Support
     email: support@pack-solutions.com

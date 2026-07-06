@@ -61,7 +61,7 @@ info:
     Responses follow **HAL** principles: resources and collections carry a
     `_links` object for navigation, and collections embed their items under
     `_embedded`.
-  version: 0.0.59
+  version: 0.0.60
   contact:
     email: support@pack-solutions.com
     name: Pack Solutions Support
@@ -69,9 +69,7 @@ info:
     name: Proprietary
     url: https://pack-solutions.com/license
 security:
-  - oauth2:
-      - products:read
-      - products:write
+  - oauth2: []
 tags:
   - name: product
     description: |
@@ -91,6 +89,9 @@ paths:
   /products:
     get:
       operationId: listProducts
+      security:
+        - oauth2:
+            - products:read
       summary: List Products
       description: |
         Returns a paginated list of products. By default each product is returned
@@ -125,6 +126,9 @@ paths:
   /products/{product_id}:
     get:
       operationId: getProduct
+      security:
+        - oauth2:
+            - products:read
       summary: Get Product
       description: |
         Returns a product in its **current version** — the version applicable at
@@ -156,6 +160,9 @@ paths:
   /products/{product_id}/versions:
     get:
       operationId: listProductVersions
+      security:
+        - oauth2:
+            - products:read
       summary: List Product Versions
       description: |
         Returns the paginated version history of a product, ordered by
@@ -190,6 +197,9 @@ paths:
   /products/{product_id}/versions/{version_number}:
     get:
       operationId: getProductVersion
+      security:
+        - oauth2:
+            - products:read
       summary: Get Product Version
       description: Returns a specific version of a product, identified by its sequential `version_number`.
       parameters:
@@ -215,6 +225,9 @@ paths:
   /products/{product_id}/funds:
     get:
       operationId: listProductFunds
+      security:
+        - oauth2:
+            - products:read
       summary: List Product Funds
       description: |
         Returns the funds eligible for **self-directed management** (*gestion
@@ -247,6 +260,9 @@ paths:
   /products/{product_id}/versions/{version_number}/funds:
     get:
       operationId: listProductVersionFunds
+      security:
+        - oauth2:
+            - products:read
       summary: List Product Version Funds
       description: |
         Returns the funds eligible for **self-directed management** (*gestion
@@ -277,6 +293,9 @@ paths:
   /products/{product_id}/preset-allocations:
     get:
       operationId: listProductPresetAllocations
+      security:
+        - oauth2:
+            - products:read
       summary: List Product Preset Allocations
       description: |
         Returns HAL references to the preset-allocations available for the
@@ -305,6 +324,9 @@ paths:
   /products/{product_id}/versions/{version_number}/preset-allocations:
     get:
       operationId: listProductVersionPresetAllocations
+      security:
+        - oauth2:
+            - products:read
       summary: List Product Version Preset Allocations
       description: |
         Returns HAL references to the preset-allocations available for a specific
@@ -371,6 +393,9 @@ paths:
   /funds:
     get:
       operationId: listFunds
+      security:
+        - oauth2:
+            - products:read
       summary: List Funds
       description: |
         Returns a paginated list of funds. Funds are global and not versioned.
@@ -400,6 +425,9 @@ paths:
   /funds/{fund_id}:
     get:
       operationId: getFund
+      security:
+        - oauth2:
+            - products:read
       summary: Get Fund
       description: Returns a single fund by its identifier.
       parameters:
@@ -424,6 +452,9 @@ paths:
   /preset-allocations:
     get:
       operationId: listPresetAllocations
+      security:
+        - oauth2:
+            - products:read
       summary: List Preset Allocations
       description: |
         Returns a paginated list of preset-allocations. By default each is returned
@@ -457,6 +488,9 @@ paths:
   /preset-allocations/{preset_allocation_id}:
     get:
       operationId: getPresetAllocation
+      security:
+        - oauth2:
+            - products:read
       summary: Get Preset Allocation
       description: |
         Returns a preset-allocation in its **current version** — the version
@@ -488,6 +522,9 @@ paths:
   /preset-allocations/{preset_allocation_id}/versions:
     get:
       operationId: listPresetAllocationVersions
+      security:
+        - oauth2:
+            - products:read
       summary: List Preset Allocation Versions
       description: |
         Returns the paginated version history of a preset-allocation, ordered by
@@ -522,6 +559,9 @@ paths:
   /preset-allocations/{preset_allocation_id}/versions/{version_number}:
     get:
       operationId: getPresetAllocationVersion
+      security:
+        - oauth2:
+            - products:read
       summary: Get Preset Allocation Version
       description: Returns a specific version of a preset-allocation, identified by its sequential `version_number`.
       parameters:
@@ -547,6 +587,9 @@ paths:
   /preset-allocations/{preset_allocation_id}/fund-allocations:
     get:
       operationId: listPresetAllocationFundAllocations
+      security:
+        - oauth2:
+            - products:read
       summary: List Preset Allocation Fund Allocations
       description: |
         Returns the fund-allocation lines of the **current version** of the
@@ -577,6 +620,9 @@ paths:
   /preset-allocations/{preset_allocation_id}/versions/{version_number}/fund-allocations:
     get:
       operationId: listPresetAllocationVersionFundAllocations
+      security:
+        - oauth2:
+            - products:read
       summary: List Preset Allocation Version Fund Allocations
       description: |
         Returns the fund-allocation lines of a specific version of the
