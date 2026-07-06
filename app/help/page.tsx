@@ -8,6 +8,8 @@ import {
   AlertTriangle,
   Database,
   Wrench,
+  Dices,
+  Boxes,
 } from "lucide-react";
 
 import { Card, CardHeader, CardBody } from "@/components/Card";
@@ -120,6 +122,49 @@ export default function HelpPage() {
             explicitement besoin. Un token sans le bon scope reçoit une réponse{" "}
             <strong>403 (Accès refusé)</strong>.
           </p>
+        </CardBody>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <Boxes className="text-muted-foreground size-3.5" />
+          <span className="font-semibold">Les outils du bandeau</span>
+        </CardHeader>
+        <CardBody className="space-y-3 p-4 text-sm">
+          <div>
+            <p className="flex items-center gap-1.5 font-semibold">
+              <Dices className="size-3.5" />
+              Générateur d&apos;UUID
+            </p>
+            <p className="text-muted-foreground">
+              L&apos;icône <em>dé</em>, en haut à droite du bandeau, ouvre un
+              petit panneau qui affiche un <strong>UUID</strong> (un identifiant
+              unique) prêt à l&apos;emploi. Cliquez sur{" "}
+              <strong>« Copier »</strong> pour le récupérer, ou sur{" "}
+              <strong>« Régénérer »</strong> pour en obtenir un autre. Pratique
+              lorsqu&apos;un champ du formulaire attend un identifiant unique que
+              vous devez fournir vous-même.
+            </p>
+          </div>
+          <div>
+            <p className="flex items-center gap-1.5 font-semibold">
+              <KeyRound className="size-3.5" />
+              Collecteur d&apos;IDs
+            </p>
+            <p className="text-muted-foreground">
+              Quand vous <strong>créez une ressource</strong> (une requête{" "}
+              <strong>POST</strong> qui réussit), PackRest mémorise
+              automatiquement son <strong>id</strong>. L&apos;icône{" "}
+              <em>clé</em> du bandeau — avec une pastille indiquant le nombre
+              d&apos;ids retenus — ouvre la liste des{" "}
+              <strong>3 dernières ressources créées par API</strong>. Copiez un
+              id d&apos;un clic pour le réutiliser dans une autre requête (par
+              exemple pour consulter ou modifier la fiche que vous venez de
+              créer). Les boutons <strong>« Vider cette API »</strong> et{" "}
+              <strong>« Tout vider »</strong> effacent la liste quand vous
+              n&apos;en avez plus besoin.
+            </p>
+          </div>
         </CardBody>
       </Card>
 
