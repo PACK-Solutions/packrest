@@ -218,7 +218,6 @@ function BodyView({
   currentUrl?: string;
   onFollowLink?: (url: string, label: string) => void;
 }) {
-  const [view, setView] = useState<"json" | "tree">("json");
   const isEmpty =
     parsedBody === null ||
     parsedBody === undefined ||
@@ -226,6 +225,11 @@ function BodyView({
   const isStructured =
     parsedBody !== null &&
     (typeof parsedBody === "object" || Array.isArray(parsedBody));
+  // Default non-technical users to the readable tree; fall back to raw Json
+  // when the body isn't structured (the tree toggle is disabled there).
+  const [view, setView] = useState<"json" | "tree">(() =>
+    isStructured ? "tree" : "json",
+  );
   const pretty = useMemo(() => {
     if (typeof parsedBody === "string") return parsedBody;
     try {
@@ -267,7 +271,7 @@ function BodyView({
         <ViewToggle
           active={view === "tree"}
           onClick={() => setView("tree")}
-          label="Arbre"
+          label="Lisible"
           disabled={!isStructured}
           title={
             isStructured

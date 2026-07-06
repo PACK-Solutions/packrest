@@ -6,13 +6,10 @@ import {
   ChevronRight,
   Braces,
   Brackets,
-  Hash,
-  Quote,
-  ToggleLeft,
-  Circle,
   ExternalLink,
 } from "lucide-react";
 import { CODE_SURFACE } from "@/lib/design";
+import { booleanLabel, formatMaybeDate, humanizeKey, NULL_LABEL } from "@/lib/humanize";
 import { cn } from "@/lib/utils";
 
 // Both views render onto the same dark background (bg-slate-900/950) so the
@@ -333,6 +330,20 @@ function TreeNode({
   );
 }
 
+// Key label for a tree row. Object keys are humanized for display
+// (`firstName` → "First Name") with the raw key on hover; array ordinals
+// (`#1`, `#2`) are shown as-is in the muted index hue.
+function KeyLabel({ label, isIndex }: { label: string; isIndex?: boolean }) {
+  if (isIndex) {
+    return <span className={COLOR.index}>{label}</span>;
+  }
+  return (
+    <span className={COLOR.key} title={label}>
+      {humanizeKey(label)}
+    </span>
+  );
+}
+
 function LeafRow({
   label,
   isIndex,
@@ -350,15 +361,11 @@ function LeafRow({
   onLinkClick?: LinkClickHandler;
   templatedDetector?: TemplatedDetector;
 }) {
-  const Icon = leafIcon(value);
   return (
     <div className="group flex items-center gap-2 rounded px-1 py-0.5 transition hover:bg-slate-800/40">
       {/* Chevron slot — kept empty so leaf rows align with branch rows */}
       <span className="inline-block w-3.5 shrink-0" aria-hidden />
-      <Icon size={11} className="shrink-0 text-slate-500" aria-hidden />
-      {label !== undefined && (
-        <span className={isIndex ? COLOR.index : COLOR.key}>{label}</span>
-      )}
+      {label !== undefined && <KeyLabel label={label} isIndex={isIndex} />}
       <PrimitiveValue
         value={value}
         path={path}
@@ -487,7 +494,7 @@ function BranchChildren({
         <TreeNode
           key={k}
           value={v}
-          label={isArray ? `[${k}]` : k}
+          label={isArray ? `#${Number(k) + 1}` : k}
           isIndex={isArray}
           depth={depth}
           defaultOpenDepth={defaultOpenDepth}
@@ -514,9 +521,10 @@ function PrimitiveValue({
   onLinkClick?: LinkClickHandler;
   templatedDetector?: TemplatedDetector;
 }) {
-  if (value === null) return <span className={COLOR.null}>null</span>;
+  if (value === null)
+    return <span className={COLOR.null}>{NULL_LABEL}</span>;
   if (typeof value === "boolean")
-    return <span className={COLOR.boolean}>{String(value)}</span>;
+    return <span className={COLOR.boolean}>{booleanLabel(value)}</span>;
   if (typeof value === "number")
     return <span className={COLOR.number}>{String(value)}</span>;
   if (typeof value === "string") {
@@ -537,6 +545,14 @@ function PrimitiveValue({
         <span className={`${COLOR.linkTemplated} break-all`}>{value}</span>
       );
     }
+    const asDate = formatMaybeDate(value);
+    if (asDate) {
+      return (
+        <span className={COLOR.string} title={value}>
+          {asDate}
+        </span>
+      );
+    }
     return (
       <span className={`${COLOR.string} break-all`}>
         {value === "" ? (
@@ -548,14 +564,6 @@ function PrimitiveValue({
     );
   }
   return <span className={COLOR.null}>{String(value)}</span>;
-}
-
-function leafIcon(value: unknown) {
-  if (value === null) return Circle;
-  if (typeof value === "boolean") return ToggleLeft;
-  if (typeof value === "number") return Hash;
-  if (typeof value === "string") return Quote;
-  return Circle;
 }
 
 // ---- Helper ----
