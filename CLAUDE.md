@@ -7,7 +7,9 @@ runs client-side through Tauri plugins (`http`, `fs`, `store`, `dialog`, `opener
 
 The flow is unchanged: pick an API → pick an endpoint → form generated from
 the contract (fields start empty by design) → get a token with selectable
-scopes → execute → response panel.
+scopes → execute → response panel. Around that: multipart/form-data bodies
+with file upload, HAL `_links` navigation, a JWT token inspector, dark/light
+theme, and proactive app + spec update notifications.
 
 Run it with **`npm run tauri:dev`** (launches `next dev` on :3001 + the webview).
 Plain `npm run dev` opens the frontend in a browser but Tauri APIs (store/fs/
@@ -44,7 +46,18 @@ http/dialog) are unavailable there — see the fallback note below.
   list client-side, refreshes on `SPECS_CHANGED_EVENT`), plus `Card`, `Field`,
   `Tabs`, `MethodBadge`, `SchemaField`, `JsonEditor`, `ResponsePanel`,
   `ScopeSelector`, `TokenStatus`, `HeaderEditor`, `BrunoExportButton`, `SyncDiff`.
-  `components/ui/` holds the shadcn/radix primitives.
+  - Request/response: `MultipartBodySection` (multipart/form-data + file
+    upload), `FileResponse` (binary/file response viewer + download),
+    `JsonView` (collapsible JSON tree), `HalLinks` (follow HAL `_links` across
+    APIs), `StatusBadge` (HTTP-status tone badge), `Markdown` (collapsible
+    markdown render).
+  - Token: `TokenInspector` (decode/inspect the JWT).
+  - Helpers: `IdCollector` (reuse ids of created resources), `UuidGenerator`
+    (generate UUIDs for form fields).
+  - Dialogs/theme: `ConfirmDialog` + `PromptDialog` (replace native
+    confirm/prompt, unavailable in the webview), `theme-provider` +
+    `ThemeToggle` (dark/light via `next-themes`).
+  - `components/ui/` holds the shadcn/radix primitives.
 - `lib/`
   - `platform.ts` — `isTauri()` runtime detection.
   - `store.ts` — shared tauri-plugin-store handle (localStorage fallback).
@@ -54,8 +67,15 @@ http/dialog) are unavailable there — see the fallback note below.
   - `net.ts` — `tauriFetch` (tauri-plugin-http; no CORS) + base64 helpers.
   - `token.ts`, `http.ts` — call the upstream directly (ex-`/api/token`,
     `/api/proxy`); reuse `url-policy.ts` (allowlist + header filter + caps).
-  - `sync.ts` — local-dir sync (Rust `read_source_specs` → `specs-fs`).
+  - `sync.ts` — local-dir sync (Rust `read_source_specs` → `specs-fs`);
+    `sync-constants.json` holds the shared constants (`PACKREST_SPECS_DIR`
+    env var, config filename, default relative path) mirrored by `copy-specs.mjs`.
   - `gitlab.ts` — GitLab release download (tauriFetch) + `fflate` unzip → `specs-fs`.
+  - `update-check.ts` — unified "is something newer?" across both update
+    channels (app via GitHub, specs via GitLab); pure logic behind the startup
+    notifier + Settings "Mises à jour" card.
+  - `id-collector.ts` — records `id` from 2xx POST response bodies for reuse
+    across APIs; sync cache like `storage.ts`, keeps the 3 most-recent per API.
   - `bruno.ts` / `bruno-export.ts` — Bruno collection (pure JS, unchanged).
   - `dialog.ts` (folder/save pickers), `exporter.ts` (save via `write_file`).
   - `github.ts` (GitHub Releases update check), `app-version.ts` (running app
