@@ -1,10 +1,64 @@
-# packrest
+# PackRest
 
 Client REST **de bureau** (application Tauri) pour utilisateurs
 non-développeurs. L'app charge les contrats OpenAPI de Pack Solutions et permet
 d'exécuter chaque endpoint depuis une fenêtre native : choix de l'API → choix
 de l'endpoint → formulaire généré à partir du contrat →
 obtention d'un token OAuth2 → exécution → panneau de réponse.
+
+![Grille des APIs disponibles dans PackRest](docs/screenshots/01-apis.png)
+
+## Points forts
+
+- **Formulaires générés depuis le contrat** — pas de JSON à écrire à la main ;
+  les champs proviennent du schéma OpenAPI (et démarrent vides, par choix).
+- **Token OAuth2 à scopes** — les scopes requis sont pré-cochés, le token
+  s'obtient en un clic (flux Client Credentials).
+- **Navigation HAL** — suivez les `_links` d'une réponse, même d'une API à l'autre.
+- **Inspecteur de token JWT** — décodez et vérifiez le token en cours.
+- **Corps multipart / form-data** avec upload de fichier, réponses binaires
+  téléchargeables.
+- **Thème clair / sombre.**
+- **Export / import Bruno** pour partager des requêtes.
+- **Notifications de mise à jour** proactives (app + specs).
+
+## Utilisation pas à pas
+
+### 1. Choisir une API puis un endpoint
+
+Depuis l'accueil, cliquez sur une API : ses endpoints s'affichent regroupés par
+tag, avec un filtre pour retrouver un chemin, un résumé ou un `operationId`.
+
+![Endpoints d'une API regroupés par tag](docs/screenshots/02-endpoints.png)
+
+### 2. Remplir le formulaire
+
+Le formulaire est généré à partir du contrat. Les champs démarrent **vides par
+design** — renseignez uniquement ce dont vous avez besoin. L'URL composée est
+affichée en direct, et les paramètres (query / path) sont regroupés dans des
+onglets.
+
+![Le builder : URL composée, authentification, paramètres](docs/screenshots/03-builder.png)
+
+> Astuce : le **Générateur d'UUID** et le **Collecteur d'IDs** (barre du haut)
+> aident à remplir les champs — le collecteur réutilise les `id` renvoyés par
+> vos précédents POST 2xx.
+
+### 3. Choisir les scopes et obtenir un token
+
+Les scopes **requis** par l'opération sont déjà cochés (en cas de doute,
+laissez tel quel) ; les scopes optionnels restent à votre main. Cliquez sur
+**« Obtenir un token »** pour récupérer un token OAuth2. Le `clientId` /
+`clientSecret` se configurent une fois pour toutes dans **Paramètres**.
+
+![Sélection des scopes OAuth2 et obtention du token](docs/screenshots/04-scopes-token.png)
+
+### 4. Exécuter et lire la réponse
+
+Cliquez sur **« Exécuter »** (ou `⌘↵`). Le panneau de réponse affiche le statut
+HTTP (avec une explication en clair), les en-têtes, le corps en arbre JSON
+repliable, les liens HAL suivables et, pour un JWT, l'inspecteur de token. Vous
+pouvez aussi **copier la requête en curl** ou l'**exporter en Bruno**.
 
 ## Collections Bruno
 
@@ -19,6 +73,15 @@ Les requêtes ne sont pas persistées ; l'échange se fait via des collections
 - **Import** — la page **Import Bruno** charge un `.zip` (ou un `.yml`) ; les
   requêtes reconnues (endpoint présent dans les specs chargés) s'ouvrent
   pré-remplies dans le builder. L'import est éphémère (rien n'est enregistré).
+
+![Page Import Bruno](docs/screenshots/06-collections.png)
+
+## Thème sombre
+
+Le bouton de bascule (barre du haut) alterne clair / sombre ; le choix est
+mémorisé.
+
+![PackRest en thème sombre](docs/screenshots/07-theme-dark.png)
 
 ## Démarrage
 
@@ -38,11 +101,13 @@ synchronisées (voir ci-dessous).
 Les contrats synchronisés sont écrits dans le dossier de données de
 l'application. Deux sources, au choix, disponibles dans **Paramètres** :
 
-1. **Dossier local** — un répertoire contenant `<api>/v1/openapi.bundle.yaml`
-   (utile en développement). Voir `CLAUDE.md` pour l'ordre de résolution.
-2. **Release GitLab** — télécharge le `bundle.zip` d'une release du projet
+1. **Release GitLab** — télécharge le `bundle.zip` d'une release du projet
    [`packsolutions/openapi`](https://gitlab.com/packsolutions/openapi/-/releases)
    et en extrait les contrats. **C'est la source recommandée.**
+2. **Dossier local** — un répertoire contenant `<api>/v1/openapi.bundle.yaml`
+   (utile en développement). Voir `CLAUDE.md` pour l'ordre de résolution.
+
+![Paramètres : sources des contrats (Release GitLab + Dossier local)](docs/screenshots/05-settings-gitlab.png)
 
 ## Configurer le token GitLab
 
@@ -77,11 +142,11 @@ Plus large : couvre tous vos projets accessibles.
 2. Cocher le scope `read_api`, choisir une expiration, **Create**.
 3. Copier le token (`glpat-…`).
 
-### 2. Enregistrer le token dans packrest
+### 2. Enregistrer le token dans PackRest
 
 1. Lancer l'app (`npm run tauri:dev`) et ouvrir **Paramètres** depuis le menu
    **Outils**.
-2. Carte **« Synchroniser depuis une release GitLab »** :
+2. Carte **« Release GitLab »** (section *Sources des contrats d'API*) :
    - **Projet GitLab** : `packsolutions/openapi` (valeur par défaut).
    - **Token d'accès** : coller le token.
 3. Cliquer **« Enregistrer la connexion »**.
