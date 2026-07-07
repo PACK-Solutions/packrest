@@ -15,6 +15,7 @@ import {
 import Field, { FieldHint } from "@/components/Field";
 import type { JsonSchema } from "@/lib/types";
 import { defaultFromSchema } from "@/lib/example-extractor";
+import { humanizeKey } from "@/lib/humanize";
 import { cn } from "@/lib/utils";
 
 interface Props {
@@ -48,7 +49,7 @@ export default function SchemaField({
   required,
 }: Props) {
   const effective = useMemo(() => mergeAllOf(schema), [schema]);
-  const label = effective.title ?? name ?? "";
+  const label = name ? humanizeKey(name) : "";
   const hint = effective.description;
 
   // const: render as a read-only label
@@ -583,7 +584,9 @@ function discriminatorLabel(
     if (v?.const !== undefined) return String(v.const);
     if (v?.enum?.length) return String(v.enum[0]);
   }
-  return schema.title ?? `variante ${fallbackIdx + 1}`;
+  return schema.title
+    ? humanizeKey(schema.title)
+    : `variante ${fallbackIdx + 1}`;
 }
 
 function inputTypeForFormat(format?: string): string {
