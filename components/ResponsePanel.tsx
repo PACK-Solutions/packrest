@@ -225,11 +225,9 @@ function BodyView({
   const isStructured =
     parsedBody !== null &&
     (typeof parsedBody === "object" || Array.isArray(parsedBody));
-  // Default non-technical users to the readable tree; fall back to raw Json
-  // when the body isn't structured (the tree toggle is disabled there).
-  const [view, setView] = useState<"json" | "tree">(() =>
-    isStructured ? "tree" : "json",
-  );
+  // Default to raw Json; the readable "Lisible" tree stays a toggle away
+  // (and is disabled when the body isn't structured).
+  const [view, setView] = useState<"json" | "tree">("json");
   const pretty = useMemo(() => {
     if (typeof parsedBody === "string") return parsedBody;
     try {
