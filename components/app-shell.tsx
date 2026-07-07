@@ -251,17 +251,15 @@ function NavFooter({ appUpdate }: { appUpdate: boolean }) {
 
   return (
     <div className="text-muted-foreground px-2 pb-2 text-[11px] leading-tight">
-      <div className="font-medium">
-        PackRest{version ? ` v${version}` : ""}
-        {appUpdate && (
-          <Link
-            href="/settings"
-            className="ml-1.5 font-medium text-amber-600 hover:underline dark:text-amber-400"
-          >
-            · mise à jour disponible
-          </Link>
-        )}
-      </div>
+      <div className="font-medium">PackRest{version ? ` v${version}` : ""}</div>
+      {appUpdate && (
+        <Link
+          href="/settings"
+          className="mt-0.5 block font-medium whitespace-nowrap text-amber-600 hover:underline dark:text-amber-400"
+        >
+          Mise à jour disponible
+        </Link>
+      )}
       <div className="mt-0.5">APIs : {specsTagLabel(specsTag)}</div>
     </div>
   );
