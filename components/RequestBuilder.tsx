@@ -63,7 +63,7 @@ import type {
   JsonSchema,
 } from "@/lib/types";
 import { saveText } from "@/lib/exporter";
-import { cn, formatFileSize } from "@/lib/utils";
+import { formatFileSize } from "@/lib/utils";
 
 // Static per-session; read once at module scope (guarded for prerender).
 const isMac =
@@ -254,9 +254,13 @@ export default function RequestBuilder(props: Props) {
       : response;
 
   const composedUrl = useMemo(() => {
-    const filledPath = path.replace(/\{([^}]+)\}/g, (_, name) =>
-      encodeURIComponent(paramValues[name] ?? ""),
-    );
+    // Keep the {name} placeholder for an unfilled path param rather than
+    // dropping it — an empty substitution would leave a stray "//" and hide
+    // the fact that the segment is still missing.
+    const filledPath = path.replace(/\{([^}]+)\}/g, (_, name) => {
+      const v = paramValues[name] ?? "";
+      return v === "" ? `{${name}}` : encodeURIComponent(v);
+    });
     const qs = queryParams
       .filter((p) => (paramValues[p.name] ?? "") !== "")
       .map(
@@ -656,19 +660,7 @@ export default function RequestBuilder(props: Props) {
               </Button>
             )}
           </div>
-          <div
-            className={cn(
-              "rounded-md border px-3 py-2 font-mono text-xs break-all",
-              isFollowing
-                ? "bg-muted/50 text-muted-foreground border-border line-through"
-                : "bg-muted text-foreground border-border",
-            )}
-            title={
-              isFollowing
-                ? "URL de l'opération — la navigation HAL utilise une autre URL (voir le panneau de réponse)"
-                : undefined
-            }
-          >
+          <div className="bg-muted text-foreground border-border rounded-md border px-3 py-2 font-mono text-xs break-all">
             {composedUrl}
           </div>
         </CardBody>
@@ -821,6 +813,16 @@ export default function RequestBuilder(props: Props) {
             with the left column instead of ending wherever content runs out. */}
         <div className="min-w-0 xl:sticky xl:top-[4.5rem] xl:self-start">
           <div className="xl:flex xl:h-[calc(100vh-5.5rem)] xl:flex-col">
+          {/* URL of the resource actually shown below — the operation URL, or
+              the followed HAL link while navigating. Kept here (not on the
+              stable "URL composée" card) so it tracks what the response is. */}
+          <div className="text-muted-foreground mb-2 flex items-baseline gap-1.5 px-1 font-mono text-xs xl:shrink-0">
+            <span className="text-foreground shrink-0 font-sans font-semibold">
+              {effectiveMethod}
+            </span>
+            <span className="break-all">{effectiveUrl}</span>
+          </div>
+          <div className="xl:flex xl:min-h-0 xl:flex-1 xl:flex-col">
           <ResponsePanel
             response={currentResponse}
             error={error}
@@ -831,6 +833,7 @@ export default function RequestBuilder(props: Props) {
             onNavJumpTo={handleNavJumpTo}
             onNavToOperation={handleNavToOperation}
           />
+          </div>
           </div>
         </div>
       </div>
