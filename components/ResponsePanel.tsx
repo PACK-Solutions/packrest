@@ -389,8 +389,9 @@ function RequestBody({ body }: { body: string }) {
 
 // Inline breadcrumb shown at the top of the response card when the user
 // has followed at least one HAL link. Designed to be compact: a single
-// row of clickable segments + the current URL on the line below + small
-// inline back/close buttons on the right. Stays visible regardless of
+// row of clickable segments + small inline back/close buttons on the
+// right (the followed URL is shown above the response panel). Stays visible
+// regardless of
 // which tab (Corps / Liens / En-têtes / Requête) is active.
 function NavBreadcrumb({
   stack,
@@ -404,7 +405,6 @@ function NavBreadcrumb({
   onJumpToOperation?: () => void;
 }) {
   if (stack.length === 0) return null;
-  const current = stack[stack.length - 1];
   return (
     <div className="border-amber-300 bg-amber-50 dark:border-amber-700/70 dark:bg-amber-900/30 flex flex-wrap items-center gap-x-2 gap-y-1 rounded-md border px-2.5 py-1.5 text-xs">
       <span className="text-amber-900 dark:text-amber-50 flex flex-wrap items-center gap-1">
@@ -462,9 +462,6 @@ function NavBreadcrumb({
           <X className="size-3.5" />
         </button>
       </div>
-      <code className="text-amber-900/80 dark:text-amber-100/80 block w-full break-all font-mono text-[10.5px] leading-snug">
-        {current.url}
-      </code>
     </div>
   );
 }
