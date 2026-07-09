@@ -20,18 +20,25 @@ import {
 // popover opens, shown in a mono field, and copyable in one click. Uses the
 // DropdownMenu as a popover shell (no @radix-ui/react-popover in the project).
 export function UuidGenerator() {
+  const [open, setOpen] = React.useState(false);
   const [uuid, setUuid] = React.useState("");
 
-  const copy = () =>
+  // Copying also closes the popover (the clipboard write + toast already fired;
+  // the toast renders at body level, so it survives the close).
+  const copy = () => {
     navigator.clipboard.writeText(uuid).then(
       () => toast.success("UUID copié"),
       () => toast.error("Échec de la copie"),
     );
+    setOpen(false);
+  };
 
   return (
     <DropdownMenu
-      onOpenChange={(open) => {
-        if (open) setUuid(crypto.randomUUID());
+      open={open}
+      onOpenChange={(next) => {
+        setOpen(next);
+        if (next) setUuid(crypto.randomUUID());
       }}
     >
       <Tooltip>
