@@ -4,13 +4,12 @@ import * as React from "react";
 
 import { bootstrapStorage } from "@/lib/storage";
 import { bootstrapIdCollector } from "@/lib/id-collector";
-import { seedSpecsIfEmpty } from "@/lib/specs-fs";
 
 // Startup gate. Hydrates the synchronous storage cache from tauri-plugin-store
-// and seeds the writable spec store from the bundled specs on first launch,
 // *before* any page renders — so `loadSettings()` / `loadToken()` never read
-// stale defaults and the API list is populated. Renders a brief splash until
-// ready.
+// stale defaults. The spec store is populated only by sync (GitLab / local);
+// on a fresh install the app opens to the empty state. Renders a brief splash
+// until ready.
 export function TauriProvider({ children }: { children: React.ReactNode }) {
   const [ready, setReady] = React.useState(false);
 
@@ -19,11 +18,6 @@ export function TauriProvider({ children }: { children: React.ReactNode }) {
     (async () => {
       await bootstrapStorage();
       await bootstrapIdCollector();
-      try {
-        await seedSpecsIfEmpty();
-      } catch {
-        // seeding is best-effort; the app still opens (empty API list)
-      }
       if (!cancelled) setReady(true);
     })();
     return () => {

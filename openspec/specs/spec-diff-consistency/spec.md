@@ -2,29 +2,19 @@
 
 ## Purpose
 
-Ensure the structural spec diff behaves consistently across every entry point — the
-runtime diff and the build-time `copy-specs` CLI — by computing it from a single
-shared implementation with deterministic ordering and preserved fault tolerance.
+Ensure the structural spec diff behaves consistently from its single runtime entry
+point, with deterministic ordering and preserved fault tolerance.
 
 ## Requirements
 
-### Requirement: Single-source structural diff
-
-The structural spec diff used at runtime and by the build-time `copy-specs` CLI SHALL be computed by a single shared implementation.
-
-#### Scenario: Runtime and CLI agree for the same inputs
-
-- **WHEN** the same previous and new spec YAML pair is diffed by the runtime and by the CLI
-- **THEN** both report identical added, removed, and changed endpoints and identical added and removed scopes
-
 ### Requirement: Deterministic ordering
 
-The diff SHALL return every result array (added/removed/changed endpoints, added/removed scopes) in a stable sorted order, regardless of entry point.
+The diff SHALL return every result array (added/removed/changed endpoints, added/removed scopes) in a stable sorted order.
 
-#### Scenario: Sorted output from both entry points
+#### Scenario: Sorted output
 
 - **WHEN** a diff produces multiple endpoint or scope entries
-- **THEN** those entries are returned in sorted order from both the runtime and the CLI
+- **THEN** those entries are returned in sorted order
 
 ### Requirement: Fault tolerance preserved
 
