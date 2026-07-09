@@ -8,102 +8,10 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import yaml from "js-yaml";
-
-// Structural spec diff — plain-JS mirror of lib/spec-diff.ts (this script runs
-// under plain `node` and can't import TS). Keep the two in step, like the copy
-// logic they sit beside.
-const HTTP_METHODS = ["get", "post", "put", "patch", "delete", "head", "options"];
-
-function stableStringify(value) {
-  if (value === null || typeof value !== "object") return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
-  const keys = Object.keys(value).sort();
-  return `{${keys
-    .map((k) => `${JSON.stringify(k)}:${stableStringify(value[k])}`)
-    .join(",")}}`;
-}
-
-function parseDoc(text) {
-  let doc;
-  try {
-    doc = yaml.load(text);
-  } catch {
-    return null;
-  }
-  if (!doc || typeof doc !== "object") return null;
-  const operations = new Map();
-  for (const [pathKey, item] of Object.entries(doc.paths ?? {})) {
-    if (!item || typeof item !== "object") continue;
-    for (const method of HTTP_METHODS) {
-      const op = item[method];
-      if (!op) continue;
-      operations.set(`${method.toUpperCase()} ${pathKey}`, stableStringify(op));
-    }
-  }
-  const scopes = new Set();
-  for (const scheme of Object.values(doc.components?.securitySchemes ?? {})) {
-    const s = scheme?.flows?.clientCredentials?.scopes;
-    if (s && typeof s === "object") {
-      for (const name of Object.keys(s)) scopes.add(name);
-    }
-  }
-  const version = typeof doc.info?.version === "string" ? doc.info.version : undefined;
-  return { version, operations, scopes };
-}
-
-function diffSpec(api, oldYaml, newYaml) {
-  const next = parseDoc(newYaml);
-  const base = {
-    api,
-    endpointsAdded: [],
-    endpointsRemoved: [],
-    endpointsChanged: [],
-    scopesAdded: [],
-    scopesRemoved: [],
-  };
-  if (oldYaml == null || oldYaml.trim() === "") {
-    return { ...base, status: "added", toVersion: next?.version };
-  }
-  const prev = parseDoc(oldYaml);
-  if (!prev || !next) {
-    return {
-      ...base,
-      status: "updated",
-      fromVersion: prev?.version,
-      toVersion: next?.version,
-    };
-  }
-  const endpointsAdded = [...next.operations.keys()].filter(
-    (k) => !prev.operations.has(k),
-  );
-  const endpointsRemoved = [...prev.operations.keys()].filter(
-    (k) => !next.operations.has(k),
-  );
-  const endpointsChanged = [...next.operations.keys()].filter(
-    (k) => prev.operations.has(k) && prev.operations.get(k) !== next.operations.get(k),
-  );
-  const scopesAdded = [...next.scopes].filter((s) => !prev.scopes.has(s));
-  const scopesRemoved = [...prev.scopes].filter((s) => !next.scopes.has(s));
-  const changed =
-    endpointsAdded.length ||
-    endpointsRemoved.length ||
-    endpointsChanged.length ||
-    scopesAdded.length ||
-    scopesRemoved.length ||
-    prev.version !== next.version;
-  return {
-    ...base,
-    status: changed ? "updated" : "unchanged",
-    fromVersion: prev.version,
-    toVersion: next.version,
-    endpointsAdded,
-    endpointsRemoved,
-    endpointsChanged,
-    scopesAdded,
-    scopesRemoved,
-  };
-}
+// Structural spec diff shares its single implementation with the runtime via
+// lib/spec-diff-core.mjs (plain ESM, so this pre-build `node` script can import
+// it directly). Presentation (summarizeDiff, below) stays CLI-local.
+import { diffSpec } from "../lib/spec-diff-core.mjs";
 
 function summarizeDiff(d) {
   if (d.status === "added") {
