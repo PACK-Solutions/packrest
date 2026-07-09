@@ -1,8 +1,7 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Download, KeyRound, Loader2, Play, Save, Terminal } from "lucide-react";
-import { toast } from "sonner";
 
 import { Card, CardHeader, CardBody } from "@/components/Card";
 import Tabs from "@/components/Tabs";
@@ -28,42 +27,24 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import {
-  executeRequest,
-  fileToBase64,
-  type MultipartPayload,
-  type ProxyResponse,
-} from "@/lib/http";
-import { recordCreatedId } from "@/lib/id-collector";
-import {
   loadSettings,
-  saveSettings,
-  credentialsFor,
   SETTINGS_CHANGED_EVENT,
   type SavedHeader,
 } from "@/lib/storage";
-import {
-  serializeRequestYml,
-  IMPORT_SEED_KEY,
-  type BrunoHeader,
-  type BrunoParam,
-  type BrunoRequest,
-  type ImportSeed,
-} from "@/lib/bruno";
-import { fetchToken, currentToken, clearToken } from "@/lib/token";
-import {
-  resolveBaseUrl,
-  resolveTokenUrl,
-  contextPathFromBaseUrl,
-  defaultContextPathFor,
-} from "@/lib/env";
-import type { TokenState } from "@/lib/storage";
+import { IMPORT_SEED_KEY, type ImportSeed } from "@/lib/bruno";
+import { clearToken } from "@/lib/token";
+import { resolveBaseUrl } from "@/lib/env";
 import type {
   OpenApiOperation,
   OpenApiParameter,
   JsonSchema,
 } from "@/lib/types";
-import { saveText } from "@/lib/exporter";
-import { formatFileSize } from "@/lib/utils";
+import { buildManagedHeaders } from "@/lib/curl";
+import { formatUploadSize } from "@/lib/multipart";
+import { useToken } from "@/hooks/use-token";
+import { useRequestExecution } from "@/hooks/use-request-execution";
+import { useHalNavigation } from "@/hooks/use-hal-navigation";
+import { useRequestActions } from "@/hooks/use-request-actions";
 
 // Static per-session; read once at module scope (guarded for prerender).
 const isMac =
@@ -79,14 +60,6 @@ interface Props {
   defaultBaseUrl: string;
   scopes: Record<string, string>;
   tokenUrl: string;
-}
-
-// One entry per HAL follow. Responses are cached so Précédent / breadcrumb
-// jumps don't re-fetch (avoids spamming the gateway when navigating back).
-interface FollowEntry {
-  url: string;
-  label: string;
-  response: ProxyResponse;
 }
 
 // Single full-feature request builder. State sources of truth:
@@ -180,41 +153,76 @@ export default function RequestBuilder(props: Props) {
   const requiredScopes = (operation.security ?? []).flatMap((e) =>
     Object.values(e).flat(),
   );
-  const [selectedScopes, setSelectedScopes] =
-    useState<string[]>(requiredScopes);
 
-  // Token panel + UX feedback. Token is tracked as React state so the
-  // Authorization header in every code path always reflects the freshest
-  // bearer — reading localStorage directly inside event handlers is racy
-  // with React's render cycle.
-  const [token, setToken] = useState<TokenState | null>(null);
-  const [tokenError, setTokenError] = useState<string | null>(null);
-  const [fetchingToken, setFetchingToken] = useState(false);
-  useEffect(() => {
-    setToken(currentToken());
-    const sync = () => setToken(currentToken());
-    const id = window.setInterval(sync, 1000);
-    window.addEventListener("storage", sync);
-    return () => {
-      window.clearInterval(id);
-      window.removeEventListener("storage", sync);
-    };
-  }, []);
+  // Token lifecycle (bearer, in-flight/error UX, selected scopes) + the live
+  // header assembly shared by run / follow / curl.
+  const {
+    token,
+    setToken,
+    tokenError,
+    fetchingToken,
+    selectedScopes,
+    setSelectedScopes,
+    getToken,
+    buildLiveHeaders,
+  } = useToken({ tokenUrl, initialScopes: requiredScopes });
 
-  // Operation's own response (set by handleRun). The current displayed
-  // response is either this or the top of `followStack` if non-empty.
-  const [response, setResponse] = useState<ProxyResponse | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [running, setRunning] = useState(false);
-  // True while a multipart request with at least one file is in flight. The
-  // Tauri HTTP plugin can't report upload byte progress, so we show an
-  // indeterminate bar rather than a fake percentage.
-  const [uploading, setUploading] = useState(false);
-  // HAL navigation: every "Suivre" pushes a {url, label, response} entry;
-  // back/jump pops without re-fetching (each response is cached). When the
-  // stack is non-empty the user is "off" the operation — handleSave /
-  // handleCopyCurl use the stack's top URL and response.
-  const [followStack, setFollowStack] = useState<FollowEntry[]>([]);
+  const composedUrl = useMemo(() => {
+    // Keep the {name} placeholder for an unfilled path param rather than
+    // dropping it — an empty substitution would leave a stray "//" and hide
+    // the fact that the segment is still missing.
+    const filledPath = path.replace(/\{([^}]+)\}/g, (_, name) => {
+      const v = paramValues[name] ?? "";
+      return v === "" ? `{${name}}` : encodeURIComponent(v);
+    });
+    const qs = queryParams
+      .filter((p) => (paramValues[p.name] ?? "") !== "")
+      .map(
+        (p) =>
+          `${encodeURIComponent(p.name)}=${encodeURIComponent(paramValues[p.name])}`,
+      )
+      .join("&");
+    return `${baseUrl}${filledPath}${qs ? `?${qs}` : ""}`;
+  }, [baseUrl, path, queryParams, paramValues]);
+
+  // Request execution + the whole result-view state machine (response, error,
+  // running, uploading, and the HAL followStack). run() is referentially
+  // stable, so the keyboard shortcut can depend on it directly.
+  const {
+    error,
+    running,
+    uploading,
+    followStack,
+    isFollowing,
+    currentResponse,
+    effective,
+    run,
+    setFollowStack,
+    setRunning,
+    setError,
+  } = useRequestExecution({
+    method,
+    composedUrl,
+    isMultipart,
+    bodySchema,
+    bodyValue,
+    files,
+    customHeaders,
+    buildLiveHeaders,
+    apiId,
+    operationId,
+    operation,
+    path,
+  });
+
+  // HAL `_links` navigation — drives the followStack owned above.
+  const { followLink, navBack, navJumpTo, navToOperation } = useHalNavigation({
+    buildLiveHeaders,
+    customHeaders,
+    setFollowStack,
+    setRunning,
+    setError,
+  });
 
   // One-shot seeding from a Bruno import. The /collections importer writes the
   // chosen request into sessionStorage then navigates here; we apply the values
@@ -248,358 +256,57 @@ export default function RequestBuilder(props: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const currentResponse: ProxyResponse | null =
-    followStack.length > 0
-      ? followStack[followStack.length - 1].response
-      : response;
-
-  const composedUrl = useMemo(() => {
-    // Keep the {name} placeholder for an unfilled path param rather than
-    // dropping it — an empty substitution would leave a stray "//" and hide
-    // the fact that the segment is still missing.
-    const filledPath = path.replace(/\{([^}]+)\}/g, (_, name) => {
-      const v = paramValues[name] ?? "";
-      return v === "" ? `{${name}}` : encodeURIComponent(v);
-    });
-    const qs = queryParams
-      .filter((p) => (paramValues[p.name] ?? "") !== "")
-      .map(
-        (p) =>
-          `${encodeURIComponent(p.name)}=${encodeURIComponent(paramValues[p.name])}`,
-      )
-      .join("&");
-    return `${baseUrl}${filledPath}${qs ? `?${qs}` : ""}`;
-  }, [baseUrl, path, queryParams, paramValues]);
-
-  const handleGetToken = async () => {
-    setTokenError(null);
-    setFetchingToken(true);
-    try {
-      const s = loadSettings();
-      const creds = credentialsFor(s);
-      if (!creds.clientId || !creds.clientSecret) {
-        throw new Error(
-          "Configurez clientId et clientSecret dans Paramètres avant de demander un token.",
-        );
-      }
-      const fresh = await fetchToken({
-        tokenUrl: resolveTokenUrl(s.environment, s.tokenUrl, tokenUrl),
-        clientId: creds.clientId,
-        clientSecret: creds.clientSecret,
-        scopes: selectedScopes,
-      });
-      setToken(fresh);
-      toast.success("Token obtenu", {
-        description: `Scopes : ${fresh.scope ?? "(non renvoyé)"}`,
-      });
-    } catch (e) {
-      const msg = (e as Error).message;
-      setTokenError(msg);
-      toast.error("Impossible d'obtenir un token", { description: msg });
-    } finally {
-      setFetchingToken(false);
-    }
-  };
-
-  // Enabled custom headers plus the current bearer. Shared by run / follow /
-  // curl so the Authorization + custom-header logic lives in one place.
-  // Canonical capital `Bearer` — RFC 7235 says case-insensitive, but Gravitee
-  // (and some other gateways) reject lowercase `bearer`.
-  const buildLiveHeaders = (): Record<string, string> => {
-    const live = currentToken() ?? token;
-    const headers: Record<string, string> = {};
-    for (const h of customHeaders) {
-      if (h.enabled !== false && h.key) headers[h.key] = h.value;
-    }
-    if (live) headers["Authorization"] = `Bearer ${live.accessToken}`;
-    return headers;
-  };
-
-  const handleRun = async () => {
-    // Re-entrancy guard — the keyboard shortcut bypasses the button's
-    // `disabled`, so hammering ⌘+Entrée must not double-run.
-    if (running) return;
-    const wantsBody = !["GET", "HEAD"].includes(method.toUpperCase());
-    const hasUpload =
-      isMultipart && wantsBody && Object.values(files).some(Boolean);
-    setRunning(true);
-    setUploading(hasUpload);
-    setError(null);
-    setResponse(null);
-    setFollowStack([]);
-    try {
-      const headers = buildLiveHeaders();
-      const res = await executeRequest({
-        method,
-        url: composedUrl,
-        headers,
-        body:
-          wantsBody && !isMultipart && bodySchema
-            ? ((bodyValue ?? {}) as object)
-            : undefined,
-        multipart:
-          isMultipart && wantsBody
-            ? await buildMultipart(bodyValue, files)
-            : undefined,
-      });
-      setResponse(res);
-      // ID collector: a POST that created a resource returns its id in the JSON
-      // body's `id` field. Capture it so it can be reused across APIs. The 2xx
-      // guard skips the network-error case (status 0, non-object body).
-      const bodyId =
-        res.body && typeof res.body === "object" && !Array.isArray(res.body)
-          ? (res.body as Record<string, unknown>).id
-          : undefined;
-      if (
-        method.toUpperCase() === "POST" &&
-        res.status >= 200 &&
-        res.status < 300 &&
-        (typeof bodyId === "string" || typeof bodyId === "number") &&
-        String(bodyId).trim()
-      ) {
-        recordCreatedId({
-          apiId,
-          operationId,
-          method,
-          id: String(bodyId).trim(),
-          label: operation.summary?.trim() || path,
-        });
-      }
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setRunning(false);
-      setUploading(false);
-    }
-  };
-
-  // Follow a HAL link in-app: fire a GET via the proxy with the current
-  // Authorization header. On success, push the result onto followStack
-  // (which becomes the displayed response). On error, leave the stack
-  // untouched so the user stays on the previous valid view.
-  const handleFollowLink = async (url: string, label: string) => {
-    setRunning(true);
-    setError(null);
-    try {
-      const res = await executeRequest({
-        method: "GET",
-        url,
-        headers: buildLiveHeaders(),
-        body: undefined,
-      });
-      setFollowStack((s) => [...s, { url, label, response: res }]);
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setRunning(false);
-    }
-  };
-
-  // Pop the top of the stack — caches mean no re-fetch. Clears any error
-  // so the previous response shows cleanly.
-  const handleNavBack = () => {
-    setError(null);
-    setFollowStack((s) => s.slice(0, -1));
-  };
-
-  // Truncate the stack so segment `index` becomes the top — used by the
-  // breadcrumb when the user clicks an earlier rel.
-  const handleNavJumpTo = (index: number) => {
-    setError(null);
-    setFollowStack((s) => s.slice(0, index + 1));
-  };
-
-  // Clear the entire follow stack — back to the operation's own response.
-  const handleNavToOperation = () => {
-    setError(null);
-    setFollowStack([]);
-  };
-
   // Keyboard shortcuts: ⌘/Ctrl+Entrée exécute, Échap ferme la navigation HAL.
-  // Refs keep the document-level listener subscribed once without stale
-  // closures over `running` / `followStack`.
-  const runRef = useRef<() => void>(() => {});
-  runRef.current = () => {
-    void handleRun();
-  };
-  const escRef = useRef<() => void>(() => {});
-  escRef.current = () => {
-    if (followStack.length > 0) handleNavToOperation();
-  };
+  // `run` / `navToOperation` are referentially stable (the hooks return stable
+  // callbacks), so the listener re-subscribes only on the rare empty↔non-empty
+  // stack flip — no ref indirection needed.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       // Radix (Select/Dialog/Sheet) claims Escape first — don't fight it.
       if (e.defaultPrevented) return;
       if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
         e.preventDefault();
-        runRef.current();
+        void run();
       } else if (e.key === "Escape") {
-        escRef.current();
+        if (isFollowing) navToOperation();
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  }, [run, navToOperation, isFollowing]);
 
-  // When the user is mid-navigation (followStack non-empty), Save and
-  // Copy-curl describe the *currently visible* request — a GET on the
-  // followed URL — not the original operation.
-  const isFollowing = followStack.length > 0;
-  const effectiveUrl = isFollowing
-    ? followStack[followStack.length - 1].url
-    : composedUrl;
-  const effectiveMethod = isFollowing ? "GET" : method;
-  const effectiveBody = isFollowing ? undefined : bodyValue;
-  const effectiveDefaultName = isFollowing
-    ? `GET ${followStack[followStack.length - 1].label}`
-    : `${method.toUpperCase()} ${path}`;
-
-  // Export the currently-composed request as a single Bruno request file
-  // (.yml). Mirrors the "Copier en curl" mental model: what you export is what
-  // would be sent (the operation request, or the followed URL when navigating).
-  const handleExportBruno = () => {
-    const params: BrunoParam[] = [];
-    if (!isFollowing) {
-      for (const p of pathParams) {
-        params.push({
-          name: p.name,
-          value: paramValues[p.name] ?? "",
-          type: "path",
-          description: p.description,
-        });
-      }
-      for (const p of queryParams) {
-        const value = paramValues[p.name] ?? "";
-        if (value === "") continue;
-        params.push({
-          name: p.name,
-          value,
-          type: "query",
-          description: p.description,
-        });
-      }
-    }
-    const headers: BrunoHeader[] = customHeaders
-      .filter((h) => h.key)
-      .map((h) => ({
-        name: h.key,
-        value: h.value,
-        disabled: h.enabled === false,
-      }));
-    const wantsBody = !["GET", "HEAD"].includes(effectiveMethod.toUpperCase());
-    // Bruno's opencollection body model here is json/text only — a binary
-    // multipart upload can't round-trip through the YAML. Export the request
-    // shape without the body and note it so the user re-attaches the file in
-    // Bruno rather than shipping a misleading JSON body.
-    const asMultipart = wantsBody && isMultipart && !isFollowing;
-    const docs = asMultipart
-      ? [
-          operation.summary,
-          "⚠️ Requête multipart/form-data : ajoutez le fichier et les champs du formulaire dans Bruno (corps non exporté).",
-        ]
-          .filter(Boolean)
-          .join("\n\n")
-      : operation.summary;
-    const req: BrunoRequest = {
-      name: effectiveDefaultName,
-      tags: [apiId],
-      method: effectiveMethod.toUpperCase(),
-      url: effectiveUrl,
-      params: params.length ? params : undefined,
-      headers: headers.length ? headers : undefined,
-      body:
-        !asMultipart && wantsBody && bodySchema
-          ? { type: "json", data: JSON.stringify(effectiveBody ?? {}, null, 2) }
-          : undefined,
-      docs,
-      // Carry the selected scopes so a single-request export round-trips them
-      // (a followed HAL URL inherits auth, so no scopes there).
-      scopes: !isFollowing && selectedScopes.length ? selectedScopes : undefined,
-    };
-    const name = `${effectiveDefaultName.replace(/[/\\]+/g, "-").trim() || "request"}.yml`;
-    saveText(name, serializeRequestYml(req), [
-      { name: "Requête Bruno", extensions: ["yml"] },
-    ]).then(
-      (saved) => {
-        if (saved) toast.success("Requête exportée (Bruno)");
-      },
-      (e) => toast.error("Échec de l'export", { description: (e as Error).message }),
-    );
-  };
-
-  // Persist the context path of the current API, derived from the edited base
-  // URL. Preset envs only — the host stays the preset's, only the path segment
-  // is stored (so it applies to both dev and rec).
-  const handleSaveContextPath = () => {
-    const s = loadSettings();
-    const ctx = contextPathFromBaseUrl(s.environment, baseUrl);
-    if (ctx === null) {
-      toast.info("Host non reconnu", {
-        description:
-          "Pour un host différent des passerelles dev/rec, utilisez l'environnement Personnalisé.",
-      });
-      return;
-    }
-    const apiPaths = { ...(s.apiPaths ?? {}) };
-    // Don't persist an override that just restates the default.
-    if (ctx === defaultContextPathFor(apiId)) delete apiPaths[apiId];
-    else apiPaths[apiId] = ctx;
-    saveSettings({ ...s, apiPaths });
-    toast.success(`Context path enregistré pour « ${apiId} »`, {
-      description: ctx ? `/${ctx}` : "(racine de la passerelle)",
-    });
-  };
-
-  const handleCopyCurl = () => {
-    const headers = buildLiveHeaders();
-    const wantsBody = !["GET", "HEAD"].includes(effectiveMethod.toUpperCase());
-    // A multipart upload only applies to the operation request, not to a
-    // followed GET (isFollowing collapses effectiveMethod to GET).
-    const asMultipart = wantsBody && isMultipart && !isFollowing;
-    // Mirror handleRun: an op that declares a JSON body sends `{}` when empty,
-    // so the preview must too (otherwise the curl omits the body upstream).
-    const jsonBody =
-      wantsBody && !asMultipart && bodySchema ? (effectiveBody ?? {}) : undefined;
-    if (jsonBody !== undefined) {
-      headers["Content-Type"] = headers["Content-Type"] ?? "application/json";
-    }
-    const form = asMultipart ? curlForm(bodyValue, files) : undefined;
-    const curl = buildCurl({
-      method: effectiveMethod,
-      url: effectiveUrl,
-      headers,
-      body: jsonBody !== undefined ? JSON.stringify(jsonBody, null, 2) : null,
-      form,
-    });
-    navigator.clipboard.writeText(curl).then(
-      () => toast.success("Commande curl copiée"),
-      () => toast.error("Échec de la copie"),
-    );
-  };
+  // "Describe the current request" actions (Bruno export, curl copy, context-
+  // path save) — mid-navigation these track the visible request (a GET on the
+  // followed URL) via `effective`, not the original operation.
+  const { exportBruno, copyCurl, saveContextPath } = useRequestActions({
+    apiId,
+    operation,
+    pathParams,
+    queryParams,
+    paramValues,
+    customHeaders,
+    bodySchema,
+    bodyValue,
+    files,
+    isMultipart,
+    isFollowing,
+    selectedScopes,
+    effective,
+    baseUrl,
+    buildLiveHeaders,
+  });
 
   // The "Corps" tab renders a JSON body form, a multipart upload form, or
   // nothing (GET / no request body).
-  const bodyContent = bodySchema ? (
-    <BodySection schema={bodySchema} value={bodyValue} onChange={setBodyValue} />
-  ) : isMultipart ? (
-    <MultipartBodySection
-      schema={multipartSchema!}
-      encoding={multipartMedia?.encoding}
-      value={bodyValue}
-      onChange={setBodyValue}
-      files={files}
-      onFilesChange={setFiles}
-    />
-  ) : null;
+  const hasBody = !!bodySchema || isMultipart;
 
   // Greyed-out managed rows shown in the header editor: the (masked) bearer
   // and the Content-Type the proxy will set for the body.
-  const managedHeaders = [
-    ...(token
-      ? [{ key: "Authorization", value: `Bearer ${maskToken(token.accessToken)}` }]
-      : []),
-    ...managedContentType(!!bodySchema, isMultipart),
-  ];
+  const managedHeaders = buildManagedHeaders(
+    token?.accessToken,
+    !!bodySchema,
+    isMultipart,
+  );
 
   return (
     <div className="space-y-4">
@@ -634,7 +341,7 @@ export default function RequestBuilder(props: Props) {
           (header above spans both columns so the response panel aligns with
           the first card), the response column sticky + independently
           scrollable so it stays at eye level while the form scrolls. */}
-      <div className="space-y-4 xl:grid xl:grid-cols-2 xl:items-start xl:gap-6 xl:space-y-0">
+      <div className="space-y-4 @min-[61rem]:grid @min-[61rem]:grid-cols-2 @min-[61rem]:items-start @min-[61rem]:gap-6 @min-[61rem]:space-y-0">
         <div className="min-w-0 space-y-4">
       <Card>
         <CardHeader>
@@ -653,7 +360,7 @@ export default function RequestBuilder(props: Props) {
                 variant="outline"
                 size="sm"
                 className="h-8 shrink-0 text-xs"
-                onClick={handleSaveContextPath}
+                onClick={saveContextPath}
                 title="Mémoriser ce context path pour cette API (dev + rec)"
               >
                 <Save className="size-3" /> Enregistrer pour cette API
@@ -687,7 +394,7 @@ export default function RequestBuilder(props: Props) {
             <Button
               variant="default"
               size="sm"
-              onClick={handleGetToken}
+              onClick={getToken}
               disabled={fetchingToken}
             >
               {fetchingToken ? (
@@ -744,8 +451,24 @@ export default function RequestBuilder(props: Props) {
                     },
                   ]
                 : []),
-              ...(bodyContent
-                ? [{ id: "body", label: "Corps", content: bodyContent }]
+              ...(hasBody
+                ? [
+                    {
+                      id: "body",
+                      label: "Corps",
+                      content: (
+                        <RequestBodyTab
+                          bodySchema={bodySchema}
+                          multipartSchema={multipartSchema}
+                          multipartEncoding={multipartMedia?.encoding}
+                          value={bodyValue}
+                          onChange={setBodyValue}
+                          files={files}
+                          onFilesChange={setFiles}
+                        />
+                      ),
+                    },
+                  ]
                 : []),
               {
                 id: "headers",
@@ -767,7 +490,7 @@ export default function RequestBuilder(props: Props) {
       <div className="flex flex-wrap gap-2">
         <Button
           variant="success"
-          onClick={handleRun}
+          onClick={run}
           disabled={running}
           title={
             isMac ? "Exécuter (⌘ + Entrée)" : "Exécuter (Ctrl + Entrée)"
@@ -783,10 +506,10 @@ export default function RequestBuilder(props: Props) {
             {isMac ? "⌘↵" : "Ctrl↵"}
           </kbd>
         </Button>
-        <Button variant="outline" onClick={handleExportBruno}>
+        <Button variant="outline" onClick={exportBruno}>
           <Download className="size-3.5" /> Exporter (Bruno)
         </Button>
-        <Button variant="outline" onClick={handleCopyCurl}>
+        <Button variant="outline" onClick={copyCurl}>
           <Terminal className="size-3.5" /> Copier en curl
         </Button>
       </div>
@@ -808,30 +531,30 @@ export default function RequestBuilder(props: Props) {
       )}
         </div>
 
-        {/* Fixed working height at xl: the response card fills it and each
-            tab scrolls internally, so the panel's bottom edge stays aligned
+        {/* Fixed working height once two-column: the response card fills it and
+            each tab scrolls internally, so the panel's bottom edge stays aligned
             with the left column instead of ending wherever content runs out. */}
-        <div className="min-w-0 xl:sticky xl:top-[4.5rem] xl:self-start">
-          <div className="xl:flex xl:h-[calc(100vh-5.5rem)] xl:flex-col">
+        <div className="min-w-0 @min-[61rem]:sticky @min-[61rem]:top-[4.5rem] @min-[61rem]:self-start">
+          <div className="@min-[61rem]:flex @min-[61rem]:h-[calc(100vh-5.5rem)] @min-[61rem]:flex-col">
           {/* URL of the resource actually shown below — the operation URL, or
               the followed HAL link while navigating. Kept here (not on the
               stable "URL composée" card) so it tracks what the response is. */}
-          <div className="text-muted-foreground mb-2 flex items-baseline gap-1.5 px-1 font-mono text-xs xl:shrink-0">
+          <div className="text-muted-foreground mb-2 flex items-baseline gap-1.5 px-1 font-mono text-xs @min-[61rem]:shrink-0">
             <span className="text-foreground shrink-0 font-sans font-semibold">
-              {effectiveMethod}
+              {effective.method}
             </span>
-            <span className="break-all">{effectiveUrl}</span>
+            <span className="break-all">{effective.url}</span>
           </div>
-          <div className="xl:flex xl:min-h-0 xl:flex-1 xl:flex-col">
+          <div className="@min-[61rem]:flex @min-[61rem]:min-h-0 @min-[61rem]:flex-1 @min-[61rem]:flex-col">
           <ResponsePanel
             response={currentResponse}
             error={error}
             apiBaseUrl={baseUrl}
-            onFollowLink={handleFollowLink}
+            onFollowLink={followLink}
             navStack={followStack.map((e) => ({ url: e.url, label: e.label }))}
-            onNavBack={handleNavBack}
-            onNavJumpTo={handleNavJumpTo}
-            onNavToOperation={handleNavToOperation}
+            onNavBack={navBack}
+            onNavJumpTo={navJumpTo}
+            onNavToOperation={navToOperation}
           />
           </div>
           </div>
@@ -839,118 +562,6 @@ export default function RequestBuilder(props: Props) {
       </div>
     </div>
   );
-}
-
-// Total size of the picked files, formatted for the upload progress label.
-function formatUploadSize(files: Record<string, File | null>): string {
-  const n = Object.values(files).reduce((sum, f) => sum + (f?.size ?? 0), 0);
-  return formatFileSize(n);
-}
-
-// Assemble a MultipartPayload from the metadata object + picked files. Empty
-// metadata fields are dropped; non-string values are JSON-encoded (e.g. the
-// `metadata` object part). Files are base64-encoded for transport to the proxy.
-async function buildMultipart(
-  value: unknown,
-  files: Record<string, File | null>,
-): Promise<MultipartPayload> {
-  const fields: Record<string, string> = {};
-  const obj = (
-    value && typeof value === "object" && !Array.isArray(value) ? value : {}
-  ) as Record<string, unknown>;
-  for (const [k, v] of Object.entries(obj)) {
-    if (v === null || v === undefined || v === "") continue;
-    fields[k] = typeof v === "string" ? v : JSON.stringify(v);
-  }
-  const out: MultipartPayload["files"] = [];
-  for (const [field, f] of Object.entries(files)) {
-    if (!f) continue;
-    out.push({
-      field,
-      filename: f.name,
-      contentType: f.type || "application/octet-stream",
-      base64: await fileToBase64(f),
-    });
-  }
-  return { fields, files: out };
-}
-
-// Same field/file collection as buildMultipart, but shaped for a curl `-F`
-// preview (filenames only, no base64).
-function curlForm(
-  value: unknown,
-  files: Record<string, File | null>,
-): { fields: Record<string, string>; files: { field: string; filename: string }[] } {
-  const fields: Record<string, string> = {};
-  const obj = (
-    value && typeof value === "object" && !Array.isArray(value) ? value : {}
-  ) as Record<string, unknown>;
-  for (const [k, v] of Object.entries(obj)) {
-    if (v === null || v === undefined || v === "") continue;
-    fields[k] = typeof v === "string" ? v : JSON.stringify(v);
-  }
-  const outFiles: { field: string; filename: string }[] = [];
-  for (const [field, f] of Object.entries(files)) {
-    if (f) outFiles.push({ field, filename: f.name });
-  }
-  return { fields, files: outFiles };
-}
-
-// The Content-Type the proxy will set, as a managed header row. JSON bodies
-// are stamped application/json; multipart uploads get the boundary from fetch,
-// so we only show the bare type. GET / bodyless requests get no row.
-function managedContentType(
-  hasJsonBody: boolean,
-  isMultipart: boolean,
-): { key: string; value: string }[] {
-  if (hasJsonBody) return [{ key: "Content-Type", value: "application/json" }];
-  if (isMultipart)
-    return [{ key: "Content-Type", value: "multipart/form-data" }];
-  return [];
-}
-
-function maskToken(token: string): string {
-  if (token.length <= 12) return "••••";
-  return `${token.slice(0, 6)}…${token.slice(-4)}`;
-}
-
-// Build a curl command exactly mirroring what the proxy will send. Used by
-// the "Copier en curl" button so the user can paste a working command into
-// a terminal and compare diff with their own curl.
-export function buildCurl(opts: {
-  method: string;
-  url: string;
-  headers: Record<string, string>;
-  body?: string | null;
-  // multipart/form-data parts. When present, `-F` flags are emitted (and
-  // curl sets the multipart Content-Type + boundary itself) instead of
-  // `--data-raw`.
-  form?: {
-    fields: Record<string, string>;
-    files: { field: string; filename: string }[];
-  };
-}): string {
-  const lines: string[] = [
-    `curl -X ${opts.method.toUpperCase()} '${escapeSingleQuotes(opts.url)}'`,
-  ];
-  for (const [k, v] of Object.entries(opts.headers)) {
-    lines.push(`-H '${escapeSingleQuotes(`${k}: ${v}`)}'`);
-  }
-  if (opts.form) {
-    for (const [k, v] of Object.entries(opts.form.fields)) {
-      lines.push(`-F '${escapeSingleQuotes(`${k}=${v}`)}'`);
-    }
-    for (const f of opts.form.files) {
-      lines.push(`-F '${escapeSingleQuotes(`${f.field}=@${f.filename}`)}'`);
-    }
-  } else if (opts.body) {
-    lines.push(`--data-raw '${escapeSingleQuotes(opts.body)}'`);
-  }
-  return lines.join(" \\\n  ");
-}
-
-function escapeSingleQuotes(s: string): string {
-  return s.replace(/'/g, "'\\''");
 }
 
 function ParamGroup({
@@ -1011,6 +622,44 @@ function ParamGroup({
       </div>
     </div>
   );
+}
+
+// The "Corps" tab body: a JSON body form, a multipart upload form, or nothing
+// (GET / no request body). Owns the JSON-vs-multipart branch so the parent
+// component's body stays a flat orchestration.
+function RequestBodyTab({
+  bodySchema,
+  multipartSchema,
+  multipartEncoding,
+  value,
+  onChange,
+  files,
+  onFilesChange,
+}: {
+  bodySchema: JsonSchema | undefined;
+  multipartSchema: JsonSchema | undefined;
+  multipartEncoding: Record<string, { contentType?: string }> | undefined;
+  value: unknown;
+  onChange: (next: unknown) => void;
+  files: Record<string, File | null>;
+  onFilesChange: (next: Record<string, File | null>) => void;
+}) {
+  if (bodySchema) {
+    return <BodySection schema={bodySchema} value={value} onChange={onChange} />;
+  }
+  if (multipartSchema) {
+    return (
+      <MultipartBodySection
+        schema={multipartSchema}
+        encoding={multipartEncoding}
+        value={value}
+        onChange={onChange}
+        files={files}
+        onFilesChange={onFilesChange}
+      />
+    );
+  }
+  return null;
 }
 
 function BodySection({
