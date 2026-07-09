@@ -3,12 +3,9 @@
   "version": "0.5.1",
   "private": true,
   "scripts": {
-    "predev": "node scripts/copy-specs.mjs",
-    "prebuild": "node scripts/copy-specs.mjs",
     "dev": "next dev -p 3001",
     "build": "next build",
     "start": "next start -p 3001",
-    "sync-specs": "node scripts/copy-specs.mjs",
     "typecheck": "tsc --noEmit",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",

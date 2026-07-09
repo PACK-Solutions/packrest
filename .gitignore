@@ -1,8 +1,6 @@
 node_modules
 .next
 out
-public/specs/*.yaml
-public/specs/manifest.json
 .packrest.config.json
 
 # Playwright MCP session artifacts

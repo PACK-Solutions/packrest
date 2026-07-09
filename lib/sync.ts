@@ -1,8 +1,8 @@
-// Local-directory spec sync, client-side. Formerly a server route
-// (node:fs copy of <src>/<api>/v1/openapi.bundle.yaml → public/specs). Now the
-// Rust `read_source_specs` command reads the user-picked source directory and
-// the bundles are written into the writable app-data spec store via
-// tauri-plugin-fs. The pure spec-diff logic is reused unchanged.
+// Local-directory spec sync, client-side — the fallback source when GitLab
+// isn't used. The Rust `read_source_specs` command reads the user-picked source
+// directory (<src>/<api>/v1/openapi.bundle.yaml) and the bundles are written
+// into the writable app-data spec store via tauri-plugin-fs. The pure spec-diff
+// logic is reused unchanged.
 
 import { diffSpec, type SpecDiff } from "./spec-diff";
 import { readSpecFile, writeSpecFile } from "./specs-fs";

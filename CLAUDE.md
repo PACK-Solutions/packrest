@@ -19,8 +19,7 @@ http/dialog) are unavailable there — see the fallback note below.
 
 | What | Where |
 | --- | --- |
-| **API shape**, endpoints, scopes, examples | Writable spec store `$APPDATA/specs/<api>.yaml`, read via `lib/specs-fs.ts` (tauri-plugin-fs). Loaded/parsed/dereffed by `lib/specs.ts` (async client loader, module cache + `resetSpecCache`). |
-| **Bundled seed specs** | `public/specs/<api>.yaml` + `public/specs/manifest.json`, produced by `scripts/copy-specs.mjs` at predev/prebuild from the local `specsDir`. Shipped in the static export; `seedSpecsIfEmpty()` (in `specs-fs.ts`) copies them into `$APPDATA/specs` on first launch. |
+| **API shape**, endpoints, scopes, examples | Writable spec store `$APPDATA/specs/<api>.yaml`, read via `lib/specs-fs.ts` (tauri-plugin-fs). Loaded/parsed/dereffed by `lib/specs.ts` (async client loader, module cache + `resetSpecCache`). Populated **only by sync** — GitLab release (primary) or local source dir (fallback); there is no bundled seed, so a fresh install opens to the empty state. |
 | **Config** (specsDir, GitLab host/project/token) | `lib/config.ts` → `lib/store.ts` (tauri-plugin-store, file `packrest.json` in app-data). |
 | **Persistence** (settings incl. `clientSecret`, token) | `lib/storage.ts` — synchronous API backed by an in-memory cache hydrated from the store; edits persist through `lib/store.ts`. |
 | **Design tokens** | `lib/design.ts` |
@@ -42,7 +41,7 @@ http/dialog) are unavailable there — see the fallback note below.
     `<Suspense>` boundary satisfies static export's `useSearchParams` rule.
   - **No `app/api/*`** — deleted; that logic is client-side now.
 - `components/` — `RequestBuilder` (state-heavy), `tauri-provider.tsx`
-  (hydrate store + seed specs before render), `app-shell.tsx` (loads the API
+  (hydrate store before render), `app-shell.tsx` (loads the API
   list client-side, refreshes on `SPECS_CHANGED_EVENT`), plus `Card`, `Field`,
   `Tabs`, `MethodBadge`, `SchemaField`, `JsonEditor`, `ResponsePanel`,
   `ScopeSelector`, `TokenStatus`, `HeaderEditor`, `BrunoExportButton`, `SyncDiff`.
@@ -63,13 +62,14 @@ http/dialog) are unavailable there — see the fallback note below.
   - `store.ts` — shared tauri-plugin-store handle (localStorage fallback).
   - `storage.ts` — sync settings/token cache + `bootstrapStorage()`.
   - `config.ts` — specsDir + GitLab config in the store.
-  - `specs.ts` — async client spec loader; `specs-fs.ts` — fs/seed layer.
+  - `specs.ts` — async client spec loader; `specs-fs.ts` — Tauri-only fs layer
+    for the writable spec store (empty/no-op outside Tauri).
   - `net.ts` — `tauriFetch` (tauri-plugin-http; no CORS) + base64 helpers.
   - `token.ts`, `http.ts` — call the upstream directly (ex-`/api/token`,
     `/api/proxy`); reuse `url-policy.ts` (allowlist + header filter + caps).
   - `sync.ts` — local-dir sync (Rust `read_source_specs` → `specs-fs`);
     `sync-constants.json` holds the shared constants (`PACKREST_SPECS_DIR`
-    env var, config filename, default relative path) mirrored by `copy-specs.mjs`.
+    env var, config filename, default relative path).
   - `gitlab.ts` — GitLab release download (tauriFetch) + `fflate` unzip → `specs-fs`.
   - `update-check.ts` — unified "is something newer?" across both update
     channels (app via GitHub, specs via GitLab); pure logic behind the startup
@@ -81,25 +81,25 @@ http/dialog) are unavailable there — see the fallback note below.
   - `github.ts` (GitHub Releases update check), `app-version.ts` (running app
     version), `opener.ts` (open URL in OS browser), `status-help.ts` (HTTP
     status explanations for ResponsePanel + `/help`).
-  - `deref.ts`, `spec-diff.ts`, `example-extractor.ts`, `env.ts`, `types.ts`,
-    `hal.ts`, `jwt.ts`, `design.ts`, `utils.ts`.
-- `public/specs/` — bundled seed specs + `manifest.json` (generated; gitignored).
+  - `deref.ts`, `spec-diff.ts` (single runtime diff, no build-time consumer),
+    `example-extractor.ts`, `env.ts`, `types.ts`, `hal.ts`, `jwt.ts`,
+    `design.ts`, `utils.ts`.
 
 ## Before editing
 
-1. **Spec changes win.** New bundle in the local `specsDir` → local sync
-   (topbar button or Settings) copies it into `$APPDATA/specs` and calls
-   `resetSpecCache()`, which fires `SPECS_CHANGED_EVENT` so pages reload. The
-   bundled seed only refreshes at predev/prebuild via `copy-specs.mjs`.
-2. **`copy-specs.mjs` still mirrors the sync/diff logic.** It runs under plain
-   `node` (can't import TS) and, besides copying, emits `public/specs/manifest.json`
-   and prints a spec diff. Its diff is a JS mirror of `lib/spec-diff.ts` — keep
-   the two in step. (Runtime sync now lives in `lib/sync.ts` / `lib/gitlab.ts`,
-   not a server route.)
+1. **Spec changes win.** Specs come only from sync: a GitLab release
+   (`lib/gitlab.ts`, primary) or the local `specsDir` (`lib/sync.ts`, fallback).
+   Either writes into `$APPDATA/specs` and calls `resetSpecCache()`, which fires
+   `SPECS_CHANGED_EVENT` so pages reload. There is no bundled seed — a fresh
+   install opens to the empty state until the first sync.
+2. **The spec diff has one runtime implementation** in `lib/spec-diff.ts`
+   (`diffSpec`), consumed by `lib/sync.ts` and `lib/gitlab.ts`. No build-time
+   mirror exists anymore.
 3. **Tauri vs browser.** Every Tauri plugin call is guarded by `isTauri()` with
-   a graceful fallback (localStorage for the store; bundled static `/specs/`
-   for reads). Keep imports of `@tauri-apps/*` behind dynamic `import()` inside
-   functions so the static export still prerenders.
+   a graceful fallback (localStorage for the store). The spec store is
+   Tauri-only, so outside Tauri the API list is empty. Keep imports of
+   `@tauri-apps/*` behind dynamic `import()` inside functions so the static
+   export still prerenders.
 4. **Keep `url-policy.ts` on the token/proxy paths.** `checkUrl` (allowlist +
    private-IP block) and the header safelist still guard `lib/token.ts` /
    `lib/http.ts`. The Tauri HTTP capability scope in
@@ -113,10 +113,9 @@ http/dialog) are unavailable there — see the fallback note below.
 
 ```
 npm run tauri:dev    # full desktop app (next dev :3001 + webview)  ← primary
-npm run dev          # frontend only in a browser (Tauri APIs disabled)
-npm run build        # static export → out/ (prebuild copies specs + manifest)
+npm run dev          # frontend only in a browser (Tauri APIs disabled; no specs)
+npm run build        # static export → out/
 npm run tauri:build  # bundle the desktop app
-npm run sync-specs   # refresh bundled seed specs + manifest from specsDir
 npm run typecheck    # tsc --noEmit
 ```
 
