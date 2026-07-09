@@ -83,7 +83,12 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           <aside className="bg-sidebar text-sidebar-foreground border-sidebar-border hidden w-64 shrink-0 flex-col border-r md:flex md:sticky md:top-14 md:h-[calc(100vh-3.5rem)] md:self-start">
             <NavBody apis={apis} updates={updates} />
           </aside>
-          <main className="min-w-0 flex-1 p-4 md:p-6">{children}</main>
+          {/* @container: pages lay out against this content area's width, not
+              the viewport. A viewport media query flips when a Radix overlay
+              (Select/DropdownMenu/Sheet) locks body scroll and the scrollbar
+              disappears; the container width stays constant (react-remove-scroll
+              pads the body to compensate), so container queries don't flip. */}
+          <main className="@container min-w-0 flex-1 p-4 md:p-6">{children}</main>
         </div>
       </div>
     </TooltipProvider>
