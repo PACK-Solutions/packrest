@@ -61,7 +61,7 @@ info:
     Responses follow **HAL** principles: resources and collections carry a
     `_links` object for navigation, and collections embed their items under
     `_embedded`.
-  version: 0.0.60
+  version: 0.0.61
   contact:
     email: support@pack-solutions.com
     name: Pack Solutions Support

@@ -165,7 +165,7 @@ info:
     ## Navigation & HAL
     This API follows **HAL (Hypertext Application Language)** principles. Resources include a `_links`
     object for programmatic navigation. Available links depend on the current status of the service request.
-  version: 0.0.60
+  version: 0.0.61
   contact:
     email: support@pack-solutions.com
     name: Pack Solutions Support
