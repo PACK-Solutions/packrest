@@ -7,6 +7,7 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import {
   Sheet,
+  SheetClose,
   SheetContent,
   SheetHeader,
   SheetTitle,
@@ -96,23 +97,14 @@ export function IdCollector() {
       </Tooltip>
 
       <SheetContent side="right" className="w-full gap-0 sm:max-w-md">
-        <SheetHeader className="flex-row items-center justify-between gap-2">
-          <div>
-            <SheetTitle>Collecteur d&apos;IDs</SheetTitle>
-            <SheetDescription>
-              Les 3 dernières ressources créées par API.
-            </SheetDescription>
-          </div>
-          {total > 0 && (
-            <Button
-              variant="ghost"
-              size="sm"
-              className="h-7 shrink-0 text-xs"
-              onClick={() => clearCollectedIds()}
-            >
-              <Trash2 className="size-3" /> Tout vider
-            </Button>
-          )}
+        {/* pr-10 keeps the header text clear of the absolutely-positioned
+            close X (top-4 right-4). "Tout vider" lives in a footer below the
+            list (see below) rather than here, to avoid crowding that X. */}
+        <SheetHeader className="pr-10">
+          <SheetTitle>Collecteur d&apos;IDs</SheetTitle>
+          <SheetDescription>
+            Les 3 dernières ressources créées par API.
+          </SheetDescription>
         </SheetHeader>
 
         <Separator />
@@ -136,6 +128,19 @@ export function IdCollector() {
               ))}
             </div>
           </ScrollArea>
+        )}
+
+        {total > 0 && (
+          <div className="border-border shrink-0 border-t p-3">
+            <Button
+              variant="ghost"
+              size="sm"
+              className="text-muted-foreground hover:text-foreground w-full text-xs"
+              onClick={() => clearCollectedIds()}
+            >
+              <Trash2 className="size-3" /> Tout vider
+            </Button>
+          </div>
         )}
       </SheetContent>
     </Sheet>
@@ -210,15 +215,19 @@ function IdRow({ entry }: { entry: CollectedId }) {
       </div>
       <Tooltip>
         <TooltipTrigger asChild>
-          <Button
-            variant="outline"
-            size="icon"
-            className="size-7 shrink-0"
-            aria-label="Copier l'ID"
-            onClick={copy}
-          >
-            <Copy className="size-3" />
-          </Button>
+          {/* SheetClose closes the panel on copy (the clipboard write + toast
+              already fired; the toast renders at body level, so it survives). */}
+          <SheetClose asChild>
+            <Button
+              variant="outline"
+              size="icon"
+              className="size-7 shrink-0"
+              aria-label="Copier l'ID"
+              onClick={copy}
+            >
+              <Copy className="size-3" />
+            </Button>
+          </SheetClose>
         </TooltipTrigger>
         <TooltipContent side="left">Copier l&apos;ID</TooltipContent>
       </Tooltip>
