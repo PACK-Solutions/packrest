@@ -68,7 +68,7 @@ info:
     Clients must obtain an access token and include it in the
     `Authorization` header as a Bearer token. All operations require
     the `order-books:read` scope.
-  version: 0.0.60
+  version: 0.0.61
   contact:
     name: Pack Solutions Support
     email: support@pack-solutions.com
