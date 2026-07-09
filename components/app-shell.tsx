@@ -27,6 +27,7 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import ThemeToggle from "@/components/ThemeToggle";
+import { EnvSwitcher } from "@/components/EnvSwitcher";
 import { IdCollector } from "@/components/IdCollector";
 import { UuidGenerator } from "@/components/UuidGenerator";
 import { apiTheme } from "@/lib/design";
@@ -127,6 +128,7 @@ function TopBar({
       </Sheet>
       <Brand />
       <div className="ml-auto flex items-center gap-1">
+        <EnvSwitcher />
         <UuidGenerator />
         <IdCollector />
         <ThemeToggle variant="icon" />
