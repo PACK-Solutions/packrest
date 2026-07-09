@@ -157,8 +157,13 @@ function ApiView() {
               className="text-muted-foreground truncate text-sm"
               title={spec.servers?.[0]?.url}
             >
-              v{spec.info.version} ·{" "}
-              <span className="font-mono">{spec.servers?.[0]?.url}</span>
+              v{spec.info.version}
+              {spec.servers?.[0]?.url && (
+                <>
+                  {" · "}
+                  <span className="font-mono">{spec.servers[0].url}</span>
+                </>
+              )}
             </p>
           </div>
           <div className="ml-auto">
