@@ -14,7 +14,9 @@ import {
 } from "@/components/JsonView";
 import HalLinks from "@/components/HalLinks";
 import FileResponse from "@/components/FileResponse";
+import ResponseExportButton from "@/components/ResponseExportButton";
 import { Button } from "@/components/ui/button";
+import type { ExportMeta } from "@/lib/xlsx";
 import { CODE_SURFACE, toneForStatusCode } from "@/lib/design";
 import { statusHelp } from "@/lib/status-help";
 import { cn } from "@/lib/utils";
@@ -51,6 +53,22 @@ interface Props {
   onNavBack?: () => void;
   onNavJumpTo?: (index: number) => void;
   onNavToOperation?: () => void;
+  // Request context (API / endpoint / query) embedded in the Excel export.
+  exportMeta?: ExportMeta;
+}
+
+// Default export filename derived from the request URL's last path segment
+// (query stripped, sanitized), falling back to "reponse".
+function responseFileBase(url?: string): string {
+  if (!url) return "reponse";
+  try {
+    const { pathname } = new URL(url);
+    const last = pathname.split("/").filter(Boolean).pop() ?? "";
+    const slug = last.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
+    return slug || "reponse";
+  } catch {
+    return "reponse";
+  }
 }
 
 export default function ResponsePanel({
@@ -62,6 +80,7 @@ export default function ResponsePanel({
   onNavBack,
   onNavJumpTo,
   onNavToOperation,
+  exportMeta,
 }: Props) {
   // Parse the body once here so BodyView and the Liens tab share the same
   // structured representation. Hooks must come before any conditional
@@ -163,6 +182,7 @@ export default function ResponsePanel({
                   apiBaseUrl={apiBaseUrl}
                   currentUrl={response.request?.url}
                   onFollowLink={onFollowLink}
+                  exportMeta={exportMeta}
                 />
               ),
             },
@@ -211,12 +231,14 @@ function BodyView({
   apiBaseUrl,
   currentUrl,
   onFollowLink,
+  exportMeta,
 }: {
   body: unknown;
   parsedBody: unknown;
   apiBaseUrl: string;
   currentUrl?: string;
   onFollowLink?: (url: string, label: string) => void;
+  exportMeta?: ExportMeta;
 }) {
   const isEmpty =
     parsedBody === null ||
@@ -277,19 +299,27 @@ function BodyView({
               : "Indisponible : la réponse n'est pas un JSON structuré."
           }
         />
-        <Button
-          variant="outline"
-          size="sm"
-          className="ml-auto h-7 text-xs"
-          onClick={() =>
-            navigator.clipboard.writeText(pretty).then(
-              () => toast.success("Corps de la réponse copié"),
-              () => toast.error("Échec de la copie"),
-            )
-          }
-        >
-          <Copy className="size-3" /> Copier
-        </Button>
+        <div className="ml-auto flex items-center gap-1.5">
+          <ResponseExportButton
+            body={parsedBody}
+            defaultName={responseFileBase(currentUrl)}
+            meta={exportMeta}
+            disabled={!isStructured}
+          />
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-7 text-xs"
+            onClick={() =>
+              navigator.clipboard.writeText(pretty).then(
+                () => toast.success("Corps de la réponse copié"),
+                () => toast.error("Échec de la copie"),
+              )
+            }
+          >
+            <Copy className="size-3" /> Copier
+          </Button>
+        </div>
       </div>
       {view === "tree" && isStructured ? (
         <JsonTree

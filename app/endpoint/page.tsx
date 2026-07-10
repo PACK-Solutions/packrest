@@ -123,6 +123,7 @@ function Endpoint() {
       </Breadcrumb>
       <RequestBuilder
         apiId={apiId}
+        apiTitle={spec.info.title}
         method={entry.method.toUpperCase()}
         path={entry.path}
         operationId={entry.operationId}

@@ -52,6 +52,7 @@ const isMac =
 
 interface Props {
   apiId: string;
+  apiTitle: string;
   method: string;
   path: string;
   operationId: string;
@@ -71,6 +72,7 @@ interface Props {
 export default function RequestBuilder(props: Props) {
   const {
     apiId,
+    apiTitle,
     method,
     path,
     operationId,
@@ -550,6 +552,12 @@ export default function RequestBuilder(props: Props) {
             response={currentResponse}
             error={error}
             apiBaseUrl={baseUrl}
+            exportMeta={{
+              apiTitle,
+              endpoint: effective.defaultName,
+              url: effective.url,
+              summary: isFollowing ? undefined : operation.summary,
+            }}
             onFollowLink={followLink}
             navStack={followStack.map((e) => ({ url: e.url, label: e.label }))}
             onNavBack={navBack}
