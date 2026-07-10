@@ -38,6 +38,10 @@ jobs:
       CARGO_INCREMENTAL: 0
     steps:
       - uses: actions/checkout@v5
+        # Full history + tags so the release-notes step can diff against the
+        # previous tag (default fetch-depth of 1 sees neither).
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-node@v5
         with:
@@ -56,6 +60,20 @@ jobs:
       - name: Install JS dependencies
         run: npm ci
 
+      # Grouped changelog from the Conventional-Commit subjects since the
+      # previous tag; used as the Release body below. `shell: bash` because the
+      # matrix includes windows-latest (git-bash is preinstalled there).
+      - name: Build release notes
+        id: notes
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          {
+            echo "body<<RELEASE_NOTES_EOF"
+            bash scripts/release-notes.sh "${{ github.ref_name }}"
+            echo "RELEASE_NOTES_EOF"
+          } >> "$GITHUB_OUTPUT"
+
       # Builds the frontend (npm run build → out/) and bundles the desktop app.
       # On a `v*` tag it also creates/uploads a GitHub Release.
       - uses: tauri-apps/tauri-action@v0
@@ -65,6 +83,7 @@ jobs:
           args: ${{ matrix.args }}
           tagName: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
           releaseName: ${{ startsWith(github.ref, 'refs/tags/v') && format('PackRest {0}', github.ref_name) || '' }}
+          releaseBody: ${{ steps.notes.outputs.body }}
           releaseDraft: false
           prerelease: false
 
