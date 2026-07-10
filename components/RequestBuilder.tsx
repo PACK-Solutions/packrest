@@ -6,7 +6,7 @@ import { Download, KeyRound, Loader2, Play, Save, Terminal } from "lucide-react"
 import { Card, CardHeader, CardBody } from "@/components/Card";
 import Tabs from "@/components/Tabs";
 import MethodBadge from "@/components/MethodBadge";
-import Field from "@/components/Field";
+import Field, { ConstraintBadges } from "@/components/Field";
 import SchemaField from "@/components/SchemaField";
 import JsonEditor from "@/components/JsonEditor";
 import MultipartBodySection from "@/components/MultipartBodySection";
@@ -595,6 +595,7 @@ function ParamGroup({
             label={p.name}
             hint={p.description}
             required={p.required}
+            meta={<ConstraintBadges schema={p.schema} />}
           >
             {p.schema?.enum?.length ? (
               <Select

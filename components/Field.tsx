@@ -1,12 +1,21 @@
 import { cloneElement, isValidElement, useId, type ReactNode } from "react";
 import { Label } from "@/components/ui/label";
+import { Badge } from "@/components/ui/badge";
 import Markdown from "@/components/Markdown";
+import {
+  describeConstraints,
+  type ConstraintTone,
+} from "@/lib/schema-constraints";
+import type { JsonSchema } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 interface Props {
   label: ReactNode;
   hint?: ReactNode;
   required?: boolean;
+  // Extra metadata rendered on the label row, aligned right (e.g.
+  // <ConstraintBadges />).
+  meta?: ReactNode;
   children: ReactNode;
   className?: string;
 }
@@ -22,6 +31,7 @@ export default function Field({
   label,
   hint,
   required,
+  meta,
   children,
   className = "",
 }: Props) {
@@ -47,16 +57,52 @@ export default function Field({
 
   return (
     <div className={cn("space-y-1", className)}>
-      <Label htmlFor={controlId} className="text-xs font-semibold">
-        {label}
-        {required && (
-          <span className="text-destructive ml-0.5" aria-hidden>
-            *
-          </span>
-        )}
-      </Label>
+      <div className="flex items-start justify-between gap-2">
+        <Label htmlFor={controlId} className="shrink-0 text-xs font-semibold">
+          {label}
+          {required && (
+            <span className="text-destructive ml-0.5" aria-hidden>
+              *
+            </span>
+          )}
+        </Label>
+        {meta}
+      </div>
       <div>{control}</div>
       <FieldHint hint={hint} id={hintId} />
+    </div>
+  );
+}
+
+// Pastel badge colour per constraint category.
+const TONE_VARIANT: Record<
+  ConstraintTone,
+  "info" | "success" | "warn" | "neutral"
+> = {
+  type: "info",
+  format: "success",
+  constraint: "warn",
+  pattern: "neutral",
+};
+
+// Renders the type + constraints of a schema as compact, pastel-coloured
+// monospace badges next to a field's label. Returns null when the schema
+// carries nothing worth showing, so it can be passed liberally without
+// producing empty rows.
+export function ConstraintBadges({ schema }: { schema?: JsonSchema }) {
+  const parts = describeConstraints(schema);
+  if (parts.length === 0) return null;
+  return (
+    <div className="flex flex-1 flex-wrap justify-end gap-1">
+      {parts.map((p) => (
+        <Badge
+          key={p.label}
+          variant={TONE_VARIANT[p.tone]}
+          className="px-1.5 py-0 font-mono text-[10px] font-normal"
+        >
+          {p.label}
+        </Badge>
+      ))}
     </div>
   );
 }
