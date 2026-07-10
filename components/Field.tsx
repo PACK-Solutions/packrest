@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { cloneElement, isValidElement, useId, type ReactNode } from "react";
 import { Label } from "@/components/ui/label";
 import Markdown from "@/components/Markdown";
 import { cn } from "@/lib/utils";
@@ -11,6 +11,13 @@ interface Props {
   className?: string;
 }
 
+// Props the wrapped control may already carry that we need to preserve when
+// injecting the generated id / description link.
+type ControlProps = {
+  id?: string;
+  "aria-describedby"?: string;
+};
+
 export default function Field({
   label,
   hint,
@@ -18,9 +25,29 @@ export default function Field({
   children,
   className = "",
 }: Props) {
+  // Tie the label to its control programmatically (screen readers, `getByLabel`)
+  // rather than relying on visual proximity. We inject the generated id into a
+  // single element child, preserving any id/aria-describedby it already sets.
+  const generatedId = useId();
+  const hasHint = hint != null && hint !== "";
+  const hintId = hasHint ? `${generatedId}-hint` : undefined;
+
+  let control = children;
+  let controlId = generatedId;
+  if (isValidElement<ControlProps>(children)) {
+    const existing = children.props;
+    controlId = existing.id ?? generatedId;
+    control = cloneElement(children, {
+      id: controlId,
+      "aria-describedby":
+        [existing["aria-describedby"], hintId].filter(Boolean).join(" ") ||
+        undefined,
+    });
+  }
+
   return (
     <div className={cn("space-y-1", className)}>
-      <Label className="text-xs font-semibold">
+      <Label htmlFor={controlId} className="text-xs font-semibold">
         {label}
         {required && (
           <span className="text-destructive ml-0.5" aria-hidden>
@@ -28,8 +55,8 @@ export default function Field({
           </span>
         )}
       </Label>
-      <div>{children}</div>
-      <FieldHint hint={hint} />
+      <div>{control}</div>
+      <FieldHint hint={hint} id={hintId} />
     </div>
   );
 }
@@ -40,23 +67,27 @@ export default function Field({
 // subtle. Single-line strings that still carry Markdown syntax (inline code,
 // bold, links) render inline so the markup isn't shown literally. Plain
 // one-liners keep the tiny hint style. Non-string nodes pass through as-is.
-export function FieldHint({ hint }: { hint?: ReactNode }) {
+export function FieldHint({ hint, id }: { hint?: ReactNode; id?: string }) {
   if (hint == null || hint === "") return null;
   if (typeof hint === "string" && looksLikeMarkdown(hint)) {
     if (hint.includes("\n")) {
       return (
-        <div className="mt-1">
+        <div id={id} className="mt-1">
           <Markdown content={hint} collapsible dense />
         </div>
       );
     }
     return (
-      <p className="text-muted-foreground text-[10px]">
+      <p id={id} className="text-muted-foreground text-[10px]">
         <Markdown content={hint} inline />
       </p>
     );
   }
-  return <p className="text-muted-foreground text-[10px]">{hint}</p>;
+  return (
+    <p id={id} className="text-muted-foreground text-[10px]">
+      {hint}
+    </p>
+  );
 }
 
 // Heuristic: does this string contain Markdown worth rendering rather than
