@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Plus, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -12,7 +12,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import Field, { FieldHint } from "@/components/Field";
+import Field, { FieldHint, ConstraintBadges } from "@/components/Field";
 import type { JsonSchema } from "@/lib/types";
 import { defaultFromSchema } from "@/lib/example-extractor";
 import { humanizeKey } from "@/lib/humanize";
@@ -51,6 +51,7 @@ export default function SchemaField({
   const effective = useMemo(() => mergeAllOf(schema), [schema]);
   const label = name ? humanizeKey(name) : "";
   const hint = effective.description;
+  const meta = <ConstraintBadges schema={effective} />;
 
   // const: render as a read-only label
   if (effective.const !== undefined) {
@@ -87,7 +88,7 @@ export default function SchemaField({
     const current =
       value === undefined || value === null ? "" : String(value);
     return (
-      <Field label={label} hint={hint} required={required}>
+      <Field label={label} hint={hint} required={required} meta={meta}>
         <Select
           value={current}
           onValueChange={(v) => onChange(coerceString(v, effective))}
@@ -129,7 +130,7 @@ export default function SchemaField({
   switch (type) {
     case "boolean":
       return (
-        <Field label={label} hint={hint} required={required}>
+        <Field label={label} hint={hint} required={required} meta={meta}>
           <Checkbox
             checked={!!value}
             onCheckedChange={(c) => onChange(Boolean(c))}
@@ -140,7 +141,7 @@ export default function SchemaField({
     case "integer":
     case "number":
       return (
-        <Field label={label} hint={hint} required={required}>
+        <Field label={label} hint={hint} required={required} meta={meta}>
           <Input
             type="number"
             aria-required={required || undefined}
@@ -169,6 +170,7 @@ export default function SchemaField({
           label={label}
           hint={hint}
           required={required}
+          meta={meta}
         />
       );
     case "object":
@@ -186,7 +188,7 @@ export default function SchemaField({
     case "string":
     default:
       return (
-        <Field label={label} hint={hint} required={required}>
+        <Field label={label} hint={hint} required={required} meta={meta}>
           <Input
             type={inputTypeForFormat(effective.format)}
             aria-required={required || undefined}
@@ -256,6 +258,7 @@ function ArrayField({
   label,
   hint,
   required,
+  meta,
 }: {
   schema: JsonSchema;
   value: unknown;
@@ -263,11 +266,12 @@ function ArrayField({
   label?: string;
   hint?: string;
   required?: boolean;
+  meta?: ReactNode;
 }) {
   const items = Array.isArray(value) ? value : [];
   const itemSchema = schema.items ?? {};
   return (
-    <Field label={label ?? ""} hint={hint} required={required}>
+    <Field label={label ?? ""} hint={hint} required={required} meta={meta}>
       <div className="space-y-2">
         {items.map((item, idx) => (
           <div
