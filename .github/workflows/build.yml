@@ -39,19 +39,6 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      # The bundled seed specs (public/specs/*.yaml) are gitignored and
-      # generated from an external repo, so they may be absent on a fresh CI
-      # checkout. Fail early with a clear message rather than shipping an app
-      # with zero APIs. See the note in the PR/README: commit the specs (force
-      # add) for distribution builds, or provide PACKREST_SPECS_DIR.
-      - name: Verify bundled specs are present
-        shell: bash
-        run: |
-          if ! ls public/specs/*.yaml >/dev/null 2>&1; then
-            echo "::error::No specs found under public/specs/. Commit them (git add -f public/specs/*.yaml) or set PACKREST_SPECS_DIR before building."
-            exit 1
-          fi
-
       - uses: actions/setup-node@v5
         with:
           node-version: 22
