@@ -244,7 +244,7 @@ function NavBody({
         </Section>
       </nav>
       <div className="border-sidebar-border shrink-0 border-t px-3 pt-2 pb-3">
-        <NavFooter appUpdate={updates.app} />
+        <NavFooter appUpdate={updates.app} specsUpdate={updates.specs} />
       </div>
     </div>
   );
@@ -252,7 +252,13 @@ function NavBody({
 
 // App version + which GitLab release the loaded specs came from ("locales" for
 // a local-directory sync), pinned at the bottom of the sidebar.
-function NavFooter({ appUpdate }: { appUpdate: boolean }) {
+function NavFooter({
+  appUpdate,
+  specsUpdate,
+}: {
+  appUpdate: boolean;
+  specsUpdate: boolean;
+}) {
   const version = useAppVersion();
   const specsTag = useSpecsTag();
 
@@ -268,6 +274,14 @@ function NavFooter({ appUpdate }: { appUpdate: boolean }) {
         </Link>
       )}
       <div className="mt-0.5">APIs : {specsTagLabel(specsTag)}</div>
+      {specsUpdate && (
+        <Link
+          href="/settings"
+          className="mt-0.5 block font-medium whitespace-nowrap text-amber-600 hover:underline dark:text-amber-400"
+        >
+          Mise à jour disponible
+        </Link>
+      )}
     </div>
   );
 }
