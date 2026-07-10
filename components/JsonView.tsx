@@ -411,9 +411,7 @@ function BranchRow({
       <div className="flex items-center gap-2 px-1 py-0.5">
         <span className="inline-block w-3.5 shrink-0" aria-hidden />
         <Icon size={11} className="shrink-0 text-slate-500" aria-hidden />
-        {label !== undefined && (
-          <span className={isIndex ? COLOR.index : COLOR.key}>{label}</span>
-        )}
+        {label !== undefined && <KeyLabel label={label} isIndex={isIndex} />}
         <span className="text-[11px] italic text-slate-500">
           {isArray ? "tableau vide" : "objet vide"}
         </span>
@@ -442,9 +440,7 @@ function BranchRow({
           className={`shrink-0 ${isArray ? "text-violet-400" : "text-sky-400"}`}
           aria-hidden
         />
-        {label !== undefined && (
-          <span className={isIndex ? COLOR.index : COLOR.key}>{label}</span>
-        )}
+        {label !== undefined && <KeyLabel label={label} isIndex={isIndex} />}
         <span className="text-[10px] uppercase tracking-wider text-slate-500">
           {meta}
         </span>
