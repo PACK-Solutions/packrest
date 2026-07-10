@@ -91,7 +91,7 @@ export default function Home() {
                 chemin source dans{" "}
                 <Link
                   href="/settings"
-                  className="text-primary underline-offset-2 hover:underline"
+                  className="text-primary underline underline-offset-2"
                 >
                   Paramètres
                 </Link>

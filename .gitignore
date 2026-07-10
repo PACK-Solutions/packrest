@@ -6,6 +6,12 @@ out
 # Playwright MCP session artifacts
 .playwright-mcp/
 
+# Playwright test artifacts (baselines under tests/**/-snapshots are committed)
+test-results/
+playwright-report/
+blob-report/
+playwright/.cache/
+
 # Tauri
 /src-tauri/target
 /src-tauri/gen/schemas
