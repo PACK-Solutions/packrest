@@ -117,9 +117,24 @@ function flattenInto(
   out[prefix || "valeur"] = formatLeaf(value);
 }
 
+// Identity/key fields a product owner scans for first; everything else falls
+// back to alphabetical. Matched against a column's first path segment, so only a
+// genuine top-level field is promoted (a nested `customer.id` is not).
+const PRIORITY_KEYS = ["id", "name", "nom", "code", "label", "libelle", "libellé", "title", "titre"];
+
+// Rank a flattened column by its first path segment: a priority index for
+// identity fields, else PRIORITY_KEYS.length so non-identity columns sort after.
+function columnRank(col: string): number {
+  const first = col.split(".")[0].toLowerCase();
+  const i = PRIORITY_KEYS.indexOf(first);
+  return i === -1 ? PRIORITY_KEYS.length : i;
+}
+
 // Turn a parsed response body into a flat table. An array becomes one row per
-// element; anything else becomes a single row. Columns are the ordered union of
-// keys seen across rows (first-seen order); missing cells stay blank.
+// element; anything else becomes a single row. Columns are the union of keys
+// seen across rows, ordered identity fields first, then alphabetically — nested
+// groups stay contiguous (the `.` separator sorts ahead of digits/letters) and
+// array indices order numerically (`.2` before `.10`); missing cells stay blank.
 export function flattenToRows(body: unknown): FlatTable {
   const clean = sanitizeForExport(body);
   const records: unknown[] = Array.isArray(clean) ? clean : [clean];
@@ -138,6 +153,12 @@ export function flattenToRows(body: unknown): FlatTable {
       }
     }
   }
+  columns.sort((a, b) => {
+    const ra = columnRank(a);
+    const rb = columnRank(b);
+    if (ra !== rb) return ra - rb;
+    return a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" });
+  });
   return { columns, rows };
 }
 
