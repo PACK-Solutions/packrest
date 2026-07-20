@@ -1,11 +1,13 @@
-// Server-side URL allowlist consumed by /api/proxy and /api/token to
-// prevent SSRF — without it, anyone who can POST to those routes can
-// pivot the server onto internal services (Redis, AWS metadata, etc.).
+// URL allowlist for the client-side token + proxy calls (lib/token.ts,
+// lib/http.ts) — the SSRF guard those credentialed requests still need now that
+// they run straight through the Tauri HTTP plugin instead of a server route.
 //
-// Hosts are matched by suffix so subdomains of the trusted vendors are
-// covered. Private / loopback / link-local addresses are rejected before
-// the suffix check; that closes the rebinding angle where DNS resolves an
-// allowed name to 127.0.0.1.
+// Hosts are matched by suffix so subdomains of the trusted vendors are covered.
+// Private / loopback / link-local IP *literals* (in any notation) are also
+// rejected. NOTE: this inspects the URL string only — it does not resolve DNS,
+// so a name that RESOLVES to a private IP (true DNS rebinding) is not caught
+// here. The suffix allowlist is the load-bearing control; the literal check is
+// defence-in-depth against IP-literal SSRF.
 
 const ALLOWED_HOST_SUFFIXES = [
   "pack-solutions.com",
@@ -29,15 +31,15 @@ export function checkUrl(urlStr: string): UrlCheck {
   } catch {
     return { ok: false, reason: "URL invalide" };
   }
-  if (url.protocol !== "https:" && url.protocol !== "http:") {
+  if (url.protocol !== "https:") {
     return {
       ok: false,
       reason: `Protocole non autorisé : ${url.protocol}`,
     };
   }
-  // Anti-SSRF: refuse private / loopback / link-local addresses before
-  // checking the suffix, so a hostile DNS pointing `*.pack-solutions.com`
-  // at 127.0.0.1 still gets rejected.
+  // Defence-in-depth: reject private / loopback / link-local IP *literals* (in
+  // any notation) before the suffix check. This does not resolve DNS, so it
+  // cannot stop a name resolving to a private IP — the allowlist does that.
   if (isPrivateOrLocal(url.hostname)) {
     return {
       ok: false,
@@ -59,20 +61,77 @@ export function checkUrl(urlStr: string): UrlCheck {
 
 function isPrivateOrLocal(hostname: string): boolean {
   const h = hostname.toLowerCase().replace(/^\[|\]$/g, "");
-  if (h === "localhost" || h === "ip6-localhost") return true;
+  if (h === "" || h === "localhost" || h === "ip6-localhost") return true;
+
+  // IPv6 loopback / unspecified / unique-local / link-local.
   if (h === "::1" || h === "0:0:0:0:0:0:0:1") return true;
-  if (h === "0.0.0.0") return true;
-  // IPv4 private / loopback / link-local
-  if (/^127\./.test(h)) return true;
-  if (/^10\./.test(h)) return true;
-  if (/^192\.168\./.test(h)) return true;
-  if (/^172\.(1[6-9]|2\d|3[01])\./.test(h)) return true;
-  if (/^169\.254\./.test(h)) return true; // includes 169.254.169.254 (AWS metadata)
-  // IPv6 unique-local / link-local / loopback
+  if (h === "::" || h === "0:0:0:0:0:0:0:0") return true;
   if (/^fe80:/i.test(h)) return true;
-  if (/^fc[0-9a-f]{2}:/i.test(h)) return true;
-  if (/^fd[0-9a-f]{2}:/i.test(h)) return true;
+  if (/^f[cd][0-9a-f]{2}:/i.test(h)) return true;
+  // IPv4-mapped / -compatible IPv6 (e.g. ::ffff:169.254.169.254, ::ffff:7f00:1):
+  // pull out the embedded IPv4 and re-check it.
+  const mapped = /^::(?:ffff:)?([0-9a-f.:]+)$/i.exec(h);
+  if (mapped) {
+    const inner = mapped[1];
+    if (inner.includes(".")) {
+      if (isPrivateIPv4(inner)) return true;
+    } else {
+      const g = inner.split(":").filter(Boolean);
+      if (g.length === 2) {
+        const hi = parseInt(g[0], 16);
+        const lo = parseInt(g[1], 16);
+        if (Number.isFinite(hi) && Number.isFinite(lo)) {
+          const ip = (((hi << 16) | lo) >>> 0);
+          if (isPrivateIPv4Num(ip)) return true;
+        }
+      }
+    }
+  }
+
+  return isPrivateIPv4(h);
+}
+
+// Parse an IPv4 in any of the notations a C resolver (inet_aton) accepts:
+// dotted decimal, dotted hex/octal, short forms (127.1), or a single 32-bit
+// integer (2130706433, 0x7f000001). Returns the packed address, or null when
+// `s` is not numeric-IPv4-shaped (i.e. an ordinary hostname).
+function parseIPv4(s: string): number | null {
+  const parts = s.split(".");
+  if (parts.length < 1 || parts.length > 4) return null;
+  const nums: number[] = [];
+  for (const p of parts) {
+    let n: number;
+    if (/^0x[0-9a-f]+$/i.test(p)) n = parseInt(p, 16);
+    else if (/^0[0-7]+$/.test(p)) n = parseInt(p, 8);
+    else if (/^(0|[1-9]\d*)$/.test(p)) n = parseInt(p, 10);
+    else return null;
+    if (!Number.isFinite(n) || n < 0) return null;
+    nums.push(n);
+  }
+  const last = nums.length - 1;
+  for (let i = 0; i < last; i++) if (nums[i] > 255) return null;
+  if (nums[last] >= Math.pow(256, 4 - last)) return null;
+  let ip = 0;
+  for (let i = 0; i < last; i++) ip += nums[i] * Math.pow(256, 3 - i);
+  ip += nums[last];
+  return ip >>> 0;
+}
+
+function isPrivateIPv4Num(ip: number): boolean {
+  const a = (ip >>> 24) & 0xff;
+  const b = (ip >>> 16) & 0xff;
+  if (a === 0) return true; // 0.0.0.0/8 (includes the bare 0 / 0.0.0.0)
+  if (a === 10) return true; // 10.0.0.0/8
+  if (a === 127) return true; // 127.0.0.0/8 loopback
+  if (a === 169 && b === 254) return true; // 169.254.0.0/16 (AWS metadata)
+  if (a === 172 && b >= 16 && b <= 31) return true; // 172.16.0.0/12
+  if (a === 192 && b === 168) return true; // 192.168.0.0/16
   return false;
+}
+
+function isPrivateIPv4(s: string): boolean {
+  const ip = parseIPv4(s);
+  return ip !== null && isPrivateIPv4Num(ip);
 }
 
 // Allowlist of headers forwarded to the upstream by /api/proxy.

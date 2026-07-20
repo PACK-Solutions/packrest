@@ -18,6 +18,7 @@ import {
 } from "./url-policy";
 import {
   tauriFetchWithTimeout,
+  type TauriRequestInit,
   FetchTimeoutError,
   bytesToBase64,
   base64ToBytes,
@@ -132,7 +133,13 @@ export async function executeRequest(opts: {
     headers["User-Agent"] = "PackRest/0.1 (+https://pack-solutions.com)";
   }
 
-  const init: RequestInit = { method: method.toUpperCase(), headers };
+  // maxRedirections: 0 — the proxied request carries the user's bearer token;
+  // following a redirect would leak it to the redirect target and skip checkUrl.
+  const init: TauriRequestInit = {
+    method: method.toUpperCase(),
+    headers,
+    maxRedirections: 0,
+  };
   const multipartSummary = applyRequestBody(init, headers, method, body, multipart);
 
   const start = Date.now();

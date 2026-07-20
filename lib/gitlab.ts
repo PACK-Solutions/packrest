@@ -81,8 +81,78 @@ function projectApiBase(g: ResolvedGitlab): string {
   return `${g.host}/api/v4/projects/${encodeURIComponent(g.projectPath)}`;
 }
 
+// Per-entry decompressed-size ceiling for the release zip (decompression-bomb
+// guard). OpenAPI bundles are text and sit comfortably under this.
+const MAX_UNZIP_ENTRY_BYTES = 32 * 1024 * 1024;
+
+// Hosts allowed to serve a release's bundle.zip. The configured GitLab host
+// hands out the asset URL, which typically 3xx-redirects to object storage for
+// the bytes. Anything outside this set is refused so a malicious release can't
+// point an asset URL — or a redirect hop — at an arbitrary host and harvest the
+// PRIVATE-TOKEN.
+const ASSET_HOST_SUFFIXES = ["gitlab.com", "amazonaws.com", "googleapis.com"];
+
+function sameHost(a: string, b: string): boolean {
+  try {
+    return (
+      new URL(a).hostname.toLowerCase() === new URL(b).hostname.toLowerCase()
+    );
+  } catch {
+    return false;
+  }
+}
+
+function assetHostAllowed(urlStr: string, gitlabHost: string): boolean {
+  let u: URL;
+  try {
+    u = new URL(urlStr);
+  } catch {
+    return false;
+  }
+  if (u.protocol !== "https:") return false;
+  if (sameHost(urlStr, gitlabHost)) return true;
+  const host = u.hostname.toLowerCase();
+  return ASSET_HOST_SUFFIXES.some((s) => host === s || host.endsWith("." + s));
+}
+
+// JSON API calls to the GitLab host. maxRedirections: 0 — the API answers
+// directly; a redirect must not silently carry the PRIVATE-TOKEN elsewhere.
 function gitlabFetch(url: string, token: string): Promise<Response> {
-  return tauriFetch(url, { headers: { "PRIVATE-TOKEN": token } });
+  return tauriFetch(url, {
+    headers: { "PRIVATE-TOKEN": token },
+    maxRedirections: 0,
+  });
+}
+
+// Download a release asset, following redirects manually so every hop is
+// re-validated against the allowlist and the PRIVATE-TOKEN is sent ONLY to the
+// GitLab host (pre-signed storage URLs neither need it nor should receive it).
+async function downloadAsset(
+  url: string,
+  token: string,
+  gitlabHost: string,
+): Promise<Response> {
+  let current = url;
+  for (let hop = 0; hop < 5; hop++) {
+    if (!assetHostAllowed(current, gitlabHost)) {
+      throw new GitlabError(
+        `Hôte de téléchargement non autorisé : ${current}`,
+        400,
+      );
+    }
+    const headers: Record<string, string> = sameHost(current, gitlabHost)
+      ? { "PRIVATE-TOKEN": token }
+      : {};
+    const res = await tauriFetch(current, { headers, maxRedirections: 0 });
+    if (res.status >= 300 && res.status < 400) {
+      const loc = res.headers.get("location");
+      if (!loc) return res;
+      current = new URL(loc, current).toString();
+      continue;
+    }
+    return res;
+  }
+  throw new GitlabError("Trop de redirections lors du téléchargement.", 502);
 }
 
 async function toError(res: Response, fallback: string): Promise<GitlabError> {
@@ -198,7 +268,7 @@ export async function syncFromGitlab(tag: string): Promise<GitlabSyncResult> {
   let buf: ArrayBuffer | null = null;
   let lastStatus = 0;
   for (const url of bundle.urls) {
-    const res = await gitlabFetch(url, g.token);
+    const res = await downloadAsset(url, g.token, g.host);
     if (res.ok) {
       buf = await res.arrayBuffer();
       break;
@@ -236,18 +306,24 @@ async function extractBundle(
   bundleName: string,
   zipped: Uint8Array,
 ): Promise<GitlabSyncResult> {
+  // Only inflate entries we recognise and that stay within a sane size, so a
+  // crafted archive (a decompression bomb, or a few enormous entries) can't
+  // exhaust memory before we even look at it.
+  const NESTED = /(?:^|\/)([^/]+)\/v1\/openapi\.bundle\.ya?ml$/i;
+  const FLAT = /^([^/]+)\.ya?ml$/i;
   let files: Record<string, Uint8Array>;
   try {
-    files = unzipSync(zipped);
+    files = unzipSync(zipped, {
+      filter: (f) =>
+        f.originalSize <= MAX_UNZIP_ENTRY_BYTES &&
+        (NESTED.test(f.name) || FLAT.test(f.name)),
+    });
   } catch (err) {
     throw new GitlabError(
       `Archive ${bundleName} illisible : ${(err as Error).message}`,
       502,
     );
   }
-
-  const NESTED = /(?:^|\/)([^/]+)\/v1\/openapi\.bundle\.ya?ml$/i;
-  const FLAT = /^([^/]+)\.ya?ml$/i;
   const picked = new Map<string, { content: Uint8Array; priority: number }>();
   const decoder = new TextDecoder();
 
@@ -258,7 +334,16 @@ async function extractBundle(
     const match = nested ?? flat;
     if (!match) continue;
     const api = match[1];
-    if (api === "." || api === "..") continue;
+    // Reject any name that isn't a plain identifier: `[^/]+` already blocks
+    // forward slashes, but backslashes / `..` sequences could still traverse
+    // once joined into the spec path (esp. on Windows). writeSpecFile trusts us.
+    if (
+      api === "." ||
+      api === ".." ||
+      api.includes("..") ||
+      !/^[A-Za-z0-9._-]+$/.test(api)
+    )
+      continue;
     const priority = nested ? 2 : 1;
     const existing = picked.get(api);
     if (!existing || priority > existing.priority) {

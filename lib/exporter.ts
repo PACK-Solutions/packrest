@@ -1,10 +1,10 @@
-// Save generated files (Bruno .zip / .yml) to disk. In Tauri: a native save
-// dialog picks the destination and the bytes are written via the `write_file`
-// Rust command (arbitrary path, outside the fs-plugin scope). Outside Tauri:
-// a Blob + anchor download.
+// Save generated files (Bruno .zip / .yml) to disk. In Tauri: the native save
+// dialog is opened inside the Rust `save_file` command (so the destination path
+// is chosen by the OS dialog, never by the webview) and the bytes are written
+// there. Outside Tauri: a Blob + anchor download.
 
 import { isTauri } from "./platform";
-import { pickSavePath, type SaveFilter } from "./dialog";
+import { type SaveFilter } from "./dialog";
 
 // Returns true when saved, false when the user cancelled.
 export async function saveBytes(
@@ -13,11 +13,15 @@ export async function saveBytes(
   filters?: SaveFilter[],
 ): Promise<boolean> {
   if (isTauri()) {
-    const path = await pickSavePath(defaultName, filters);
-    if (!path) return false;
     const { invoke } = await import("@tauri-apps/api/core");
-    await invoke("write_file", { path, contents: Array.from(bytes) });
-    return true;
+    // The dialog lives in the Rust command; it returns the chosen path, or null
+    // when the user cancelled.
+    const path = await invoke<string | null>("save_file", {
+      defaultName,
+      filters: filters ?? [],
+      contents: Array.from(bytes),
+    });
+    return path != null;
   }
   const blob = new Blob([bytes as BlobPart]);
   const url = URL.createObjectURL(blob);
