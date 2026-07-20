@@ -539,19 +539,34 @@ function OneOfField({
   discriminator?: string;
 }) {
   const tags = variants.map((v, i) => discriminatorLabel(v, discriminator, i));
-  const currentIdx = useMemo(() => {
-    if (!discriminator) return 0;
+  // Index derived from the value's discriminator, or -1 when there's no
+  // discriminator / no match. -1 (not 0) lets us tell "no info" apart from
+  // "matched variant 0" so a discriminator-less pick isn't reset below.
+  const derivedIdx = useMemo(() => {
+    if (!discriminator) return -1;
     const obj = value as Record<string, unknown> | null;
     const current = obj?.[discriminator];
-    if (current === undefined) return 0;
-    const idx = variants.findIndex((v) => {
+    if (current === undefined) return -1;
+    return variants.findIndex((v) => {
       const disc = v.properties?.[discriminator];
       return disc?.const === current || disc?.enum?.includes(current as never);
     });
-    return idx >= 0 ? idx : 0;
   }, [value, variants, discriminator]);
 
-  const chosen = variants[currentIdx];
+  // Selection is local state: many variants carry no matchable discriminator
+  // (e.g. FATCA), so the rendered branch can't be re-derived from the value —
+  // clicking a tag must drive the switch directly.
+  const [selectedIdx, setSelectedIdx] = useState(derivedIdx >= 0 ? derivedIdx : 0);
+  // Adopt a positive external match (import seed, HAL nav). Guarded on >= 0 so
+  // a discriminator-less variant switch isn't clobbered back to 0.
+  useEffect(() => {
+    if (derivedIdx >= 0 && derivedIdx !== selectedIdx) setSelectedIdx(derivedIdx);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [derivedIdx]);
+
+  // Fallback guards a stale index if the instance is reused with a shorter
+  // `variants` array (avoids rendering SchemaField with an undefined schema).
+  const chosen = variants[selectedIdx] ?? variants[0];
   return (
     <Field label={label} hint={hint} required={required}>
       <div className="space-y-3">
@@ -560,10 +575,13 @@ function OneOfField({
             <button
               key={i}
               type="button"
-              onClick={() => onChange(defaultFromSchema(variants[i]))}
+              onClick={() => {
+                setSelectedIdx(i);
+                onChange(defaultFromSchema(variants[i]));
+              }}
               className={cn(
                 "rounded-full px-3 py-1 text-xs font-semibold transition-colors",
-                i === currentIdx
+                i === selectedIdx
                   ? "bg-primary text-primary-foreground shadow-xs"
                   : "bg-muted text-foreground hover:bg-accent",
               )}
