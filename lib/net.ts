@@ -6,9 +6,14 @@
 
 import { isTauri } from "./platform";
 
+// tauri-plugin-http extends the standard RequestInit with a few client options;
+// `maxRedirections` is the one we use to stop credential-bearing requests from
+// silently following redirects (which would bypass checkUrl and can leak the
+// Authorization header to the redirect target).
+export type TauriRequestInit = RequestInit & { maxRedirections?: number };
 export async function tauriFetch(
   input: string,
-  init?: RequestInit,
+  init?: TauriRequestInit,
 ): Promise<Response> {
   if (isTauri()) {
     const { fetch: httpFetch } = await import("@tauri-apps/plugin-http");
@@ -42,7 +47,7 @@ export interface TimedFetch {
 // as the caller signals the body has been read via `done()`.
 export async function tauriFetchWithTimeout(
   input: string,
-  init: RequestInit,
+  init: TauriRequestInit,
   timeoutMs: number,
 ): Promise<TimedFetch> {
   const controller = new AbortController();

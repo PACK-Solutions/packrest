@@ -15,11 +15,6 @@ export interface SaveFilter {
   extensions: string[];
 }
 
-export async function pickSavePath(
-  defaultName: string,
-  filters?: SaveFilter[],
-): Promise<string | null> {
-  if (!isTauri()) return null;
-  const { save } = await import("@tauri-apps/plugin-dialog");
-  return (await save({ defaultPath: defaultName, filters })) ?? null;
-}
+// Note: saving files goes through the Rust `save_file` command (see
+// lib/exporter.ts), which opens the save dialog itself so the destination path
+// is never chosen by the webview. SaveFilter above is the shape it expects.

@@ -58,6 +58,10 @@ export async function fetchToken(opts: {
         Origin: check.url.origin,
       },
       body: form.toString(),
+      // The token endpoint must never redirect us elsewhere: following a
+      // redirect would carry the Basic client_secret to the redirect target
+      // and bypass checkUrl. Treat any 3xx as an error instead.
+      maxRedirections: 0,
     },
     30_000,
   );
