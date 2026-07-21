@@ -192,7 +192,13 @@ export default function SchemaField({
           <Input
             type={inputTypeForFormat(effective.format)}
             aria-required={required || undefined}
-            value={value === null || value === undefined ? "" : String(value)}
+            value={
+              value === null || value === undefined
+                ? ""
+                : effective.format === "date-time"
+                  ? toDatetimeLocal(String(value))
+                  : String(value)
+            }
             minLength={effective.minLength}
             maxLength={effective.maxLength}
             pattern={effective.pattern}
@@ -200,7 +206,8 @@ export default function SchemaField({
             // (`undefined` → JSON.stringify drops the key), not send `""`.
             onChange={(e) => {
               const v = e.target.value;
-              onChange(v === "" && !required ? undefined : v);
+              if (v === "") return onChange(required ? "" : undefined);
+              onChange(effective.format === "date-time" ? toInstant(v) : v);
             }}
           />
         </Field>
@@ -513,10 +520,19 @@ function MapValueInput({
     <Input
       type={inputTypeForFormat(schema.format)}
       aria-label={ariaLabel}
-      value={value === null || value === undefined ? "" : String(value)}
+      value={
+        value === null || value === undefined
+          ? ""
+          : schema.format === "date-time"
+            ? toDatetimeLocal(String(value))
+            : String(value)
+      }
       maxLength={schema.maxLength}
       placeholder="valeur"
-      onChange={(e) => onChange(e.target.value)}
+      onChange={(e) => {
+        const v = e.target.value;
+        onChange(schema.format === "date-time" ? toInstant(v) : v);
+      }}
     />
   );
 }
@@ -627,6 +643,25 @@ function inputTypeForFormat(format?: string): string {
     default:
       return "text";
   }
+}
+
+// <input type="datetime-local"> yields "YYYY-MM-DDTHH:mm" (no zone) — too short
+// to parse as an ISO-8601 Instant. Interpret it as LOCAL time (JS parses a
+// zoneless datetime string as local) and store the equivalent UTC instant.
+function toInstant(local: string): string {
+  if (!local) return local;
+  const d = new Date(local);
+  if (Number.isNaN(d.getTime())) return local; // leave unparseable input alone
+  return d.toISOString().replace(/\.\d{3}Z$/, "Z"); // drop millis: …:00Z
+}
+
+// Convert a stored UTC instant back to the picker's LOCAL "YYYY-MM-DDTHH:mm"
+// (also handles a spec example already in full ISO form).
+function toDatetimeLocal(value: string): string {
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return value;
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 
 function coerceString(raw: string, schema: JsonSchema): unknown {
