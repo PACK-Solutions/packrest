@@ -120,9 +120,12 @@ export async function executeRequest(opts: {
   headers?: Record<string, string>;
   body?: string | object | null;
   multipart?: MultipartPayload;
+  // When true (active env is custom), http:// and a localhost dev server are
+  // permitted by the URL policy.
+  custom?: boolean;
 }): Promise<ProxyResponse> {
-  const { method, url, headers: rawHeaders = {}, body, multipart } = opts;
-  const urlCheck = checkUrl(url);
+  const { method, url, headers: rawHeaders = {}, body, multipart, custom } = opts;
+  const urlCheck = checkUrl(url, { custom });
   if (!urlCheck.ok) throw new Error(urlCheck.reason);
 
   const headers = filterForwardHeaders(rawHeaders);

@@ -40,6 +40,7 @@ test.describe("Topbar tools", () => {
     await badge.click();
     await expect(page.getByRole("menuitemradio", { name: /Dev \(Gravitee\)/ })).toBeVisible();
     await expect(page.getByRole("menuitemradio", { name: /Recette \(Gravitee\)/ })).toBeVisible();
-    await expect(page.getByRole("menuitemradio", { name: "Personnalisé" })).toBeVisible();
+    // Custom envs are opt-in (created in Settings), so a fresh app lists only
+    // the two built-in presets.
   });
 });

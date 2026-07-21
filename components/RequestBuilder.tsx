@@ -28,6 +28,7 @@ import {
 } from "@/components/ui/select";
 import {
   loadSettings,
+  customEnvById,
   SETTINGS_CHANGED_EVENT,
   type SavedHeader,
 } from "@/lib/storage";
@@ -107,7 +108,13 @@ export default function RequestBuilder(props: Props) {
       const s = loadSettings();
       setEnvironment(s.environment);
       setBaseUrl(
-        resolveBaseUrl(apiId, s.environment, s.baseUrl, defaultBaseUrl, s.apiPaths),
+        resolveBaseUrl(
+          apiId,
+          s.environment,
+          customEnvById(s, s.environment)?.baseUrl ?? "",
+          defaultBaseUrl,
+          s.apiPaths,
+        ),
       );
     };
     sync();

@@ -89,6 +89,40 @@ export interface StatusToken {
   textStrong: string;
 }
 
+// --- custom-environment colors ---------------------------------------------
+
+// Swatches offered by the custom-env color picker; also the pool
+// `defaultEnvColor` cycles through so successive new envs differ.
+export const ENV_COLOR_SWATCHES = [
+  "#6366f1", // indigo
+  "#0ea5e9", // sky
+  "#10b981", // emerald
+  "#f59e0b", // amber
+  "#ef4444", // red
+  "#ec4899", // pink
+  "#8b5cf6", // violet
+  "#14b8a6", // teal
+  "#64748b", // slate
+];
+
+// Default color for the Nth custom env (cycles the palette).
+export function defaultEnvColor(index: number): string {
+  return ENV_COLOR_SWATCHES[index % ENV_COLOR_SWATCHES.length];
+}
+
+// Black or white text for legibility on a solid hex background (simple sRGB
+// luminance threshold). Falls back to white for malformed input.
+export function readableTextColor(hex: string): string {
+  const m = /^#?([0-9a-f]{6})$/i.exec(hex.trim());
+  if (!m) return "#ffffff";
+  const n = parseInt(m[1], 16);
+  const r = (n >> 16) & 0xff;
+  const g = (n >> 8) & 0xff;
+  const b = n & 0xff;
+  const lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+  return lum > 0.6 ? "#000000" : "#ffffff";
+}
+
 export const TONE: Record<StatusTone, StatusToken> = {
   neutral: {
     tone: "neutral",

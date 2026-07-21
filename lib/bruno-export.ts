@@ -2,7 +2,7 @@
 // (opencollection 1.0.0) tree, mirroring the layout of ../openapi/bruno:
 //
 //   <api>/v1/opencollection.yml
-//   <api>/v1/environments/{Dev,Rec}.yml
+//   <api>/v1/environments/{Dev,Rec,…}.yml
 //   <api>/v1/<tag>/folder.yml
 //   <api>/v1/<tag>/<Request name>.yml
 //
@@ -27,6 +27,7 @@ import {
   type BrunoRequest,
 } from "./bruno";
 import type { OpenApiDocument } from "./types";
+import { loadSettings, type CustomEnv } from "./storage";
 
 export interface BrunoCollectionFiles {
   /** Base directory the files should live under in the zip, e.g. "contract/v1". */
@@ -63,6 +64,17 @@ export async function buildBrunoCollection(
   files["environments/Rec.yml"] = serializeEnvironmentYml(
     environmentFor(apiId, "rec", doc),
   );
+
+  // One file per user-defined custom environment (Settings). Names are made
+  // filesystem-safe and de-duplicated against Dev/Rec and each other. The
+  // client secret is never written out — kept as an env-var reference.
+  const usedEnvNames = new Set(["Dev", "Rec"]);
+  for (const custom of loadSettings().customEnvs) {
+    const envName = uniqueName(usedEnvNames, safeSegment(custom.name));
+    files[`environments/${envName}.yml`] = serializeEnvironmentYml(
+      customEnvironmentFor(custom, doc, envName),
+    );
+  }
 
   // One folder per tag, preserving discovery order.
   const byTag = new Map<string, EndpointEntry[]>();
@@ -153,6 +165,32 @@ function environmentFor(
       { name: "host", value: ENV_PRESETS[env].host },
       { name: "baseUrl", value: resolveBaseUrl(apiId, env, "", specDefault) },
       { name: "oauth_client_id", value: "pack-solutions" },
+      {
+        name: "oauth_client_secret",
+        value: "{{process.env.OAUTH_CLIENT_SECRET}}",
+      },
+      { name: "oauth_token_url", value: tokenUrl },
+      { name: "oauth_refresh_url", value: tokenUrl },
+    ],
+  };
+}
+
+function customEnvironmentFor(
+  env: CustomEnv,
+  doc: OpenApiDocument,
+  name: string,
+): BrunoEnvironment {
+  const specDefault = doc.servers?.[0]?.url ?? "";
+  const specTokenUrl =
+    extractOAuth2(doc)?.flows.clientCredentials?.tokenUrl ?? "";
+  const baseUrl = env.baseUrl || specDefault;
+  const tokenUrl = env.tokenUrl || specTokenUrl;
+  return {
+    name,
+    variables: [
+      { name: "host", value: baseUrl },
+      { name: "baseUrl", value: baseUrl },
+      { name: "oauth_client_id", value: env.clientId || "pack-solutions" },
       {
         name: "oauth_client_secret",
         value: "{{process.env.OAUTH_CLIENT_SECRET}}",

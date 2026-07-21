@@ -14,56 +14,83 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { ENV_OPTIONS, ENV_PRESETS, type EnvName } from "@/lib/env";
+import {
+  PRESET_IDS,
+  ENV_PRESETS,
+  isPreset,
+  type EnvId,
+  type EnvPresetName,
+} from "@/lib/env";
 import {
   loadSettings,
   saveSettings,
   SETTINGS_CHANGED_EVENT,
+  type CustomEnv,
 } from "@/lib/storage";
 import { clearToken } from "@/lib/token";
 import { cn } from "@/lib/utils";
+import { readableTextColor } from "@/lib/design";
 
 type BadgeTone = "info" | "warn" | "neutral";
 
-// Short uppercase label for the topbar badge; the full preset label goes in
-// the dropdown items.
-const SHORT_LABEL: Record<EnvName, string> = {
+// Short uppercase label for the topbar badge; the full label goes in the
+// dropdown items. Presets are fixed; a custom env uses its (truncated) name.
+const PRESET_SHORT: Record<EnvPresetName, string> = {
   dev: "DEV",
   rec: "RECETTE",
-  custom: "PERSO",
 };
 
-const TONE: Record<EnvName, BadgeTone> = {
+const PRESET_TONE: Record<EnvPresetName, BadgeTone> = {
   dev: "info",
   rec: "warn",
-  custom: "neutral",
 };
 
-function fullLabel(env: EnvName): string {
-  return env === "custom" ? "Personnalisé" : ENV_PRESETS[env].label;
+function fullLabel(env: EnvId, customEnvs: CustomEnv[]): string {
+  if (isPreset(env)) return ENV_PRESETS[env].label;
+  return customEnvs.find((e) => e.id === env)?.name ?? "Personnalisé";
+}
+
+function shortLabel(env: EnvId, customEnvs: CustomEnv[]): string {
+  if (isPreset(env)) return PRESET_SHORT[env];
+  const name = customEnvs.find((e) => e.id === env)?.name?.trim();
+  return (name || "Perso").toUpperCase().slice(0, 10);
+}
+
+function tone(env: EnvId): BadgeTone {
+  return isPreset(env) ? PRESET_TONE[env] : "neutral";
+}
+
+// The custom env's badge color (undefined for presets, which use tones).
+function envColor(env: EnvId, customEnvs: CustomEnv[]): string | undefined {
+  if (isPreset(env)) return undefined;
+  return customEnvs.find((e) => e.id === env)?.color;
 }
 
 // Always-visible environment indicator that doubles as a quick-switcher.
 // Reads the active environment from settings and re-syncs on
 // SETTINGS_CHANGED_EVENT so it stays in step with the Settings page.
 export function EnvSwitcher() {
-  const [environment, setEnvironment] = React.useState<EnvName>("dev");
+  const [settings, setSettings] = React.useState(loadSettings);
 
   React.useEffect(() => {
-    const sync = () => setEnvironment(loadSettings().environment);
+    const sync = () => setSettings(loadSettings());
     sync();
     window.addEventListener(SETTINGS_CHANGED_EVENT, sync);
     return () => window.removeEventListener(SETTINGS_CHANGED_EVENT, sync);
   }, []);
 
+  const environment = settings.environment;
+  const customEnvs = settings.customEnvs;
+  const activeColor = envColor(environment, customEnvs);
+
   // Switching mirrors the Settings save logic: a token is issued by (and valid
   // only for) one environment's auth server, so drop the cached one on change.
-  const switchTo = (env: EnvName) => {
+  const switchTo = (env: EnvId) => {
     const s = loadSettings();
     if (s.environment === env) return;
     saveSettings({ ...s, environment: env });
     clearToken();
-    toast.success(`Environnement : ${fullLabel(env)}`);
+    toast.success(`Environnement : ${fullLabel(env, s.customEnvs)}`);
   };
 
   return (
@@ -75,14 +102,23 @@ export function EnvSwitcher() {
       <DropdownMenuTrigger asChild>
         <Badge
           asChild
-          variant={TONE[environment]}
-          aria-label={`Environnement actif : ${fullLabel(environment)}. Cliquer pour changer.`}
+          variant={activeColor ? "outline" : tone(environment)}
+          style={
+            activeColor
+              ? {
+                  backgroundColor: activeColor,
+                  borderColor: activeColor,
+                  color: readableTextColor(activeColor),
+                }
+              : undefined
+          }
+          aria-label={`Environnement actif : ${fullLabel(environment, customEnvs)}. Cliquer pour changer.`}
         >
           <button
             type="button"
             className="cursor-pointer font-bold uppercase tracking-wide"
           >
-            {SHORT_LABEL[environment]}
+            {shortLabel(environment, customEnvs)}
             <ChevronDown className="opacity-70" />
           </button>
         </Badge>
@@ -92,15 +128,23 @@ export function EnvSwitcher() {
         <DropdownMenuSeparator />
         <DropdownMenuRadioGroup
           value={environment}
-          onValueChange={(v) => switchTo(v as EnvName)}
+          onValueChange={(v) => switchTo(v as EnvId)}
         >
-          {ENV_OPTIONS.map((env) => (
+          {[...PRESET_IDS, ...customEnvs.map((e) => e.id)].map((env) => (
             <DropdownMenuRadioItem
               key={env}
               value={env}
               className={cn(env === environment && "font-semibold")}
             >
-              {fullLabel(env)}
+              <span className="flex items-center gap-1.5">
+                {envColor(env, customEnvs) && (
+                  <span
+                    className="size-2.5 shrink-0 rounded-full"
+                    style={{ backgroundColor: envColor(env, customEnvs) }}
+                  />
+                )}
+                {fullLabel(env, customEnvs)}
+              </span>
             </DropdownMenuRadioItem>
           ))}
         </DropdownMenuRadioGroup>

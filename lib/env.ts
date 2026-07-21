@@ -3,8 +3,16 @@
 // where each API is served under its own path. We surface dev and rec as
 // named presets so the user doesn't have to remember the exact host.
 
-export type EnvName = "dev" | "rec" | "custom";
-export type EnvPresetName = Exclude<EnvName, "custom">;
+// An environment identifier: either a built-in preset name ("dev" | "rec") or
+// a user-defined custom environment's id. Custom envs are named, plural, and
+// managed in Settings (see CustomEnv in lib/storage.ts).
+export type EnvId = string;
+export type EnvPresetName = "dev" | "rec";
+
+// True when the id names a built-in preset (as opposed to a custom env id).
+export function isPreset(id: string): id is EnvPresetName {
+  return id === "dev" || id === "rec";
+}
 
 export interface EnvPreset {
   id: EnvPresetName;
@@ -57,7 +65,7 @@ export const ENV_PRESETS: Record<EnvPresetName, EnvPreset> = {
   },
 };
 
-export const ENV_OPTIONS: EnvName[] = ["dev", "rec", "custom"];
+export const PRESET_IDS: EnvPresetName[] = ["dev", "rec"];
 
 // Strip leading/trailing slashes so a user-typed "/document-api/" normalises
 // to "document-api".
@@ -83,12 +91,12 @@ export function contextPathFor(
 // path to the gateway host.
 export function resolveBaseUrl(
   apiId: string,
-  env: EnvName,
+  env: EnvId,
   customBaseUrl: string,
   specDefault: string,
   apiPaths?: Record<string, string>,
 ): string {
-  if (env === "custom") return customBaseUrl || specDefault;
+  if (!isPreset(env)) return customBaseUrl || specDefault;
   return joinHost(ENV_PRESETS[env].host, contextPathFor(apiId, apiPaths));
 }
 
@@ -96,10 +104,10 @@ export function resolveBaseUrl(
 // a full base URL the user edited in the builder. Returns null for custom env
 // or when the URL no longer points at the preset host (host was changed).
 export function contextPathFromBaseUrl(
-  env: EnvName,
+  env: EnvId,
   baseUrl: string,
 ): string | null {
-  if (env === "custom") return null;
+  if (!isPreset(env)) return null;
   const host = ENV_PRESETS[env].host;
   // Edited back to exactly the host → the API is served at the gateway root.
   if (baseUrl === host || baseUrl === `${host}/`) return "";
@@ -109,10 +117,10 @@ export function contextPathFromBaseUrl(
 }
 
 export function resolveTokenUrl(
-  env: EnvName,
+  env: EnvId,
   customTokenUrl: string,
   specDefault: string,
 ): string {
-  if (env === "custom") return customTokenUrl || specDefault;
+  if (!isPreset(env)) return customTokenUrl || specDefault;
   return ENV_PRESETS[env].tokenUrl;
 }

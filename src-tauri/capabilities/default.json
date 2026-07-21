@@ -25,6 +25,12 @@
       "allow": [
         { "url": "https://*.pack-solutions.com/*" },
         { "url": "https://*.pack-solutions.gravitee.cloud/*" },
+        { "url": "http://*.pack-solutions.com/*" },
+        { "url": "http://*.pack-solutions.gravitee.cloud/*" },
+        { "url": "http://localhost/*" },
+        { "url": "http://localhost:*/*" },
+        { "url": "http://127.0.0.1/*" },
+        { "url": "http://127.0.0.1:*/*" },
         { "url": "https://gitlab.com/*" },
         { "url": "https://*.gitlab.com/*" },
         { "url": "https://api.github.com/*" },

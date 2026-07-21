@@ -7,7 +7,7 @@
 
 import { useCallback, useRef } from "react";
 import { executeRequest, type ProxyResponse } from "@/lib/http";
-import type { SavedHeader } from "@/lib/storage";
+import { isCustomEnvActive, type SavedHeader } from "@/lib/storage";
 
 // One entry per HAL follow. Responses are cached so Précédent / breadcrumb
 // jumps don't re-fetch (avoids spamming the gateway when navigating back).
@@ -47,6 +47,7 @@ export function useHalNavigation(params: {
           url,
           headers: buildLiveHeaders(customHeaders),
           body: undefined,
+          custom: isCustomEnvActive(),
         });
         setFollowStack((s) => [...s, { url, label, response: res }]);
       } catch (e) {

@@ -13,7 +13,7 @@ import { useCallback, useRef, useState } from "react";
 import { executeRequest, type ProxyResponse } from "@/lib/http";
 import { recordCreatedId } from "@/lib/id-collector";
 import { buildMultipart } from "@/lib/multipart";
-import type { SavedHeader } from "@/lib/storage";
+import { isCustomEnvActive, type SavedHeader } from "@/lib/storage";
 import type { OpenApiOperation, JsonSchema } from "@/lib/types";
 import type { FollowEntry } from "./use-hal-navigation";
 
@@ -80,6 +80,7 @@ export function useRequestExecution(params: {
           p.isMultipart && wantsBody
             ? await buildMultipart(p.bodyValue, p.files)
             : undefined,
+        custom: isCustomEnvActive(),
       });
       setResponse(res);
       // ID collector: a POST that created a resource returns its id in the JSON

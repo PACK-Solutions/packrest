@@ -15,6 +15,7 @@ import {
   Info,
   AppWindow,
 } from "lucide-react";
+import { Plus, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -36,16 +37,20 @@ import {
   loadSettings,
   saveSettings,
   credentialsFor,
+  customEnvById,
   emptyCredentials,
+  newId,
   SETTINGS_CHANGED_EVENT,
   type Settings,
   type Credentials,
+  type CustomEnv,
 } from "@/lib/storage";
 import {
-  ENV_OPTIONS,
+  PRESET_IDS,
   ENV_PRESETS,
+  isPreset,
   defaultContextPathFor,
-  type EnvName,
+  type EnvId,
 } from "@/lib/env";
 import { listApiSummaries } from "@/lib/specs";
 import {
@@ -57,7 +62,12 @@ import {
 import { copySpecs } from "@/lib/sync";
 import { listReleases, syncFromGitlab } from "@/lib/gitlab";
 import { pickInstallerAsset, type LatestRelease } from "@/lib/github";
-import { TONE_CLASSES } from "@/lib/design";
+import {
+  TONE_CLASSES,
+  ENV_COLOR_SWATCHES,
+  defaultEnvColor,
+  readableTextColor,
+} from "@/lib/design";
 import { openUrl } from "@/lib/opener";
 import { clearToken } from "@/lib/token";
 import { useAppVersion, useSpecsTag, specsTagLabel } from "@/hooks/use-app-info";
@@ -83,10 +93,11 @@ interface Release {
 // full list.
 const RELEASES_PREVIEW = 3;
 
-// Human label for an environment: the preset's own label, or "Personnalisé"
-// for the custom env (which has no preset).
-function envLabel(env: EnvName): string {
-  return env === "custom" ? "Personnalisé" : ENV_PRESETS[env].label;
+// Human label for an environment: the preset's own label, or the custom env's
+// name.
+function envLabel(env: EnvId, customEnvs: CustomEnv[]): string {
+  if (isPreset(env)) return ENV_PRESETS[env].label;
+  return customEnvs.find((e) => e.id === env)?.name ?? "Personnalisé";
 }
 
 function formatReleaseDate(iso?: string): string {
@@ -104,9 +115,8 @@ function formatReleaseDate(iso?: string): string {
 export default function SettingsPage() {
   const [settings, setSettings] = useState<Settings>({
     environment: "dev",
-    baseUrl: "",
-    tokenUrl: "",
     credentials: emptyCredentials(),
+    customEnvs: [],
   });
   const [saved, setSaved] = useState(false);
   const [apis, setApis] = useState<{ id: string; title: string }[]>([]);
@@ -350,23 +360,72 @@ export default function SettingsPage() {
   };
 
   // Credentials of the currently selected environment, and a setter that edits
-  // only that environment's pair (each env keeps its own).
+  // only that env's pair: presets keep theirs in `credentials`, a custom env
+  // keeps its pair inline.
   const currentCreds = credentialsFor(settings);
   const updateCred = (field: keyof Credentials, value: string) => {
-    setSettings((prev) => ({
-      ...prev,
-      credentials: {
-        ...prev.credentials,
-        [prev.environment]: { ...credentialsFor(prev), [field]: value },
-      },
-    }));
+    setSettings((prev) => {
+      if (isPreset(prev.environment)) {
+        return {
+          ...prev,
+          credentials: {
+            ...prev.credentials,
+            [prev.environment]: { ...credentialsFor(prev), [field]: value },
+          },
+        };
+      }
+      return {
+        ...prev,
+        customEnvs: prev.customEnvs.map((e) =>
+          e.id === prev.environment ? { ...e, [field]: value } : e,
+        ),
+      };
+    });
   };
 
-  const isCustom = settings.environment === "custom";
-  const presetHost =
-    settings.environment === "custom"
-      ? null
-      : ENV_PRESETS[settings.environment].host;
+  // Custom-env management (Settings-only): the active custom env (if any) plus
+  // add / edit-rename / remove. Changes are draft state, persisted on save;
+  // onSave drops the token when the active environment changed.
+  const activeCustom = customEnvById(settings, settings.environment);
+  const updateCustomEnv = (id: string, patch: Partial<CustomEnv>) =>
+    setSettings((prev) => ({
+      ...prev,
+      customEnvs: prev.customEnvs.map((e) =>
+        e.id === id ? { ...e, ...patch } : e,
+      ),
+    }));
+  const addCustomEnv = () =>
+    setSettings((prev) => {
+      const id = newId("env");
+      return {
+        ...prev,
+        customEnvs: [
+          ...prev.customEnvs,
+          {
+            id,
+            name: `Personnalisé ${prev.customEnvs.length + 1}`,
+            baseUrl: "",
+            tokenUrl: "",
+            clientId: "",
+            clientSecret: "",
+            color: defaultEnvColor(prev.customEnvs.length),
+          },
+        ],
+        environment: id,
+      };
+    });
+  const removeCustomEnv = (id: string) =>
+    setSettings((prev) => ({
+      ...prev,
+      customEnvs: prev.customEnvs.filter((e) => e.id !== id),
+      environment: prev.environment === id ? "dev" : prev.environment,
+    }));
+
+  const isCustom = !isPreset(settings.environment);
+  const activePreset = isPreset(settings.environment)
+    ? ENV_PRESETS[settings.environment]
+    : null;
+  const presetHost = activePreset?.host ?? null;
 
   return (
     <div className="mx-auto max-w-2xl space-y-6">
@@ -647,31 +706,46 @@ export default function SettingsPage() {
         </CardHeader>
         <CardBody className="space-y-3 p-4">
           <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
-            {ENV_OPTIONS.map((env) => (
-              <EnvOption
-                key={env}
-                env={env}
-                active={settings.environment === env}
-                onSelect={() =>
-                  setSettings({ ...settings, environment: env })
-                }
-              />
-            ))}
+            {[...PRESET_IDS, ...settings.customEnvs.map((e) => e.id)].map(
+              (env) => (
+                <EnvOption
+                  key={env}
+                  label={envLabel(env, settings.customEnvs)}
+                  description={
+                    isPreset(env)
+                      ? ENV_PRESETS[env].description
+                      : customEnvById(settings, env)?.baseUrl ||
+                        "Renseignez vos propres URLs."
+                  }
+                  color={
+                    isPreset(env)
+                      ? undefined
+                      : customEnvById(settings, env)?.color
+                  }
+                  active={settings.environment === env}
+                  onSelect={() =>
+                    setSettings({ ...settings, environment: env })
+                  }
+                />
+              ),
+            )}
+            <button
+              type="button"
+              onClick={addCustomEnv}
+              className="border-input bg-card text-muted-foreground hover:border-foreground/40 hover:text-foreground flex flex-col items-center justify-center gap-1 rounded-md border border-dashed p-3 text-center text-xs transition"
+            >
+              <Plus className="size-4" />
+              <span className="font-semibold">Ajouter un environnement</span>
+            </button>
           </div>
-          {settings.environment !== "custom" && (
+          {activePreset && (
             <div className="bg-muted/40 rounded-md p-3 text-xs">
               <div className="font-semibold">URLs utilisées</div>
               <dl className="mt-1.5 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 font-mono text-[11px]">
-                <dt className="text-muted-foreground">
-                  base/&lt;api&gt;
-                </dt>
-                <dd>
-                  {ENV_PRESETS[settings.environment].baseUrlFor("<api>")}
-                </dd>
+                <dt className="text-muted-foreground">base/&lt;api&gt;</dt>
+                <dd>{activePreset.baseUrlFor("<api>")}</dd>
                 <dt className="text-muted-foreground">token</dt>
-                <dd className="break-all">
-                  {ENV_PRESETS[settings.environment].tokenUrl}
-                </dd>
+                <dd className="break-all">{activePreset.tokenUrl}</dd>
               </dl>
             </div>
           )}
@@ -723,22 +797,61 @@ export default function SettingsPage() {
         </Card>
       )}
 
-      {isCustom && (
+      {isCustom && activeCustom && (
         <Card>
           <CardHeader>
             <Globe className="text-muted-foreground size-3.5" />
-            <span className="font-semibold">URLs personnalisées</span>
+            <span className="font-semibold">Environnement personnalisé</span>
           </CardHeader>
           <CardBody className="space-y-3 p-4">
+            <Field label="Nom" required>
+              <Input
+                value={activeCustom.name}
+                onChange={(e) =>
+                  updateCustomEnv(activeCustom.id, { name: e.target.value })
+                }
+                placeholder="Local, Staging…"
+              />
+            </Field>
+            <Field label="Couleur">
+              <div className="flex flex-wrap items-center gap-2">
+                <input
+                  type="color"
+                  aria-label="Couleur de l'environnement"
+                  value={activeCustom.color}
+                  onChange={(e) =>
+                    updateCustomEnv(activeCustom.id, { color: e.target.value })
+                  }
+                  className="border-input h-8 w-10 cursor-pointer rounded-md border bg-transparent p-0.5"
+                />
+                {ENV_COLOR_SWATCHES.map((c) => (
+                  <button
+                    key={c}
+                    type="button"
+                    aria-label={`Utiliser ${c}`}
+                    onClick={() =>
+                      updateCustomEnv(activeCustom.id, { color: c })
+                    }
+                    className={cn(
+                      "size-6 rounded-full border transition",
+                      activeCustom.color.toLowerCase() === c.toLowerCase()
+                        ? "ring-primary ring-2 ring-offset-1"
+                        : "border-border hover:scale-110",
+                    )}
+                    style={{ backgroundColor: c }}
+                  />
+                ))}
+              </div>
+            </Field>
             <Field
               label="Base URL"
               hint="Préfixe des appels API. Laissez vide pour utiliser la valeur du contrat (servers[0].url)."
             >
               <Input
                 type="url"
-                value={settings.baseUrl}
+                value={activeCustom.baseUrl}
                 onChange={(e) =>
-                  setSettings({ ...settings, baseUrl: e.target.value })
+                  updateCustomEnv(activeCustom.id, { baseUrl: e.target.value })
                 }
                 placeholder="https://api.exemple.com"
               />
@@ -749,13 +862,22 @@ export default function SettingsPage() {
             >
               <Input
                 type="url"
-                value={settings.tokenUrl}
+                value={activeCustom.tokenUrl}
                 onChange={(e) =>
-                  setSettings({ ...settings, tokenUrl: e.target.value })
+                  updateCustomEnv(activeCustom.id, { tokenUrl: e.target.value })
                 }
                 placeholder="https://iam.exemple.com/oauth/token"
               />
             </Field>
+            <div>
+              <Button
+                variant="outline"
+                className="text-destructive"
+                onClick={() => removeCustomEnv(activeCustom.id)}
+              >
+                <Trash2 className="size-3.5" /> Supprimer cet environnement
+              </Button>
+            </div>
           </CardBody>
         </Card>
       )}
@@ -764,13 +886,15 @@ export default function SettingsPage() {
         <CardHeader>
           <Lock className="text-muted-foreground size-3.5" />
           <span className="font-semibold">
-            Identifiants client OAuth2 — {envLabel(settings.environment)}
+            Identifiants client OAuth2 —{" "}
+            {envLabel(settings.environment, settings.customEnvs)}
           </span>
         </CardHeader>
         <CardBody className="space-y-3 p-4">
           <p className="text-muted-foreground text-xs">
             Propres à l&apos;environnement{" "}
-            <strong>{envLabel(settings.environment)}</strong> : chaque
+            <strong>{envLabel(settings.environment, settings.customEnvs)}</strong>{" "}
+            : chaque
             environnement conserve ses propres identifiants. Changez
             d&apos;environnement ci-dessus pour saisir les autres.
           </p>
@@ -1077,21 +1201,18 @@ function InlineStatus({
 }
 
 function EnvOption({
-  env,
+  label,
+  description,
   active,
   onSelect,
+  color,
 }: {
-  env: EnvName;
+  label: string;
+  description: string;
   active: boolean;
   onSelect: () => void;
+  color?: string;
 }) {
-  const meta = {
-    label: envLabel(env),
-    description:
-      env === "custom"
-        ? "Renseignez vos propres URLs."
-        : ENV_PRESETS[env].description,
-  };
   return (
     <button
       type="button"
@@ -1103,9 +1224,17 @@ function EnvOption({
           : "border-input bg-card text-foreground hover:border-foreground/40",
       )}
     >
-      <span className="font-semibold">{meta.label}</span>
+      <span className="flex items-center gap-1.5 font-semibold">
+        {color && (
+          <span
+            className="size-2.5 shrink-0 rounded-full"
+            style={{ backgroundColor: color }}
+          />
+        )}
+        {label}
+      </span>
       <span className="text-muted-foreground text-[11px]">
-        {meta.description}
+        {description}
       </span>
     </button>
   );

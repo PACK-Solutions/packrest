@@ -24,18 +24,37 @@ export interface UrlCheckFail {
 }
 export type UrlCheck = UrlCheckOk | UrlCheckFail;
 
-export function checkUrl(urlStr: string): UrlCheck {
+export interface UrlCheckOptions {
+  // When the URL belongs to a user-defined custom environment, http:// is
+  // permitted (not only https), and localhost / 127.0.0.1 loopback is allowed
+  // for a local dev server. The pack-solutions host allowlist and the private
+  // (non-loopback) IP block still apply to every other custom host.
+  custom?: boolean;
+}
+
+export function checkUrl(
+  urlStr: string,
+  opts: UrlCheckOptions = {},
+): UrlCheck {
+  const { custom = false } = opts;
   let url: URL;
   try {
     url = new URL(urlStr);
   } catch {
     return { ok: false, reason: "URL invalide" };
   }
-  if (url.protocol !== "https:") {
+  const httpAllowed = custom && url.protocol === "http:";
+  if (url.protocol !== "https:" && !httpAllowed) {
     return {
       ok: false,
       reason: `Protocole non autorisé : ${url.protocol}`,
     };
+  }
+  // Custom envs may target a local dev server on localhost / 127.0.0.1 — this
+  // bypasses both the private-IP block and the host allowlist (but only for
+  // loopback, not the wider LAN ranges).
+  if (custom && isLoopbackHost(url.hostname)) {
+    return { ok: true, url };
   }
   // Defence-in-depth: reject private / loopback / link-local IP *literals* (in
   // any notation) before the suffix check. This does not resolve DNS, so it
@@ -57,6 +76,17 @@ export function checkUrl(urlStr: string): UrlCheck {
     };
   }
   return { ok: true, url };
+}
+
+// localhost / 127.0.0.0/8 / IPv6 ::1 — the loopback addresses we open up for
+// custom envs (a local dev server). Narrower than isPrivateOrLocal, which also
+// rejects the LAN ranges (10/8, 192.168/16, …) that stay blocked.
+function isLoopbackHost(hostname: string): boolean {
+  const h = hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  if (h === "localhost" || h === "ip6-localhost") return true;
+  if (h === "::1" || h === "0:0:0:0:0:0:0:1") return true;
+  const ip = parseIPv4(h);
+  return ip !== null && ((ip >>> 24) & 0xff) === 127;
 }
 
 function isPrivateOrLocal(hostname: string): boolean {

@@ -8,10 +8,11 @@
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
 import { fetchToken, currentToken } from "@/lib/token";
-import { resolveTokenUrl } from "@/lib/env";
+import { resolveTokenUrl, isPreset } from "@/lib/env";
 import {
   loadSettings,
   credentialsFor,
+  customEnvById,
   type SavedHeader,
   type TokenState,
 } from "@/lib/storage";
@@ -57,10 +58,15 @@ export function useToken(params: {
         );
       }
       const fresh = await fetchToken({
-        tokenUrl: resolveTokenUrl(s.environment, s.tokenUrl, tokenUrl),
+        tokenUrl: resolveTokenUrl(
+          s.environment,
+          customEnvById(s, s.environment)?.tokenUrl ?? "",
+          tokenUrl,
+        ),
         clientId: creds.clientId,
         clientSecret: creds.clientSecret,
         scopes: selectedScopes,
+        custom: !isPreset(s.environment),
       });
       setToken(fresh);
       toast.success("Token obtenu", {

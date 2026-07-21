@@ -32,8 +32,11 @@ export async function fetchToken(opts: {
   clientId: string;
   clientSecret: string;
   scopes: string[];
+  // When true (active env is custom), http:// and a localhost dev server are
+  // permitted by the URL policy.
+  custom?: boolean;
 }): Promise<TokenState> {
-  const check = checkUrl(opts.tokenUrl);
+  const check = checkUrl(opts.tokenUrl, { custom: opts.custom });
   if (!check.ok) throw new Error(check.reason);
 
   const form = new URLSearchParams();
