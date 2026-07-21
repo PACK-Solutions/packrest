@@ -414,12 +414,20 @@ export default function SettingsPage() {
         environment: id,
       };
     });
-  const removeCustomEnv = (id: string) =>
-    setSettings((prev) => ({
-      ...prev,
-      customEnvs: prev.customEnvs.filter((e) => e.id !== id),
-      environment: prev.environment === id ? "dev" : prev.environment,
-    }));
+  // Delete is destructive and explicit, so — unlike the staged field edits —
+  // it persists immediately. saveSettings fires SETTINGS_CHANGED_EVENT so the
+  // topbar EnvSwitcher drops the env at once, and the deletion survives reload.
+  const removeCustomEnv = (id: string) => {
+    const envChanged = settings.environment === id;
+    const next: Settings = {
+      ...settings,
+      customEnvs: settings.customEnvs.filter((e) => e.id !== id),
+      environment: envChanged ? "dev" : settings.environment,
+    };
+    setSettings(next);
+    saveSettings(next);
+    if (envChanged) clearToken();
+  };
 
   const isCustom = !isPreset(settings.environment);
   const activePreset = isPreset(settings.environment)
