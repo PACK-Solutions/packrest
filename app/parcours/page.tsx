@@ -30,7 +30,9 @@ import { apiTheme } from "@/lib/design";
 import {
   extractOAuth2,
   findEndpoint,
+  listApis,
   loadSpec,
+  SPECS_CHANGED_EVENT,
   type EndpointEntry,
 } from "@/lib/specs";
 import type { OpenApiDocument } from "@/lib/types";
@@ -71,6 +73,27 @@ function Parcours() {
   const [state, setState] = useState<ParcoursState | null>(null);
   useEffect(() => {
     if (def) setState(loadParcoursState(def));
+  }, [def]);
+
+  // Gate the whole parcours on having the relevant OpenAPI contracts synced.
+  // With none of the parcours' APIs present we must reveal nothing about them
+  // (no step titles, operation ids, endpoints) — only prompt to synchronise.
+  // `null` while the first check runs; re-checked when a sync fires.
+  const [specsReady, setSpecsReady] = useState<boolean | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    const check = () =>
+      listApis().then((ids) => {
+        if (cancelled) return;
+        const required = new Set(def?.steps.map((s) => s.apiId) ?? []);
+        setSpecsReady(ids.some((apiId) => required.has(apiId)));
+      });
+    void check();
+    window.addEventListener(SPECS_CHANGED_EVENT, check);
+    return () => {
+      cancelled = true;
+      window.removeEventListener(SPECS_CHANGED_EVENT, check);
+    };
   }, [def]);
 
   const activeStep: ParcoursStep | null =
@@ -262,6 +285,57 @@ function Parcours() {
         <Link href="/" className="text-primary text-sm underline">
           Retour à l&apos;accueil
         </Link>
+      </div>
+    );
+  }
+
+  // Still verifying which contracts are synced — hold the parcours back so it
+  // never flashes (which would leak the APIs) before the check resolves.
+  if (specsReady === null) {
+    return (
+      <div
+        role="status"
+        aria-label="Vérification des contrats"
+        className="mx-auto w-full max-w-2xl space-y-3"
+      >
+        <Skeleton className="h-8 w-64" />
+        <Skeleton className="h-40 w-full" />
+      </div>
+    );
+  }
+
+  // No relevant OpenAPI contract synced → prompt to synchronise WITHOUT
+  // revealing any of the parcours' APIs or steps.
+  if (specsReady === false) {
+    return (
+      <div className="mx-auto w-full max-w-2xl space-y-4">
+        <Breadcrumb>
+          <BreadcrumbList>
+            <BreadcrumbItem>
+              <BreadcrumbLink asChild>
+                <Link href="/">Accueil</Link>
+              </BreadcrumbLink>
+            </BreadcrumbItem>
+            <BreadcrumbSeparator />
+            <BreadcrumbItem>
+              <BreadcrumbPage>{def.title}</BreadcrumbPage>
+            </BreadcrumbItem>
+          </BreadcrumbList>
+        </Breadcrumb>
+        <Card tone="warn">
+          <CardHeader tone="warn">
+            <span className="font-semibold">Synchronisation requise</span>
+          </CardHeader>
+          <CardBody className="space-y-3 p-4 text-sm">
+            <p className="text-muted-foreground">
+              Aucun contrat OpenAPI n&apos;est synchronisé. Le parcours guidé n&apos;est
+              pas disponible tant que les APIs ne sont pas synchronisées.
+            </p>
+            <Link href="/settings" className="text-primary underline">
+              Ouvrir les Paramètres pour synchroniser
+            </Link>
+          </CardBody>
+        </Card>
       </div>
     );
   }
