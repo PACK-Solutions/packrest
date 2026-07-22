@@ -7,6 +7,7 @@ import {
   FolderOpen,
   HelpCircle,
   Menu,
+  Route,
   Settings as SettingsIcon,
   type LucideIcon,
 } from "lucide-react";
@@ -30,6 +31,7 @@ import ThemeToggle from "@/components/ThemeToggle";
 import { EnvSwitcher } from "@/components/EnvSwitcher";
 import { IdCollector } from "@/components/IdCollector";
 import { UuidGenerator } from "@/components/UuidGenerator";
+import { FieldGenerator } from "@/components/FieldGenerator";
 import { apiTheme } from "@/lib/design";
 import { listApiSummaries, SPECS_CHANGED_EVENT } from "@/lib/specs";
 import { useAppVersion, useSpecsTag, specsTagLabel } from "@/hooks/use-app-info";
@@ -135,6 +137,7 @@ function TopBar({
       <div className="ml-auto flex items-center gap-1">
         <EnvSwitcher />
         <UuidGenerator />
+        <FieldGenerator />
         <IdCollector />
         <ThemeToggle variant="icon" />
       </div>
@@ -216,6 +219,16 @@ function NavBody({
               );
             })
           )}
+        </Section>
+        <Separator className="my-3" />
+        <Section title="Parcours">
+          <NavLink
+            href="/parcours"
+            label="Souscription"
+            icon={Route}
+            active={pathname === "/parcours"}
+            onNavigate={onNavigate}
+          />
         </Section>
         <Separator className="my-3" />
         <Section title="Outils">

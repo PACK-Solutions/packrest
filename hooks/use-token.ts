@@ -46,7 +46,7 @@ export function useToken(params: {
     };
   }, []);
 
-  const getToken = useCallback(async () => {
+  const getToken = useCallback(async (opts?: { silent?: boolean }) => {
     setTokenError(null);
     setFetchingToken(true);
     try {
@@ -69,13 +69,15 @@ export function useToken(params: {
         custom: !isPreset(s.environment),
       });
       setToken(fresh);
-      toast.success("Token obtenu", {
-        description: `Scopes : ${fresh.scope ?? "(non renvoyé)"}`,
-      });
+      if (!opts?.silent)
+        toast.success("Token obtenu", {
+          description: `Scopes : ${fresh.scope ?? "(non renvoyé)"}`,
+        });
     } catch (e) {
       const msg = (e as Error).message;
       setTokenError(msg);
-      toast.error("Impossible d'obtenir un token", { description: msg });
+      if (!opts?.silent)
+        toast.error("Impossible d'obtenir un token", { description: msg });
     } finally {
       setFetchingToken(false);
     }

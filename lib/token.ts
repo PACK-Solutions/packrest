@@ -35,6 +35,10 @@ export async function fetchToken(opts: {
   // When true (active env is custom), http:// and a localhost dev server are
   // permitted by the URL policy.
   custom?: boolean;
+  // When false, the fetched token is NOT written to the shared store — for
+  // auxiliary lookups (e.g. a picker fetching another API) that must not
+  // clobber the active request's bearer. Defaults to persisting.
+  persist?: boolean;
 }): Promise<TokenState> {
   const check = checkUrl(opts.tokenUrl, { custom: opts.custom });
   if (!check.ok) throw new Error(check.reason);
@@ -111,7 +115,7 @@ export async function fetchToken(opts: {
     expiresAt: Date.now() + (data.expires_in ?? 300) * 1000,
     scope: data.scope,
   };
-  saveToken(state);
+  if (opts.persist !== false) saveToken(state);
   return state;
 }
 

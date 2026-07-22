@@ -10,6 +10,9 @@ import {
   Wrench,
   Dices,
   Boxes,
+  Route,
+  Sparkles,
+  Download,
 } from "lucide-react";
 
 import { Card, CardHeader, CardBody } from "@/components/Card";
@@ -102,6 +105,32 @@ export default function HelpPage() {
 
       <Card>
         <CardHeader>
+          <Route className="text-muted-foreground size-3.5" />
+          <span className="font-semibold">Le parcours guidé</span>
+        </CardHeader>
+        <CardBody className="space-y-2 p-4 text-sm">
+          <p>
+            Le <strong>Parcours de souscription</strong> (menu de gauche,
+            section <em>Parcours</em>) enchaîne pour vous les appels des
+            différentes APIs dans le bon ordre : personne, moyen de paiement,
+            contrat, versements, service requests, puis décision et suivi.
+          </p>
+          <p className="text-muted-foreground">
+            À chaque étape, le formulaire est <strong>pré-rempli</strong> avec
+            les identifiants récupérés aux étapes précédentes et{" "}
+            <strong>le token est obtenu automatiquement</strong> — vous
+            n&apos;avez qu&apos;à compléter puis exécuter. Les valeurs collectées
+            (product_id, person_id, numéro de contrat…) apparaissent dans le
+            panneau <em>Contexte</em> et restent modifiables. Sur les étapes de
+            type « liste » (produits, fonds, allocations), choisissez une ou
+            plusieurs lignes : la sélection alimente les étapes suivantes. La
+            progression est conservée tant que l&apos;application reste ouverte.
+          </p>
+        </CardBody>
+      </Card>
+
+      <Card>
+        <CardHeader>
           <KeyRound className="text-muted-foreground size-3.5" />
           <span className="font-semibold">Les scopes OAuth2</span>
         </CardHeader>
@@ -163,6 +192,53 @@ export default function HelpPage() {
               créer). Les boutons <strong>« Vider cette API »</strong> et{" "}
               <strong>« Tout vider »</strong> effacent la liste quand vous
               n&apos;en avez plus besoin.
+            </p>
+          </div>
+          <div>
+            <p className="flex items-center gap-1.5 font-semibold">
+              <Sparkles className="size-3.5" />
+              Générateur de champs
+            </p>
+            <p className="text-muted-foreground">
+              L&apos;icône <em>étincelles</em> génère des{" "}
+              <strong>valeurs d&apos;exemple valides</strong> pour les champs
+              courants : IBAN, BIC, numéro de sécurité sociale, SIREN et SIRET.
+              Les valeurs sont fictives mais respectent la clé de contrôle, donc
+              elles passent la validation de format. Copiez celle qu&apos;il vous
+              faut, régénérez une ligne, ou cliquez sur{" "}
+              <strong>« Tout régénérer »</strong>.
+            </p>
+          </div>
+        </CardBody>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <Download className="text-muted-foreground size-3.5" />
+          <span className="font-semibold">Exporter &amp; réutiliser</span>
+        </CardHeader>
+        <CardBody className="space-y-3 p-4 text-sm">
+          <div>
+            <p className="font-semibold">Exporter une réponse en Excel</p>
+            <p className="text-muted-foreground">
+              Lorsque la réponse est un tableau ou un objet, le bouton{" "}
+              <strong>« Exporter (Excel) »</strong> du panneau de réponse
+              enregistre un vrai classeur <strong>.xlsx</strong> (aplati en
+              lignes et colonnes), avec le contexte de la requête en en-tête.
+            </p>
+          </div>
+          <div>
+            <p className="font-semibold">Collections Bruno &amp; curl</p>
+            <p className="text-muted-foreground">
+              <strong>« Exporter (Bruno) »</strong> enregistre l&apos;API
+              entière ou la requête courante au format Bruno, et{" "}
+              <strong>« Copier en curl »</strong> place la commande équivalente
+              dans le presse-papiers. Pour rejouer des requêtes, importez une
+              collection depuis{" "}
+              <Link href="/collections" className="underline">
+                Import Bruno
+              </Link>
+              .
             </p>
           </div>
         </CardBody>

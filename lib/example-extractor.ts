@@ -98,3 +98,60 @@ export function defaultFromSchema(schema: JsonSchema | undefined): unknown {
       return null;
   }
 }
+
+// Builds an EMPTY value tree for a JSON Schema: the structural skeleton (nested
+// objects/arrays) with every scalar leaf left blank. Unlike defaultFromSchema
+// it deliberately ignores the schema's `example` / `default` / `enum` values —
+// the app's forms start empty by design so the user always types (or picks) the
+// exact values they send. Only `const` is kept: it's a fixed, read-only value
+// (and drives oneOf discriminators), not a suggested example.
+export function emptyValueFromSchema(schema: JsonSchema | undefined): unknown {
+  if (!schema) return undefined;
+  if (schema.const !== undefined) return schema.const;
+  const variants = schema.oneOf ?? schema.anyOf;
+  if (variants?.length) return emptyValueFromSchema(variants[0]);
+  if (schema.allOf?.length) {
+    return schema.allOf.reduce<Record<string, unknown>>((acc, part) => {
+      const v = emptyValueFromSchema(part);
+      return v && typeof v === "object" && !Array.isArray(v)
+        ? { ...acc, ...(v as Record<string, unknown>) }
+        : acc;
+    }, {});
+  }
+  const type = Array.isArray(schema.type) ? schema.type[0] : schema.type;
+  switch (type) {
+    case "array":
+      return [];
+    case "object": {
+      const obj: Record<string, unknown> = {};
+      const props = schema.properties ?? {};
+      for (const [key, sub] of Object.entries(props)) {
+        if (sub.readOnly) continue;
+        obj[key] = emptyValueFromSchema(sub);
+      }
+      return obj;
+    }
+    // string / number / integer / boolean / null → leave blank (undefined),
+    // so JSON.stringify omits the key until the user fills it.
+    default:
+      return undefined;
+  }
+}
+
+// Value for a freshly-added array element. A scalar item gets a *typed* empty
+// ("" for string, 0 for number/integer, false for boolean) rather than the
+// `undefined` emptyValueFromSchema returns for scalars — an untouched array item
+// left `undefined` serialises as `null` (`[null]`), which a typed-array backend
+// rejects, whereas `[""]`/`[0]`/`[false]` stay type-correct. Objects/arrays and
+// composite (oneOf/anyOf/allOf) items defer to emptyValueFromSchema so their
+// leaves still start blank/omitted.
+export function blankArrayItem(schema: JsonSchema | undefined): unknown {
+  if (!schema) return "";
+  if (schema.const !== undefined) return schema.const;
+  if (schema.oneOf || schema.anyOf || schema.allOf) return emptyValueFromSchema(schema);
+  const type = Array.isArray(schema.type) ? schema.type[0] : schema.type;
+  if (type === "object" || type === "array") return emptyValueFromSchema(schema);
+  if (type === "integer" || type === "number") return 0;
+  if (type === "boolean") return false;
+  return ""; // string / untyped
+}

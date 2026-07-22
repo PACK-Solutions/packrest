@@ -9,7 +9,8 @@ The flow is unchanged: pick an API → pick an endpoint → form generated from
 the contract (fields start empty by design) → get a token with selectable
 scopes → execute → response panel. Around that: multipart/form-data bodies
 with file upload, HAL `_links` navigation, a JWT token inspector, dark/light
-theme, and proactive app + spec update notifications.
+theme, proactive app + spec update notifications, and a guided **Parcours**
+(`/parcours`) that chains the whole flow across APIs for a full souscription.
 
 Run it with **`npm run tauri:dev`** (launches `next dev` on :3001 + the webview).
 Plain `npm run dev` opens the frontend in a browser but Tauri APIs (store/fs/
@@ -36,11 +37,15 @@ http/dialog) are unavailable there — see the fallback note below.
   - `page.tsx` — API grid (`?` none) → links to `/api-view?id=<api>`.
   - `api-view/page.tsx` — endpoints by tag; reads `?id=<api>`.
   - `endpoint/page.tsx` — hosts `RequestBuilder`; reads `?api=<api>&op=<operationId>`.
+  - `parcours/page.tsx` — guided « Parcours de souscription » wizard: chains ops
+    across APIs, embeds `RequestBuilder` per step in simplified mode, captures
+    ids/SR ids into a shared context. Reads `?id=<parcours>` (default `souscription`).
   - `collections/`, `settings/`, `help/` — client pages.
   - `layout.tsx` — wraps `TauriProvider` (startup gate) + `AppShell`; the
     `<Suspense>` boundary satisfies static export's `useSearchParams` rule.
   - **No `app/api/*`** — deleted; that logic is client-side now.
-- `components/` — `RequestBuilder` (state-heavy), `tauri-provider.tsx`
+- `components/` — `RequestBuilder` (state-heavy; optional `seed` / `onResult` /
+  `simplified` props drive the Parcours), `tauri-provider.tsx`
   (hydrate store before render), `app-shell.tsx` (loads the API
   list client-side, refreshes on `SPECS_CHANGED_EVENT`), plus `Card`, `Field`,
   `Tabs`, `MethodBadge`, `SchemaField`, `JsonEditor`, `ResponsePanel`,
@@ -49,10 +54,15 @@ http/dialog) are unavailable there — see the fallback note below.
     upload), `FileResponse` (binary/file response viewer + download),
     `JsonView` (collapsible JSON tree), `HalLinks` (follow HAL `_links` across
     APIs), `StatusBadge` (HTTP-status tone badge), `Markdown` (collapsible
-    markdown render).
+    markdown render), `ResponseExportButton` (export a structured response as a
+    real `.xlsx` workbook).
   - Token: `TokenInspector` (decode/inspect the JWT).
   - Helpers: `IdCollector` (reuse ids of created resources), `UuidGenerator`
-    (generate UUIDs for form fields).
+    (UUIDs for form fields), `FieldGenerator` (checksum-valid sample values:
+    IBAN/BIC/NIR/SIREN/SIRET) — all topbar tools.
+  - Parcours (guided flow, behind `/parcours`): `ParcoursStepper` (collapsible
+    phase rail), `ParcoursContextPanel` (shared values chained between steps),
+    `ParcoursSelect` (pick item(s) from a list response into the context).
   - Dialogs/theme: `ConfirmDialog` + `PromptDialog` (replace native
     confirm/prompt, unavailable in the webview), `theme-provider` +
     `ThemeToggle` (dark/light via `next-themes`).
@@ -81,6 +91,12 @@ http/dialog) are unavailable there — see the fallback note below.
   - `github.ts` (GitHub Releases update check), `app-version.ts` (running app
     version), `opener.ts` (open URL in OS browser), `status-help.ts` (HTTP
     status explanations for ResponsePanel + `/help`).
+  - `xlsx.ts` — dependency-free client-side `.xlsx` workbook builder (flattens
+    a JSON response to rows) behind `ResponseExportButton`.
+  - `parcours.ts` — declarative « souscription » parcours (ordered steps, seed↔
+    context mapping, response capture, sessionStorage progress) behind
+    `/parcours`; `fake-fields.ts` — checksum-valid sample values
+    (IBAN/BIC/NIR/SIREN/SIRET) for `FieldGenerator`.
   - `deref.ts`, `spec-diff.ts` (single runtime diff, no build-time consumer),
     `example-extractor.ts`, `env.ts`, `types.ts`, `hal.ts`, `jwt.ts`,
     `design.ts`, `utils.ts`.

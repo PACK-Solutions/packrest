@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Download, KeyRound, Loader2, Play, Save, Terminal } from "lucide-react";
 
 import { Card, CardHeader, CardBody } from "@/components/Card";
@@ -33,6 +33,7 @@ import {
   type SavedHeader,
 } from "@/lib/storage";
 import { IMPORT_SEED_KEY, type ImportSeed } from "@/lib/bruno";
+import type { ProxyResponse } from "@/lib/http";
 import { clearToken } from "@/lib/token";
 import { resolveBaseUrl } from "@/lib/env";
 import type {
@@ -51,6 +52,14 @@ import { useRequestActions } from "@/hooks/use-request-actions";
 const isMac =
   typeof navigator !== "undefined" && /Mac/.test(navigator.platform);
 
+// Narrow an unknown JSON value to a plain object, so a partial seed body can be
+// shallow-merged into the current body without wiping fields the user filled.
+function asObjectRecord(v: unknown): Record<string, unknown> | null {
+  return typeof v === "object" && v !== null && !Array.isArray(v)
+    ? (v as Record<string, unknown>)
+    : null;
+}
+
 interface Props {
   apiId: string;
   apiTitle: string;
@@ -62,6 +71,24 @@ interface Props {
   defaultBaseUrl: string;
   scopes: Record<string, string>;
   tokenUrl: string;
+  /** In-memory seed (Parcours) — preferred over the sessionStorage IMPORT_SEED_KEY. */
+  seed?: ImportSeed;
+  /** Called once with the operation's response after each execution (Parcours capture). */
+  onResult?: (res: ProxyResponse) => void;
+  /** Parcours mode: auto-fetch the token and hide technical chrome (URL,
+   *  auth card, headers, export/curl). */
+  simplified?: boolean;
+  /** Parcours: initial form draft to restore (params + body the user last left
+   *  on this step) so returning to it doesn't wipe typed values. Context-mapped
+   *  fields are still re-applied on top via `seed`, so corrections propagate. */
+  initialDraft?: { params?: Record<string, string>; body?: unknown };
+  /** Parcours: called on unmount with the current form snapshot so the host can
+   *  persist it per step. */
+  onDraftChange?: (draft: { params: Record<string, string>; body: unknown }) => void;
+  /** Parcours picker steps: cap the response panel to the form column's height
+   *  (instead of the viewport) so a selection list rendered below the builder
+   *  sits right under the « Exécuter » button rather than far down the page. */
+  compactResponse?: boolean;
 }
 
 // Single full-feature request builder. State sources of truth:
@@ -82,6 +109,12 @@ export default function RequestBuilder(props: Props) {
     defaultBaseUrl,
     scopes,
     tokenUrl,
+    seed,
+    onResult,
+    simplified,
+    initialDraft,
+    onDraftChange,
+    compactResponse,
   } = props;
 
   const allParams = useMemo<OpenApiParameter[]>(
@@ -130,9 +163,11 @@ export default function RequestBuilder(props: Props) {
   // pre-filled, so the user always types the exact values they intend to send.
   const [paramValues, setParamValues] = useState<Record<string, string>>(
     () => {
-      const seed: Record<string, string> = {};
-      for (const p of allParams) seed[p.name] = "";
-      return seed;
+      const init: Record<string, string> = {};
+      for (const p of allParams) init[p.name] = "";
+      // Restore a Parcours draft (values typed before the user left this step).
+      if (initialDraft?.params) Object.assign(init, initialDraft.params);
+      return init;
     },
   );
   useEffect(() => {
@@ -147,7 +182,9 @@ export default function RequestBuilder(props: Props) {
 
   const bodySchema: JsonSchema | undefined =
     operation.requestBody?.content?.["application/json"]?.schema;
-  const [bodyValue, setBodyValue] = useState<unknown>(null);
+  const [bodyValue, setBodyValue] = useState<unknown>(
+    () => initialDraft?.body ?? null,
+  );
 
   // multipart/form-data endpoints (file upload). When there's no JSON body but
   // a multipart one, the "Corps" tab renders a file picker + metadata form and
@@ -159,8 +196,17 @@ export default function RequestBuilder(props: Props) {
 
   const [customHeaders, setCustomHeaders] = useState<SavedHeader[]>([]);
 
-  const requiredScopes = (operation.security ?? []).flatMap((e) =>
-    Object.values(e).flat(),
+  const requiredScopes = useMemo(
+    () => (operation.security ?? []).flatMap((e) => Object.values(e).flat()),
+    [operation],
+  );
+  // Scopes actually requested when minting a token. When the operation declares
+  // none of its own (it relies on the document-level `security`), fall back to
+  // every scope the flow exposes — otherwise simplified-mode auto-fetch would
+  // mint a scope-less token the API rejects, with no selector to correct it.
+  const tokenScopes = useMemo(
+    () => (requiredScopes.length ? requiredScopes : Object.keys(scopes)),
+    [requiredScopes, scopes],
   );
 
   // Token lifecycle (bearer, in-flight/error UX, selected scopes) + the live
@@ -174,7 +220,23 @@ export default function RequestBuilder(props: Props) {
     setSelectedScopes,
     getToken,
     buildLiveHeaders,
-  } = useToken({ tokenUrl, initialScopes: requiredScopes });
+  } = useToken({ tokenUrl, initialScopes: tokenScopes });
+
+  // Simplified (Parcours) mode: mint the token automatically so the user never
+  // presses « Obtenir un token ». Throttled so a short-lived (or clock-skewed)
+  // token that arrives already (near-)expired can't spin the token endpoint in a
+  // refetch loop, and a prior `tokenError` pauses the auto-retry — the inline
+  // error offers a manual « Réessayer ».
+  const lastAutoFetchRef = useRef(0);
+  useEffect(() => {
+    if (!simplified || fetchingToken || tokenError) return;
+    const now = Date.now();
+    const expired = !token || token.expiresAt <= now + 5000;
+    if (!expired) return;
+    if (now - lastAutoFetchRef.current < 30000) return;
+    lastAutoFetchRef.current = now;
+    void getToken({ silent: true });
+  }, [simplified, token, fetchingToken, tokenError, getToken]);
 
   const composedUrl = useMemo(() => {
     // Keep the {name} placeholder for an unfilled path param rather than
@@ -198,6 +260,7 @@ export default function RequestBuilder(props: Props) {
   // running, uploading, and the HAL followStack). run() is referentially
   // stable, so the keyboard shortcut can depend on it directly.
   const {
+    response,
     error,
     running,
     uploading,
@@ -233,36 +296,113 @@ export default function RequestBuilder(props: Props) {
     setError,
   });
 
-  // One-shot seeding from a Bruno import. The /collections importer writes the
-  // chosen request into sessionStorage then navigates here; we apply the values
-  // once on mount and clear the key so a refresh starts clean.
+  // Seed application. A Parcours passes an in-memory `seed` prop and re-applies
+  // it whenever the upstream context changes (a corrected context value must
+  // reach the already-open form — the component is keyed only by step id, so it
+  // does not remount on an edit); the /collections importer instead writes to
+  // sessionStorage and is applied once on mount. Keyed on the seed's content so
+  // a correction re-seeds, and the body is shallow-merged so fields the user
+  // has since filled are never wiped.
+  const seedSignature = seed ? JSON.stringify(seed) : "";
+  // Values we last wrote from the seed, per field — so a re-seed (triggered by a
+  // context edit) only overwrites a field the user hasn't since changed (still
+  // blank, or still equal to what we seeded), never a value they retyped.
+  const seededRef = useRef<{
+    params: Record<string, string>;
+    body: Record<string, unknown>;
+  }>({ params: {}, body: {} });
   useEffect(() => {
-    let raw: string | null = null;
-    try {
-      raw = window.sessionStorage.getItem(IMPORT_SEED_KEY);
-    } catch {
-      return;
+    let incoming: ImportSeed | null = seed ?? null;
+    if (!incoming) {
+      let raw: string | null = null;
+      try {
+        raw = window.sessionStorage.getItem(IMPORT_SEED_KEY);
+      } catch {
+        return;
+      }
+      if (!raw) return;
+      window.sessionStorage.removeItem(IMPORT_SEED_KEY);
+      try {
+        incoming = JSON.parse(raw) as ImportSeed;
+      } catch {
+        return;
+      }
     }
-    if (!raw) return;
-    window.sessionStorage.removeItem(IMPORT_SEED_KEY);
-    let seed: ImportSeed;
-    try {
-      seed = JSON.parse(raw) as ImportSeed;
-    } catch {
-      return;
+    const s = incoming;
+    if (s.apiId !== apiId || s.operationId !== operationId) return;
+    if (s.params) {
+      const sp = s.params;
+      setParamValues((prev) => {
+        const next = { ...prev };
+        for (const [k, v] of Object.entries(sp)) {
+          const cur = prev[k];
+          const lastSeeded = seededRef.current.params[k];
+          if (cur === undefined || cur === "" || cur === lastSeeded) next[k] = v;
+          seededRef.current.params[k] = v;
+        }
+        return next;
+      });
     }
-    if (seed.apiId !== apiId || seed.operationId !== operationId) return;
-    if (seed.params) setParamValues((prev) => ({ ...prev, ...seed.params }));
-    if (seed.headers) setCustomHeaders(seed.headers);
-    if (seed.body !== undefined) setBodyValue(seed.body);
+    if (s.headers) setCustomHeaders(s.headers);
+    if (s.body !== undefined) {
+      const seedBody = s.body;
+      setBodyValue((prev: unknown) => {
+        const p = asObjectRecord(prev);
+        const b = asObjectRecord(seedBody);
+        if (!p || !b) {
+          // Non-object seed/body: adopt the seed only when nothing is entered.
+          if (p == null) {
+            seededRef.current.body = {};
+            return seedBody;
+          }
+          return prev;
+        }
+        const next = { ...p };
+        for (const [k, v] of Object.entries(b)) {
+          const cur = p[k];
+          const lastSeeded = seededRef.current.body[k];
+          if (cur === undefined || cur === "" || cur === null || cur === lastSeeded)
+            next[k] = v;
+          seededRef.current.body[k] = v;
+        }
+        return next;
+      });
+    }
     // Pre-select imported scopes, limited to those this operation declares so
     // a stale/foreign scope can't be selected.
-    if (seed.scopes?.length) {
+    if (s.scopes?.length) {
       const allowed = new Set(Object.keys(scopes));
-      const applied = seed.scopes.filter((s) => allowed.has(s));
+      const applied = s.scopes.filter((sc) => allowed.has(sc));
       if (applied.length) setSelectedScopes(applied);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [seedSignature]);
+
+  // Report the operation's response to a Parcours host once per execution.
+  // `response` is a fresh object each run, so ref-guarding fires onResult
+  // exactly once per new result (not on unrelated re-renders).
+  const lastReportedRef = useRef<ProxyResponse | null>(null);
+  useEffect(() => {
+    if (response && response !== lastReportedRef.current) {
+      lastReportedRef.current = response;
+      onResult?.(response);
+    }
+  }, [response, onResult]);
+
+  // Persist the form draft (params + body) for a Parcours step on unmount, so
+  // returning to it — after correcting an earlier step — restores what was
+  // typed instead of an empty form. Files are not serialisable and are skipped
+  // (the user re-picks them). A ref holds the latest snapshot; `onDraftChange`
+  // is read through a ref so the unmount-only effect never re-subscribes.
+  const draftSnapshotRef = useRef<{ params: Record<string, string>; body: unknown }>({
+    params: {},
+    body: null,
+  });
+  draftSnapshotRef.current = { params: paramValues, body: bodyValue };
+  const onDraftChangeRef = useRef(onDraftChange);
+  onDraftChangeRef.current = onDraftChange;
+  useEffect(() => {
+    return () => onDraftChangeRef.current?.(draftSnapshotRef.current);
   }, []);
 
   // Keyboard shortcuts: ⌘/Ctrl+Entrée exécute, Échap ferme la navigation HAL.
@@ -352,6 +492,7 @@ export default function RequestBuilder(props: Props) {
           scrollable so it stays at eye level while the form scrolls. */}
       <div className="space-y-4 @min-[61rem]:grid @min-[61rem]:grid-cols-2 @min-[61rem]:items-start @min-[61rem]:gap-6 @min-[61rem]:space-y-0">
         <div className="min-w-0 space-y-4">
+      {!simplified && (
       <Card>
         <CardHeader>
           <span className="font-semibold">URL composée</span>
@@ -381,51 +522,84 @@ export default function RequestBuilder(props: Props) {
           </div>
         </CardBody>
       </Card>
+      )}
 
-      <Card>
-        <CardHeader>
-          <KeyRound className="text-muted-foreground size-3.5" />
-          <span className="font-semibold">Authentification</span>
-        </CardHeader>
-        <CardBody className="space-y-3 p-3">
-          <Field
-            label="Scopes OAuth2"
-            hint="Les scopes requis par l'opération sont déjà cochés — en cas de doute, laissez tel quel."
+      {simplified ? (
+        (fetchingToken || tokenError) && (
+          <div
+            className={`rounded-md border px-3 py-2 text-xs ${
+              tokenError
+                ? "border-destructive/40 text-destructive"
+                : "text-muted-foreground border-border"
+            }`}
           >
-            <ScopeSelector
-              available={scopes}
-              selected={selectedScopes}
-              onChange={setSelectedScopes}
-              required={requiredScopes}
-            />
-          </Field>
-          <div className="flex flex-wrap items-center gap-2">
-            <Button
-              variant="default"
-              size="sm"
-              onClick={getToken}
-              disabled={fetchingToken}
-            >
-              {fetchingToken ? (
-                <Loader2 className="size-3.5 animate-spin" />
-              ) : (
-                <KeyRound className="size-3.5" />
-              )}
-              {fetchingToken ? "Demande en cours…" : "Obtenir un token"}
-            </Button>
-            {tokenError && (
-              <span className="text-destructive text-xs">{tokenError}</span>
+            {fetchingToken ? (
+              <span className="flex items-center gap-1.5">
+                <Loader2 className="size-3.5 animate-spin" /> Authentification…
+              </span>
+            ) : (
+              <div className="flex flex-wrap items-center gap-2">
+                <span>Authentification impossible : {tokenError}</span>
+                <button
+                  type="button"
+                  onClick={() => void getToken()}
+                  className="font-medium underline"
+                >
+                  Réessayer
+                </button>
+                <a href="/settings" className="underline">
+                  Paramètres
+                </a>
+              </div>
             )}
-            <span className="text-muted-foreground ml-auto text-xs">
-              clientId/secret se configurent dans{" "}
-              <a href="/settings" className="underline">
-                Paramètres
-              </a>
-            </span>
           </div>
-          <TokenInspector token={token} />
-        </CardBody>
-      </Card>
+        )
+      ) : (
+        <Card>
+          <CardHeader>
+            <KeyRound className="text-muted-foreground size-3.5" />
+            <span className="font-semibold">Authentification</span>
+          </CardHeader>
+          <CardBody className="space-y-3 p-3">
+            <Field
+              label="Scopes OAuth2"
+              hint="Les scopes requis par l'opération sont déjà cochés — en cas de doute, laissez tel quel."
+            >
+              <ScopeSelector
+                available={scopes}
+                selected={selectedScopes}
+                onChange={setSelectedScopes}
+                required={requiredScopes}
+              />
+            </Field>
+            <div className="flex flex-wrap items-center gap-2">
+              <Button
+                variant="default"
+                size="sm"
+                onClick={() => void getToken()}
+                disabled={fetchingToken}
+              >
+                {fetchingToken ? (
+                  <Loader2 className="size-3.5 animate-spin" />
+                ) : (
+                  <KeyRound className="size-3.5" />
+                )}
+                {fetchingToken ? "Demande en cours…" : "Obtenir un token"}
+              </Button>
+              {tokenError && (
+                <span className="text-destructive text-xs">{tokenError}</span>
+              )}
+              <span className="text-muted-foreground ml-auto text-xs">
+                clientId/secret se configurent dans{" "}
+                <a href="/settings" className="underline">
+                  Paramètres
+                </a>
+              </span>
+            </div>
+            <TokenInspector token={token} />
+          </CardBody>
+        </Card>
+      )}
 
       <Card>
         <CardBody className="p-3">
@@ -479,18 +653,22 @@ export default function RequestBuilder(props: Props) {
                     },
                   ]
                 : []),
-              {
-                id: "headers",
-                label: "En-têtes",
-                count: customHeaders.length,
-                content: (
-                  <HeaderEditor
-                    value={customHeaders}
-                    onChange={setCustomHeaders}
-                    managed={managedHeaders}
-                  />
-                ),
-              },
+              ...(!simplified
+                ? [
+                    {
+                      id: "headers",
+                      label: "En-têtes",
+                      count: customHeaders.length,
+                      content: (
+                        <HeaderEditor
+                          value={customHeaders}
+                          onChange={setCustomHeaders}
+                          managed={managedHeaders}
+                        />
+                      ),
+                    },
+                  ]
+                : []),
             ]}
           />
         </CardBody>
@@ -500,7 +678,7 @@ export default function RequestBuilder(props: Props) {
         <Button
           variant="success"
           onClick={run}
-          disabled={running}
+          disabled={running || (simplified && (fetchingToken || !!tokenError))}
           title={
             isMac ? "Exécuter (⌘ + Entrée)" : "Exécuter (Ctrl + Entrée)"
           }
@@ -515,12 +693,16 @@ export default function RequestBuilder(props: Props) {
             {isMac ? "⌘↵" : "Ctrl↵"}
           </kbd>
         </Button>
-        <Button variant="outline" onClick={exportBruno}>
+        {!simplified && (
+          <>
+            <Button variant="outline" onClick={exportBruno}>
           <Download className="size-3.5" /> Exporter (Bruno)
         </Button>
         <Button variant="outline" onClick={copyCurl}>
           <Terminal className="size-3.5" /> Copier en curl
-        </Button>
+            </Button>
+          </>
+        )}
       </div>
 
       {uploading && (
@@ -543,8 +725,20 @@ export default function RequestBuilder(props: Props) {
         {/* Fixed working height once two-column: the response card fills it and
             each tab scrolls internally, so the panel's bottom edge stays aligned
             with the left column instead of ending wherever content runs out. */}
-        <div className="min-w-0 @min-[61rem]:sticky @min-[61rem]:top-[4.5rem] @min-[61rem]:self-start">
-          <div className="@min-[61rem]:flex @min-[61rem]:h-[calc(100vh-5.5rem)] @min-[61rem]:flex-col">
+        <div
+          className={
+            compactResponse
+              ? "min-w-0 @min-[61rem]:relative @min-[61rem]:self-stretch"
+              : "min-w-0 @min-[61rem]:sticky @min-[61rem]:top-[4.5rem] @min-[61rem]:self-start"
+          }
+        >
+          <div
+            className={
+              compactResponse
+                ? "@min-[61rem]:absolute @min-[61rem]:inset-0 @min-[61rem]:flex @min-[61rem]:flex-col"
+                : "@min-[61rem]:flex @min-[61rem]:h-[calc(100vh-5.5rem)] @min-[61rem]:flex-col"
+            }
+          >
           {/* URL of the resource actually shown below — the operation URL, or
               the followed HAL link while navigating. Kept here (not on the
               stable "URL composée" card) so it tracks what the response is. */}

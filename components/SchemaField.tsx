@@ -14,9 +14,11 @@ import {
 } from "@/components/ui/select";
 import Field, { FieldHint, ConstraintBadges } from "@/components/Field";
 import type { JsonSchema } from "@/lib/types";
-import { defaultFromSchema } from "@/lib/example-extractor";
+import { blankArrayItem, emptyValueFromSchema } from "@/lib/example-extractor";
 import { humanizeKey } from "@/lib/humanize";
 import { cn } from "@/lib/utils";
+import { useFieldOptions } from "@/components/FieldOptionsContext";
+import FieldCombobox from "@/components/FieldCombobox";
 
 interface Props {
   schema: JsonSchema;
@@ -36,7 +38,7 @@ interface Props {
 //   • array          → repeatable list, recurses on items
 //   • object         → grouped fieldset
 //   • oneOf/anyOf    → branch picker + recursion on chosen branch
-//   • allOf          → merged via defaultFromSchema; rendered as a single
+//   • allOf          → merged via mergeAllOf; rendered as a single
 //                       object by combining properties.
 //
 // readOnly fields are dropped (Spectral guarantees Create/Update schemas
@@ -52,17 +54,23 @@ export default function SchemaField({
   const label = name ? humanizeKey(name) : "";
   const hint = effective.description;
   const meta = <ConstraintBadges schema={effective} />;
+  // Opt-in externally-supplied options for this leaf (keyed by property name).
+  // Empty unless a FieldOptionsProvider up the tree targets this field — so
+  // ordinary forms are unaffected. Called unconditionally (rules of hooks).
+  const fieldOptions = useFieldOptions(name);
 
-  // const: render as a read-only label
+  // const: fixed value — rendered read-only and self-emitting (see ConstField).
   if (effective.const !== undefined) {
     return (
-      <Field label={label} hint={hint} required={required}>
-        <Input
-          value={String(effective.const)}
-          readOnly
-          className="bg-muted text-muted-foreground"
-        />
-      </Field>
+      <ConstField
+        constValue={effective.const}
+        value={value}
+        onChange={onChange}
+        label={label}
+        hint={hint}
+        required={required}
+        readOnly={effective.readOnly}
+      />
     );
   }
 
@@ -189,30 +197,82 @@ export default function SchemaField({
     default:
       return (
         <Field label={label} hint={hint} required={required} meta={meta}>
-          <Input
-            type={inputTypeForFormat(effective.format)}
-            aria-required={required || undefined}
-            value={
-              value === null || value === undefined
-                ? ""
-                : effective.format === "date-time"
-                  ? toDatetimeLocal(String(value))
-                  : String(value)
-            }
-            minLength={effective.minLength}
-            maxLength={effective.maxLength}
-            pattern={effective.pattern}
-            // Clearing an optional field should omit it from the payload
-            // (`undefined` → JSON.stringify drops the key), not send `""`.
-            onChange={(e) => {
-              const v = e.target.value;
-              if (v === "") return onChange(required ? "" : undefined);
-              onChange(effective.format === "date-time" ? toInstant(v) : v);
-            }}
-          />
+          {fieldOptions?.length ? (
+            // A step supplied a fetched option list for this field name — pick
+            // from a searchable combobox instead of typing a raw id/value.
+            <FieldCombobox
+              options={fieldOptions}
+              value={value}
+              onChange={onChange}
+              required={required}
+            />
+          ) : (
+            <Input
+              type={inputTypeForFormat(effective.format)}
+              aria-required={required || undefined}
+              value={
+                value === null || value === undefined
+                  ? ""
+                  : effective.format === "date-time"
+                    ? toDatetimeLocal(String(value))
+                    : String(value)
+              }
+              minLength={effective.minLength}
+              maxLength={effective.maxLength}
+              pattern={effective.pattern}
+              // Clearing an optional field should omit it from the payload
+              // (`undefined` → JSON.stringify drops the key), not send `""`.
+              onChange={(e) => {
+                const v = e.target.value;
+                if (v === "") return onChange(required ? "" : undefined);
+                onChange(effective.format === "date-time" ? toInstant(v) : v);
+              }}
+            />
+          )}
         </Field>
       );
   }
+}
+
+function ConstField({
+  constValue,
+  value,
+  onChange,
+  label,
+  hint,
+  required,
+  readOnly,
+}: {
+  constValue: unknown;
+  value: unknown;
+  onChange: (next: unknown) => void;
+  label?: string;
+  hint?: string;
+  required?: boolean;
+  readOnly?: boolean;
+}) {
+  // A `const` field has exactly one valid value, so emit it whenever the current
+  // value differs — this keeps it in the payload even when untouched. Notably it
+  // populates a oneOf discriminator (e.g. `outcome`) for the branch shown by
+  // default, which is otherwise displayed read-only but never sent. One-shot:
+  // after emitting, value === constValue and the guard stops it.
+  //
+  // A `readOnly` const is server-managed: display it but never inject it into
+  // the request body (some backends reject read-only fields on write).
+  useEffect(() => {
+    if (readOnly) return;
+    if (value !== constValue) onChange(constValue);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [value, constValue, readOnly]);
+  return (
+    <Field label={label} hint={hint} required={required}>
+      <Input
+        value={String(constValue)}
+        readOnly
+        className="bg-muted text-muted-foreground"
+      />
+    </Field>
+  );
 }
 
 function ObjectField({
@@ -313,7 +373,7 @@ function ArrayField({
           type="button"
           variant="outline"
           size="sm"
-          onClick={() => onChange([...items, defaultFromSchema(itemSchema)])}
+          onClick={() => onChange([...items, blankArrayItem(itemSchema)])}
           className="border-dashed text-xs"
         >
           <Plus className="size-3" /> Ajouter
@@ -593,7 +653,7 @@ function OneOfField({
               type="button"
               onClick={() => {
                 setSelectedIdx(i);
-                onChange(defaultFromSchema(variants[i]));
+                onChange(emptyValueFromSchema(variants[i]));
               }}
               className={cn(
                 "rounded-full px-3 py-1 text-xs font-semibold transition-colors",
