@@ -217,6 +217,8 @@ export default function SchemaField({
           ) : (
             <Input
               type={inputTypeForFormat(effective.format)}
+              // Native date/datetime pickers format from the element's lang.
+              lang="fr-FR"
               aria-required={required || undefined}
               value={
                 value === null || value === undefined
@@ -593,6 +595,8 @@ function MapValueInput({
   return (
     <Input
       type={inputTypeForFormat(schema.format)}
+      // Native date/datetime pickers format from the element's lang.
+      lang="fr-FR"
       aria-label={ariaLabel}
       value={
         value === null || value === undefined
