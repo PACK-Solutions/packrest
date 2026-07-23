@@ -20,6 +20,9 @@ import RequestBuilder from "@/components/RequestBuilder";
 import ParcoursStepper from "@/components/ParcoursStepper";
 import ParcoursContextPanel from "@/components/ParcoursContextPanel";
 import ParcoursSelect from "@/components/ParcoursSelect";
+import ParcoursDocuments, {
+  type ParcoursSrTarget,
+} from "@/components/ParcoursDocuments";
 import Markdown from "@/components/Markdown";
 import {
   FieldOptionsProvider,
@@ -47,8 +50,10 @@ import {
   initialState,
   isSuccess,
   loadParcoursState,
+  mergeContextValues,
   saveParcoursState,
   type ContextKey,
+  type ContextValues,
   type ParcoursState,
   type ParcoursStep,
   type StepDraft,
@@ -62,6 +67,41 @@ interface LoadedEntry {
   entry: EndpointEntry;
   scopes: Record<string, string>;
   tokenUrl: string;
+}
+
+// Build the list of service requests the Phase C document form should complete,
+// from the parcours context. Each SR present in the context becomes a card;
+// the document owner is inferred per SR type (contract SR + beneficiary clause
+// are owned by the contract, the SEPA mandate SR by the payment method).
+function buildSrTargets(values: ContextValues): ParcoursSrTarget[] {
+  const contractId = values.contract_id ?? "";
+  const paymentMethodId = values.payment_method_id ?? "";
+  const targets: ParcoursSrTarget[] = [];
+  if (values.sr_contract_id)
+    targets.push({
+      key: "sr_contract_id",
+      id: values.sr_contract_id,
+      label: "Souscription du contrat",
+      ownerField: "contract_id",
+      ownerId: contractId,
+    });
+  if (values.sr_mandate_id)
+    targets.push({
+      key: "sr_mandate_id",
+      id: values.sr_mandate_id,
+      label: "Signature du mandat SEPA",
+      ownerField: "payment_method_id",
+      ownerId: paymentMethodId,
+    });
+  if (values.sr_beneficiary_id)
+    targets.push({
+      key: "sr_beneficiary_id",
+      id: values.sr_beneficiary_id,
+      label: "Changement de clause bénéficiaire",
+      ownerField: "contract_id",
+      ownerId: contractId,
+    });
+  return targets;
 }
 
 function Parcours() {
@@ -233,7 +273,12 @@ function Parcours() {
   const setValue = useCallback((key: ContextKey, value: string) => {
     setState((prev) => {
       if (!prev) return prev;
-      const next = { ...prev, values: { ...prev.values, [key]: value } };
+      // Route through mergeContextValues so editing contract_id by hand clears
+      // ids scoped to the previous contract (premium, periodic premium, SRs…).
+      const next = {
+        ...prev,
+        values: mergeContextValues(prev.values, { [key]: value }),
+      };
       saveParcoursState(next);
       return next;
     });
@@ -269,6 +314,21 @@ function Parcours() {
       return next;
     });
   }, [def, activeStep]);
+
+  // A custom step (e.g. the Phase C document form) reports its own completion —
+  // mark it done and advance to the frontier, like a write step's onResult.
+  const completeCustomStep = useCallback(
+    (stepId: string) => {
+      if (!def) return;
+      setState((prev) => {
+        if (!prev) return prev;
+        const next = advanceState(prev, def, stepId, {});
+        saveParcoursState(next);
+        return next;
+      });
+    },
+    [def],
+  );
 
   const reset = useCallback(() => {
     if (!def) return;
@@ -505,7 +565,7 @@ function Parcours() {
             </Card>
           )}
 
-          {!resolving && activeStep && stepEntry && state && (
+          {!resolving && activeStep && !activeStep.custom && stepEntry && state && (
             <FieldOptionsProvider
               value={
                 fieldOpts && fieldOpts.stepId === activeStep.id
@@ -536,6 +596,17 @@ function Parcours() {
               />
             </FieldOptionsProvider>
           )}
+
+          {!resolving &&
+            activeStep?.custom === "documents" &&
+            stepEntry &&
+            state && (
+              <ParcoursDocuments
+                key={`documents-${activeStep.id}`}
+                serviceRequests={buildSrTargets(state.values)}
+                onComplete={() => completeCustomStep(activeStep.id)}
+              />
+            )}
 
           {activeStep?.selects &&
             stepResponse &&

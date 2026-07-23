@@ -27,6 +27,7 @@ export function describeConstraints(
   const type = normalizeType(schema.type);
   if (type) push(type, "type");
   if (schema.format) push(`format: ${schema.format}`, "format");
+  if (schema.nullable) push("nullable", "constraint");
 
   // string
   if (schema.minLength != null) push(`minLength ${schema.minLength}`, "constraint");

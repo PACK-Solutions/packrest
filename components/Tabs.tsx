@@ -12,6 +12,7 @@ import {
   TabsTrigger,
 } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
+import { cn } from "@/lib/utils";
 
 export interface TabSpec {
   id: string;
@@ -29,6 +30,12 @@ interface Props {
   // At xl, stretch to fill the parent flex column and scroll each tab's
   // content internally (used by the fixed-height response panel).
   fill?: boolean;
+  // Keep every tab's content mounted (hidden when inactive) instead of Radix's
+  // default unmount-on-inactive. Needed when an inactive tab hosts fields that
+  // must run on mount — e.g. a `const` discriminator in the body form that
+  // self-emits its value (SchemaField's ConstField). Without this, opening on
+  // the Paramètres tab sends a body missing that discriminator.
+  mountAll?: boolean;
 }
 
 export default function Tabs({
@@ -37,6 +44,7 @@ export default function Tabs({
   activeId,
   onChange,
   fill = false,
+  mountAll = false,
 }: Props) {
   const [internal, setInternal] = useState(defaultId ?? tabs[0]?.id);
   const active = activeId ?? internal;
@@ -83,9 +91,13 @@ export default function Tabs({
         <TabsContent
           key={t.id}
           value={t.id}
-          className={
-            fill ? "scrollbar-thin pt-2 xl:min-h-0 xl:overflow-y-auto" : "pt-2"
-          }
+          forceMount={mountAll ? true : undefined}
+          className={cn(
+            fill ? "scrollbar-thin pt-2 xl:min-h-0 xl:overflow-y-auto" : "pt-2",
+            // Under forceMount Radix keeps the panel visible even when
+            // inactive, so hide inactive panels ourselves.
+            mountAll && "data-[state=inactive]:hidden",
+          )}
         >
           {t.content}
         </TabsContent>

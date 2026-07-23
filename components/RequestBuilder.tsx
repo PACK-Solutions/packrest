@@ -43,6 +43,7 @@ import type {
 } from "@/lib/types";
 import { buildManagedHeaders } from "@/lib/curl";
 import { formatUploadSize } from "@/lib/multipart";
+import { bodyHasEditableFields } from "@/lib/schema-normalize";
 import { useToken } from "@/hooks/use-token";
 import { useRequestExecution } from "@/hooks/use-request-execution";
 import { useHalNavigation } from "@/hooks/use-hal-navigation";
@@ -447,7 +448,11 @@ export default function RequestBuilder(props: Props) {
 
   // The "Corps" tab renders a JSON body form, a multipart upload form, or
   // nothing (GET / no request body).
-  const hasBody = !!bodySchema || isMultipart;
+  // Hide the "Corps" tab when the JSON body has nothing to fill (every
+  // field readOnly, e.g. the French-residency upsert whose only field is a
+  // server-managed const). Multipart bodies always keep the tab.
+  const hasBody =
+    (!!bodySchema && bodyHasEditableFields(bodySchema)) || isMultipart;
 
   // Greyed-out managed rows shown in the header editor: the (masked) bearer
   // and the Content-Type the proxy will set for the body.
@@ -604,6 +609,10 @@ export default function RequestBuilder(props: Props) {
       <Card>
         <CardBody className="p-3">
           <Tabs
+            // Keep every tab mounted so a body-tab `const` discriminator
+            // (e.g. DecisionCreate's `outcome`) self-emits even when the form
+            // opens on the Paramètres tab — otherwise the body ships as `{}`.
+            mountAll
             tabs={[
               ...(pathParams.length || queryParams.length
                 ? [

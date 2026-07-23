@@ -1,18 +1,19 @@
-// One-shot "run a GET operation and read its JSON" helper for auxiliary lookups
-// (e.g. populating an inline picker with a product's funds) — outside the full
-// RequestBuilder form flow.
+// "Run an operation and read its response" helper for auxiliary calls made
+// outside the full RequestBuilder form flow — e.g. populating an inline picker
+// with a product's funds (GET), or the Parcours document form creating then
+// attaching a document (POST multipart + POST JSON).
 //
 // The tricky part is auth: the app keeps a single shared bearer, and in the
 // Parcours each step fetches its own token scoped for *that* step's API. So the
-// bearer currently in the store belongs to the active step (e.g. `contract`)
+// bearer token in the store belongs to the active step (e.g. `contract`)
 // and would be rejected by another API (`product` needs `products:read`). We
 // therefore mint a dedicated token for the target operation's own scopes with
 // `persist: false`, so the active step's bearer is left untouched. If no
 // credentials are configured (or the token call fails), we fall back to the
 // shared token — better a 401 the caller can detect than a crash.
 //
-// GET only: no body is sent. Returns the raw ProxyResponse (or null when the
-// spec/op can't be resolved) so callers can tell 401/failure from an empty list.
+// Returns the raw ProxyResponse (or null when the spec/op can't be resolved) so
+// callers can tell 401/failure from an empty list.
 
 import { loadSpec, findEndpoint, extractOAuth2 } from "@/lib/specs";
 import { resolveBaseUrl, resolveTokenUrl, isPreset } from "@/lib/env";
@@ -23,7 +24,11 @@ import {
   isCustomEnvActive,
 } from "@/lib/storage";
 import { fetchToken, currentToken } from "@/lib/token";
-import { executeRequest, type ProxyResponse } from "@/lib/http";
+import {
+  executeRequest,
+  type ProxyResponse,
+  type MultipartPayload,
+} from "@/lib/http";
 
 // Short-lived cache of non-persisted tokens minted for auxiliary lookups, keyed
 // by (tokenUrl, clientId, scopes). Two fieldOptions sources on one step (e.g. a
@@ -34,11 +39,17 @@ const auxTokenCache = new Map<
   { accessToken: string; expiresAt: number }
 >();
 
-export async function fetchOperationJson(
+// Resolve an operation's URL and mint a bearer scoped for its API without
+// clobbering the shared store. Returns null when the spec/op can't be resolved.
+async function resolveAndAuth(
   apiId: string,
   operationId: string,
   pathParams: Record<string, string>,
-): Promise<ProxyResponse | null> {
+): Promise<{
+  url: string;
+  headers: Record<string, string>;
+  method: string;
+} | null> {
   const doc = await loadSpec(apiId);
   if (!doc) return null;
   const entry = findEndpoint(doc, apiId, operationId);
@@ -106,10 +117,47 @@ export async function fetchOperationJson(
   const headers: Record<string, string> = {};
   if (accessToken) headers["Authorization"] = `Bearer ${accessToken}`;
 
-  return executeRequest({
-    method: "GET",
+  return {
     url: `${baseUrl}${filledPath}${query ? `?${query}` : ""}`,
     headers,
+    method: entry.method.toUpperCase(),
+  };
+}
+
+// Run any operation with a per-API scoped token. GET carries no body; a POST/PUT
+// may pass a JSON `body` or a `multipart` payload (mutually exclusive). Returns
+// null only when the spec/op can't be resolved.
+export async function callOperation(opts: {
+  apiId: string;
+  operationId: string;
+  pathParams?: Record<string, string>;
+  method?: string;
+  body?: object | null;
+  multipart?: MultipartPayload;
+}): Promise<ProxyResponse | null> {
+  const resolved = await resolveAndAuth(
+    opts.apiId,
+    opts.operationId,
+    opts.pathParams ?? {},
+  );
+  if (!resolved) return null;
+
+  return executeRequest({
+    // Default to the spec-declared verb; an explicit opts.method still wins.
+    method: opts.method ?? resolved.method,
+    url: resolved.url,
+    headers: resolved.headers,
+    body: opts.body,
+    multipart: opts.multipart,
     custom: isCustomEnvActive(),
   });
+}
+
+// GET convenience wrapper (used by the Parcours fieldOptions picker fetch).
+export async function fetchOperationJson(
+  apiId: string,
+  operationId: string,
+  pathParams: Record<string, string>,
+): Promise<ProxyResponse | null> {
+  return callOperation({ apiId, operationId, pathParams, method: "GET" });
 }

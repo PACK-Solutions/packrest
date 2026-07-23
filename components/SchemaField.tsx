@@ -14,6 +14,11 @@ import {
 } from "@/components/ui/select";
 import Field, { FieldHint, ConstraintBadges } from "@/components/Field";
 import type { JsonSchema } from "@/lib/types";
+import {
+  collapseNullableVariants,
+  mergeAllOf,
+  partitionRequiredFirst,
+} from "@/lib/schema-normalize";
 import { blankArrayItem, emptyValueFromSchema } from "@/lib/example-extractor";
 import { humanizeKey } from "@/lib/humanize";
 import { cn } from "@/lib/utils";
@@ -50,7 +55,10 @@ export default function SchemaField({
   name,
   required,
 }: Props) {
-  const effective = useMemo(() => mergeAllOf(schema), [schema]);
+  const effective = useMemo(
+    () => collapseNullableVariants(mergeAllOf(schema)),
+    [schema],
+  );
   const label = name ? humanizeKey(name) : "";
   const hint = effective.description;
   const meta = <ConstraintBadges schema={effective} />;
@@ -293,7 +301,13 @@ function ObjectField({
   const obj = (value && typeof value === "object" && !Array.isArray(value)
     ? value
     : {}) as Record<string, unknown>;
-  const visible = Object.entries(props).filter(([, sub]) => !sub.readOnly);
+  // Required fields first, then optional (each group keeps its schema order) so
+  // non-developers can spot what they must fill when the spec's generated
+  // `properties` are alphabetised. Shared with the multipart form.
+  const visible = partitionRequiredFirst(
+    Object.entries(props).filter(([, sub]) => !sub.readOnly),
+    required,
+  );
   return (
     <fieldset className="bg-muted/30 space-y-3 rounded-md border p-3">
       {label && (
@@ -745,23 +759,3 @@ function isMapSchema(s: JsonSchema): boolean {
   return objectish && !hasProps;
 }
 
-function mergeAllOf(schema: JsonSchema): JsonSchema {
-  if (!schema.allOf?.length) return schema;
-  const merged: JsonSchema = { ...schema };
-  delete merged.allOf;
-  for (const part of schema.allOf) {
-    const m = mergeAllOf(part);
-    if (m.properties) {
-      merged.properties = { ...(merged.properties ?? {}), ...m.properties };
-    }
-    if (m.required) {
-      merged.required = Array.from(
-        new Set([...(merged.required ?? []), ...m.required]),
-      );
-    }
-    if (m.type && !merged.type) merged.type = m.type;
-    if (m.description && !merged.description) merged.description = m.description;
-    if (m.title && !merged.title) merged.title = m.title;
-  }
-  return merged;
-}

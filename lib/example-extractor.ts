@@ -58,9 +58,12 @@ export function defaultFromSchema(schema: JsonSchema | undefined): unknown {
   if (schema.default !== undefined) return schema.default;
   if (schema.const !== undefined) return schema.const;
   if (schema.enum?.length) return schema.enum[0];
-  // oneOf/anyOf: take the first branch
+  // oneOf/anyOf: take the first real (non-null) branch
   const variants = schema.oneOf ?? schema.anyOf;
-  if (variants?.length) return defaultFromSchema(variants[0]);
+  if (variants?.length) {
+    const pick = variants.find((v) => v.type !== "null") ?? variants[0];
+    return defaultFromSchema(pick);
+  }
   if (schema.allOf?.length) {
     return schema.allOf.reduce<Record<string, unknown>>(
       (acc, part) => {
@@ -109,7 +112,14 @@ export function emptyValueFromSchema(schema: JsonSchema | undefined): unknown {
   if (!schema) return undefined;
   if (schema.const !== undefined) return schema.const;
   const variants = schema.oneOf ?? schema.anyOf;
-  if (variants?.length) return emptyValueFromSchema(variants[0]);
+  if (variants?.length) {
+    // A nullable union (has a null branch) stays blank so the key is omitted
+    // from the payload until the user fills it — matches the "start empty"
+    // contract and avoids seeding an empty {}/[] the backend may reject.
+    if (variants.some((v) => v.type === "null")) return undefined;
+    const pick = variants.find((v) => v.type !== "null") ?? variants[0];
+    return emptyValueFromSchema(pick);
+  }
   if (schema.allOf?.length) {
     return schema.allOf.reduce<Record<string, unknown>>((acc, part) => {
       const v = emptyValueFromSchema(part);

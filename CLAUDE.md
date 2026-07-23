@@ -133,10 +133,13 @@ npm run dev          # frontend only in a browser (Tauri APIs disabled; no specs
 npm run build        # static export → out/
 npm run tauri:build  # bundle the desktop app
 npm run typecheck    # tsc --noEmit
+npm run test:unit    # vitest run (unit tests)
 ```
 
-No test runner/ESLint/Prettier. `typecheck` + `next build` (static export) +
-`cargo check` (in `src-tauri/`) are the automated checks — run before shipping.
+No ESLint/Prettier. Unit tests run under Vitest (`npm run test:unit`) — the
+spec-normalization logic in `lib/schema-normalize.ts` is covered there.
+`typecheck` + `next build` (static export) + `cargo check` (in `src-tauri/`) +
+`npm run test:unit` are the automated checks — run before shipping.
 
 ## Known limitations
 

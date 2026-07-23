@@ -30,8 +30,9 @@ export type ContextKey =
   | "contract_number"
   | "sr_contract_id"
   | "sr_mandate_id"
-  | "sr_beneficiary_id"
-  | "document_id";
+  | "premium_id"
+  | "periodic_premium_id"
+  | "sr_beneficiary_id";
 
 export interface ContextField {
   key: ContextKey;
@@ -51,10 +52,11 @@ export const CONTEXT_FIELDS: ContextField[] = [
   { key: "rum", label: "rum" },
   { key: "contract_id", label: "contract_id" },
   { key: "contract_number", label: "contract_number" },
+  { key: "premium_id", label: "premium_id (versement initial)" },
+  { key: "periodic_premium_id", label: "periodic_premium_id" },
   { key: "sr_contract_id", label: "SR contrat (id)" },
   { key: "sr_mandate_id", label: "SR mandat SEPA (id)" },
   { key: "sr_beneficiary_id", label: "SR clause bénéficiaire (id)" },
-  { key: "document_id", label: "document_id" },
 ];
 
 export type ContextValues = Partial<Record<ContextKey, string>>;
@@ -126,6 +128,10 @@ export interface ParcoursStep {
   /** Fetched option lists for named body leaves, turning free-text inputs into
    *  searchable dropdowns (e.g. a product's funds). Resolved on step entry. */
   fieldOptions?: FieldOptionSource[];
+  /** Renders a bespoke component instead of the RequestBuilder (see
+   *  app/parcours/page.tsx). "documents" → the requirements-driven upload form
+   *  that analyses each SR's `requirements[]` and uploads+attaches per document. */
+  custom?: "documents";
 }
 
 export interface ParcoursDef {
@@ -360,6 +366,21 @@ const STEPS: ParcoursStep[] = [
         },
       },
     ],
+    produces: [{ key: "premium_id", from: { kind: "bodyField", fields: ["id", "premium_id"] } }],
+  },
+  {
+    id: "update-premium",
+    phase: PHASE_B,
+    apiId: "contract",
+    operationId: "updatePremium",
+    title: "Modifier le versement initial (optionnel)",
+    description:
+      "Modifie le versement initial (one-time premium) DRAFT **existant** sans le recréer, tant que le contrat n'est pas soumis — mise à jour partielle : seuls les champs renseignés sont modifiés (montant, allocations devant toujours sommer à 100%, etc.). contract_id et premium_id sont préremplis. Après soumission du contrat l'édition directe est verrouillée (409) : annulez le versement et recréez-en un.",
+    optional: true,
+    seedFrom: [
+      { target: "param", name: "contract_id", from: "contract_id" },
+      { target: "param", name: "premium_id", from: "premium_id" },
+    ],
   },
   {
     id: "create-periodic-premium",
@@ -368,9 +389,24 @@ const STEPS: ParcoursStep[] = [
     operationId: "createPeriodicPremium",
     title: "Versement périodique (optionnel)",
     description:
-      "Renseignez dates, periodic_amount et periodicity. Un versement périodique n'est plus modifiable après sa création.",
+      "Renseignez dates, periodic_amount et periodicity. Modifiable tant que le contrat n'est pas soumis, via « Modifier le versement périodique ».",
     optional: true,
     seedFrom: [{ target: "param", name: "contract_id", from: "contract_id" }],
+    produces: [{ key: "periodic_premium_id", from: { kind: "bodyField", fields: ["id", "periodic_premium_id"] } }],
+  },
+  {
+    id: "update-periodic-premium",
+    phase: PHASE_B,
+    apiId: "contract",
+    operationId: "updatePeriodicPremium",
+    title: "Modifier le versement périodique (optionnel)",
+    description:
+      "Modifie le versement périodique DRAFT **existant** sans le recréer, tant que le contrat n'est pas soumis — mise à jour partielle : seuls les champs renseignés sont modifiés (dates, periodic_amount, periodicity, allocations devant toujours sommer à 100%). contract_id et periodic_premium_id sont préremplis. Après soumission du contrat l'édition directe est verrouillée (409) : annulez le versement et recréez-en un.",
+    optional: true,
+    seedFrom: [
+      { target: "param", name: "contract_id", from: "contract_id" },
+      { target: "param", name: "periodic_premium_id", from: "periodic_premium_id" },
+    ],
   },
   {
     id: "submit-contract",
@@ -388,32 +424,22 @@ const STEPS: ParcoursStep[] = [
   },
 
   // ---- Phase C : compléter les Service Requests ----------------------------
-  // Répétable : une paire (téléversement + rattachement) par requirement, pour
-  // chacune des deux demandes (contrat + mandat). Revenez sur ces étapes autant
-  // de fois que nécessaire.
+  // A single custom step: after the contract is submitted, analyse each service
+  // request's `requirements[]` and render one upload form per required document.
+  // Each upload creates the document AND attaches it to the right SR in one go
+  // (components/ParcoursDocuments.tsx), replacing the old manual
+  // create-then-attach pair that had to be repeated once per document.
   {
-    id: "create-document",
+    id: "complete-service-requests",
     phase: PHASE_C,
-    apiId: "document",
-    operationId: "createDocument",
-    title: "Téléverser une pièce justificative",
-    description:
-      "Téléversement multipart : renseignez document_type et le fichier (file), ainsi qu'un propriétaire (contract_id, person_id ou payment_method_id).",
-    seedFrom: [{ target: "body", name: "contract_id", from: "contract_id" }],
-    produces: [{ key: "document_id", from: { kind: "bodyField", fields: ["document_id", "id"] } }],
-  },
-  {
-    id: "attach-document",
-    phase: PHASE_C,
+    custom: "documents",
+    // A real operation on the SR API so the page's spec-resolution/gating still
+    // validates the service-request contract is synced before rendering.
     apiId: "service-request",
-    operationId: "attachServiceRequestDocument",
-    title: "Rattacher le document à la demande",
+    operationId: "getServiceRequestById",
+    title: "Compléter les demandes (pièces justificatives)",
     description:
-      "La demande liée au contrat (service_request_id) est pré-remplie ; les identifiants des autres demandes (mandat SEPA, changement de clause bénéficiaire) figurent dans le contexte — remplacez service_request_id pour rattacher un document à l'une d'elles. Renseignez document_id et type. Lorsque tous les requirements sont au statut SUBMITTED, la demande passe au statut UNDER_REVIEW.",
-    seedFrom: [
-      { target: "param", name: "service_request_id", from: "sr_contract_id" },
-      { target: "body", name: "document_id", from: "document_id" },
-    ],
+      "Pour chaque demande ouverte (souscription du contrat, signature du mandat SEPA, changement de clause bénéficiaire), les pièces requises sont analysées automatiquement. Téléversez chaque document demandé : il est créé puis rattaché à la bonne demande en une seule action. Lorsque toutes les pièces d'une demande sont fournies, celle-ci passe au statut UNDER_REVIEW.",
   },
 
   // ---- Phase D : décision back-office + suivi ------------------------------
@@ -540,7 +566,7 @@ export function isSuccess(res: ProxyResponse): boolean {
   return res.status >= 200 && res.status < 300;
 }
 
-function asRecord(v: unknown): Record<string, unknown> | null {
+export function asRecord(v: unknown): Record<string, unknown> | null {
   return v && typeof v === "object" && !Array.isArray(v)
     ? (v as Record<string, unknown>)
     : null;
@@ -761,6 +787,42 @@ export function clearParcoursState(): void {
   }
 }
 
+// Context ids scoped to a specific contract: when contract_id changes to a
+// different contract (re-running « Créer le contrat », or editing it by hand),
+// these no longer apply and must be dropped so a later step (e.g. update-premium)
+// never seeds an id captured under the previous contract.
+const CONTRACT_SCOPED_KEYS: ContextKey[] = [
+  "contract_number",
+  "premium_id",
+  "periodic_premium_id",
+  "sr_contract_id",
+  "sr_beneficiary_id",
+];
+
+// Merge captured/edited values into the context. When `incoming` sets a
+// contract_id different from the current one, contract-scoped ids that aren't
+// themselves part of this batch are cleared (they belonged to the old contract).
+// Values present in `incoming` always win and are never cleared.
+export function mergeContextValues(
+  prev: ContextValues,
+  incoming: ContextValues,
+): ContextValues {
+  const next: ContextValues = { ...prev, ...incoming };
+  const nextContract = incoming.contract_id;
+  const changedContract =
+    nextContract != null &&
+    nextContract !== "" &&
+    prev.contract_id != null &&
+    prev.contract_id !== "" &&
+    nextContract !== prev.contract_id;
+  if (changedContract) {
+    for (const k of CONTRACT_SCOPED_KEYS) {
+      if (!(k in incoming)) delete next[k];
+    }
+  }
+  return next;
+}
+
 // After a step succeeds (or is skipped), mark it done and advance the cursor to
 // the earliest not-yet-done step (naturally handles re-running an earlier step
 // without jumping the user backwards or past their progress).
@@ -777,7 +839,7 @@ export function advanceState(
     def.steps.find((s) => !done.includes(s.id))?.id ?? completedStepId;
   return {
     ...state,
-    values: { ...state.values, ...produced },
+    values: mergeContextValues(state.values, produced),
     done,
     currentStepId: next,
   };
