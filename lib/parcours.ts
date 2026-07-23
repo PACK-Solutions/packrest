@@ -24,6 +24,7 @@ import type { ProxyResponse } from "@/lib/http";
 export type ContextKey =
   | "product_id"
   | "person_id"
+  | "person_name"
   | "payment_method_id"
   | "rum"
   | "contract_id"
@@ -48,6 +49,7 @@ export interface ContextField {
 export const CONTEXT_FIELDS: ContextField[] = [
   { key: "product_id", label: "product_id", manual: true },
   { key: "person_id", label: "person_id" },
+  { key: "person_name", label: "person_name (souscripteur)" },
   { key: "payment_method_id", label: "payment_method_id" },
   { key: "rum", label: "rum" },
   { key: "contract_id", label: "contract_id" },
@@ -799,25 +801,37 @@ const CONTRACT_SCOPED_KEYS: ContextKey[] = [
   "sr_beneficiary_id",
 ];
 
+// Same idea for values scoped to a specific person: when person_id changes,
+// the captured name belongs to the previous person and must not leak into
+// later requests (e.g. the auto-run's account_holder_name).
+const PERSON_SCOPED_KEYS: ContextKey[] = ["person_name"];
+
 // Merge captured/edited values into the context. When `incoming` sets a
-// contract_id different from the current one, contract-scoped ids that aren't
-// themselves part of this batch are cleared (they belonged to the old contract).
-// Values present in `incoming` always win and are never cleared.
+// contract_id (resp. person_id) different from the current one, ids scoped to
+// the previous contract (resp. person) that aren't themselves part of this
+// batch are cleared. Values present in `incoming` always win and are never
+// cleared.
 export function mergeContextValues(
   prev: ContextValues,
   incoming: ContextValues,
 ): ContextValues {
   const next: ContextValues = { ...prev, ...incoming };
-  const nextContract = incoming.contract_id;
-  const changedContract =
-    nextContract != null &&
-    nextContract !== "" &&
-    prev.contract_id != null &&
-    prev.contract_id !== "" &&
-    nextContract !== prev.contract_id;
-  if (changedContract) {
-    for (const k of CONTRACT_SCOPED_KEYS) {
-      if (!(k in incoming)) delete next[k];
+  const scopes: Array<{ owner: ContextKey; keys: ContextKey[] }> = [
+    { owner: "contract_id", keys: CONTRACT_SCOPED_KEYS },
+    { owner: "person_id", keys: PERSON_SCOPED_KEYS },
+  ];
+  for (const { owner, keys } of scopes) {
+    const nextOwner = incoming[owner];
+    const changed =
+      nextOwner != null &&
+      nextOwner !== "" &&
+      prev[owner] != null &&
+      prev[owner] !== "" &&
+      nextOwner !== prev[owner];
+    if (changed) {
+      for (const k of keys) {
+        if (!(k in incoming)) delete next[k];
+      }
     }
   }
   return next;

@@ -68,6 +68,29 @@ describe("mergeContextValues", () => {
     expect(next.contract_number).toBe("N2");
     expect(next.premium_id).toBeUndefined();
   });
+
+  it("clears person_name when person_id changes to a different person", () => {
+    const prev: ContextValues = {
+      person_id: "p1",
+      person_name: "Alice Martin",
+      contract_id: "c1",
+    };
+    const next = mergeContextValues(prev, { person_id: "p2" });
+    expect(next.person_id).toBe("p2");
+    expect(next.person_name).toBeUndefined();
+    // Non-person-scoped values survive.
+    expect(next.contract_id).toBe("c1");
+  });
+
+  it("keeps person_name when person_id is unchanged or supplied in the batch", () => {
+    const prev: ContextValues = { person_id: "p1", person_name: "Alice Martin" };
+    expect(mergeContextValues(prev, { person_id: "p1" })).toEqual(prev);
+    const next = mergeContextValues(prev, {
+      person_id: "p2",
+      person_name: "Bob Durand",
+    });
+    expect(next.person_name).toBe("Bob Durand");
+  });
 });
 
 describe("advanceState clears stale contract-scoped ids", () => {

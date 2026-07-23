@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useCallback, useEffect, useState } from "react";
+import { Suspense, useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { ChevronLeft, ChevronRight, SkipForward } from "lucide-react";
@@ -18,6 +18,9 @@ import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import RequestBuilder from "@/components/RequestBuilder";
 import ParcoursStepper from "@/components/ParcoursStepper";
+import ParcoursAutoPanel, {
+  type AutoPhase,
+} from "@/components/ParcoursAutoPanel";
 import ParcoursContextPanel from "@/components/ParcoursContextPanel";
 import ParcoursSelect from "@/components/ParcoursSelect";
 import ParcoursDocuments, {
@@ -58,6 +61,7 @@ import {
   type ParcoursStep,
   type StepDraft,
 } from "@/lib/parcours";
+import { AUTO_STOP_STEP_ID, runParcoursAuto } from "@/lib/parcours-auto";
 
 interface LoadedEntry {
   /** The step this entry was resolved for — guards against a stale async
@@ -159,7 +163,12 @@ function Parcours() {
     let cancelled = false;
     setLoadingEntry(true);
     setLoaded(null);
-    setStepResponse(null);
+    // Clear a stale response from another step — but keep one already tagged
+    // for THIS step (the auto-run pauses at the picker by storing the fetched
+    // list under the picker step's id, possibly right after navigating to it).
+    setStepResponse((prev) =>
+      prev && prev.stepId === activeStep.id ? prev : null,
+    );
     loadSpec(activeStep.apiId).then((spec) => {
       if (cancelled) return;
       const entry = spec ? findEndpoint(spec, activeStep.apiId, activeStep.operationId) : null;
@@ -232,6 +241,8 @@ function Parcours() {
     (step: ParcoursStep, res: ProxyResponse, method: string) => {
       setStepResponse({ stepId: step.id, res });
       if (!def || !isSuccess(res)) return; // stay on the step so the user can fix + retry
+      // A manual 2xx on the step that failed in auto mode clears its error card.
+      setAutoError((e) => (e && e.stepId === step.id ? null : e));
       if (step.selects) return; // picker step — wait for the user to choose a row
       setState((prev) => {
         if (!prev) return prev;
@@ -336,6 +347,103 @@ function Parcours() {
     setState(initialState(def));
   }, [def]);
 
+  // --- mode semi-automatique -------------------------------------------------
+  // Runs the remaining steps with random data (lib/parcours-auto.ts). The
+  // runner reports each completed step through onStepDone, which advances the
+  // wizard state exactly like a manual 2xx — stepper + context update live.
+  const [autoStatus, setAutoStatus] = useState<{
+    phase: AutoPhase;
+    stepTitle?: string;
+  }>({ phase: "idle" });
+  const [autoError, setAutoError] = useState<{
+    stepId: string;
+    res: ProxyResponse | null;
+    message: string;
+  } | null>(null);
+  const autoAbortRef = useRef<AbortController | null>(null);
+  // Abort a run left in flight if the page unmounts.
+  useEffect(() => () => autoAbortRef.current?.abort(), []);
+
+  const stopAuto = useCallback(() => {
+    autoAbortRef.current?.abort();
+  }, []);
+
+  const startAuto = useCallback(() => {
+    if (!def || !state || autoAbortRef.current) return;
+    const controller = new AbortController();
+    autoAbortRef.current = controller;
+    setAutoError(null);
+    setAutoStatus({ phase: "running" });
+    void runParcoursAuto(
+      def,
+      { values: state.values, done: state.done, drafts: state.drafts },
+      controller.signal,
+      {
+        onStepStart: (step) =>
+          setAutoStatus({ phase: "running", stepTitle: step.title }),
+        onStepDone: (step, produced, draft) => {
+          setState((prev) => {
+            if (!prev) return prev;
+            const advanced = advanceState(prev, def, step.id, produced);
+            const next = draft
+              ? {
+                  ...advanced,
+                  drafts: { ...advanced.drafts, [step.id]: draft },
+                }
+              : advanced;
+            saveParcoursState(next);
+            return next;
+          });
+        },
+      },
+    ).then((result) => {
+      autoAbortRef.current = null;
+      switch (result.kind) {
+        case "paused-picker":
+          // Navigate onto the picker step (the user may be parked on an
+          // earlier done step) and feed the fetched list into the existing
+          // picker — ParcoursSelect only renders for the active step.
+          selectStep(result.stepId);
+          setStepResponse({ stepId: result.stepId, res: result.res });
+          setAutoStatus({ phase: "paused-picker" });
+          break;
+        case "reached-documents":
+          setAutoStatus({ phase: "finished" });
+          break;
+        case "error":
+          // Persist the failed request as the step's draft so the (remounted)
+          // RequestBuilder shows exactly what was sent.
+          if (result.draft) {
+            const draft = result.draft;
+            setState((prev) => {
+              if (!prev) return prev;
+              const next = {
+                ...prev,
+                drafts: { ...prev.drafts, [result.stepId]: draft },
+              };
+              saveParcoursState(next);
+              return next;
+            });
+          }
+          setAutoError(result);
+          setAutoStatus({ phase: "error" });
+          selectStep(result.stepId);
+          break;
+        case "cancelled":
+          setAutoStatus({ phase: "idle" });
+          break;
+      }
+    }).catch(() => {
+      // Defensive: the runner converts its own exceptions into an error
+      // result, so this only guards callback failures — never leave the page
+      // frozen in "running".
+      autoAbortRef.current = null;
+      setAutoStatus({ phase: "idle" });
+    });
+  }, [def, state, selectStep]);
+
+  const autoRunning = autoStatus.phase === "running";
+
   if (!def) {
     return (
       <div className="mx-auto max-w-2xl space-y-3">
@@ -431,6 +539,18 @@ function Parcours() {
     !!state &&
     (state.done.includes(nextStep.id) || nextStep.id === frontierId);
 
+  // The auto mode is "finished" once every step before the documents step is
+  // done — whether the runner got there or the user completed things by hand.
+  const autoStopIdx = def.steps.findIndex((s) => s.id === AUTO_STOP_STEP_ID);
+  const autoFinished =
+    !!state &&
+    autoStopIdx >= 0 &&
+    def.steps.slice(0, autoStopIdx).every((s) => state.done.includes(s.id));
+  const autoPhase: AutoPhase =
+    autoFinished && autoStatus.phase !== "running"
+      ? "finished"
+      : autoStatus.phase;
+
   return (
     <div className="mx-auto w-full max-w-[1600px] space-y-6">
       <Breadcrumb>
@@ -457,16 +577,36 @@ function Parcours() {
       <div className="grid gap-6 lg:grid-cols-[minmax(16rem,18rem)_minmax(0,1fr)]">
         <aside className="space-y-4 lg:sticky lg:top-[4.5rem] lg:self-start">
           {state && (
-            <ParcoursStepper
-              def={def}
-              currentStepId={state.currentStepId}
-              done={state.done}
-              onSelect={selectStep}
-            />
+            <>
+              <ParcoursAutoPanel
+                phase={autoPhase}
+                stepTitle={autoStatus.stepTitle}
+                onStart={startAuto}
+                onStop={stopAuto}
+              />
+              <ParcoursStepper
+                def={def}
+                currentStepId={state.currentStepId}
+                done={state.done}
+                onSelect={selectStep}
+                disabled={autoRunning}
+              />
+            </>
           )}
         </aside>
 
-        <div className="@container min-w-0 space-y-4">
+        {/* Freeze the working column while the auto-run drives the steps —
+            `inert` blocks keyboard/focus too (a Tab+Enter on « Exécuter »
+            would fire a duplicate request); the panel's « Arrêter » button
+            (in the aside) stays active. */}
+        <div
+          inert={autoRunning}
+          aria-busy={autoRunning || undefined}
+          className={
+            "@container min-w-0 space-y-4" +
+            (autoRunning ? " pointer-events-none opacity-60" : "")
+          }
+        >
           {state && (
             <ParcoursContextPanel
               values={state.values}
@@ -565,6 +705,34 @@ function Parcours() {
             </Card>
           )}
 
+          {/* The auto-run stopped on this step: show what failed. The request
+              it sent is stored as the step's draft, so the builder below is
+              pre-filled — fix + relaunch by hand, or resume the auto mode. */}
+          {autoError && activeStep && autoError.stepId === activeStep.id && (
+            <Card tone="danger">
+              <CardHeader tone="danger">
+                <span className="font-semibold">
+                  Échec du remplissage automatique
+                </span>
+              </CardHeader>
+              <CardBody className="space-y-2 p-3 text-sm">
+                <p>{autoError.message}</p>
+                {autoError.res != null && autoError.res.body != null && (
+                  <pre className="bg-muted max-h-48 overflow-auto rounded-md p-2 font-mono text-xs">
+                    {typeof autoError.res.body === "string"
+                      ? autoError.res.body
+                      : JSON.stringify(autoError.res.body, null, 2)}
+                  </pre>
+                )}
+                <p className="text-muted-foreground text-xs">
+                  La requête envoyée est préremplie ci-dessous : corrigez puis
+                  relancez-la, ou reprenez le remplissage automatique (nouvelles
+                  données aléatoires).
+                </p>
+              </CardBody>
+            </Card>
+          )}
+
           {!resolving && activeStep && !activeStep.custom && stepEntry && state && (
             <FieldOptionsProvider
               value={
@@ -574,7 +742,10 @@ function Parcours() {
               }
             >
               <RequestBuilder
-                key={activeStep.id}
+                // Remount when the auto-run's failure lands so the freshly
+                // persisted draft (initialDraft is read at mount) pre-fills
+                // the form with the request that failed.
+                key={`${activeStep.id}${autoError?.stepId === activeStep.id ? ":auto-error" : ""}`}
                 apiId={activeStep.apiId}
                 apiTitle={stepEntry.spec.info.title}
                 method={stepEntry.entry.method.toUpperCase()}

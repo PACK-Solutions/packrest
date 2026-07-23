@@ -44,7 +44,7 @@ function ribKey(banque: string, guichet: string, compte: string): string {
   return String(97 - x).padStart(2, "0");
 }
 
-function frIban(): string {
+export function frIban(): string {
   const banque = digits(5);
   const guichet = digits(5);
   const compte = digits(11);
@@ -54,7 +54,7 @@ function frIban(): string {
   return "FR" + String(check).padStart(2, "0") + bban; // 27 chars
 }
 
-function bic(): string {
+export function bic(): string {
   const letter = () => String.fromCharCode(65 + Math.floor(Math.random() * 26));
   const alnum = () =>
     "ABCDEFGHIJKLMNPQRSTUVWXYZ0123456789"[Math.floor(Math.random() * 35)];
@@ -102,4 +102,101 @@ export function generateAll(): Record<string, string> {
   const out: Record<string, string> = {};
   for (const f of FIELD_GENERATORS) out[f.key] = f.generate();
   return out;
+}
+
+// --- random-but-plausible French identity/address/amount values -------------
+// Used by the Parcours auto-fill (lib/parcours-auto.ts). Not exposed in
+// FIELD_GENERATORS: the topbar tool only offers checksum-bearing formats.
+
+function pick<T>(pool: readonly T[]): T {
+  return pool[Math.floor(Math.random() * pool.length)];
+}
+
+const FIRST_NAMES = [
+  "Camille", "Léa", "Chloé", "Manon", "Julie", "Emma", "Sarah", "Laura",
+  "Pauline", "Marion", "Claire", "Lucie", "Élise", "Margaux", "Inès",
+  "Charlotte", "Amandine", "Sophie", "Mathilde", "Anaïs",
+  "Lucas", "Hugo", "Louis", "Jules", "Thomas", "Arthur", "Nathan", "Gabriel",
+  "Raphaël", "Léo", "Paul", "Antoine", "Maxime", "Alexandre", "Clément",
+  "Baptiste", "Quentin", "Romain", "Nicolas", "Julien",
+] as const;
+
+const LAST_NAMES = [
+  "Martin", "Bernard", "Dubois", "Thomas", "Robert", "Richard", "Petit",
+  "Durand", "Leroy", "Moreau", "Simon", "Laurent", "Lefebvre", "Michel",
+  "Garcia", "David", "Bertrand", "Roux", "Vincent", "Fournier", "Morel",
+  "Girard", "Andre", "Lefevre", "Mercier", "Dupont", "Lambert", "Bonnet",
+  "Francois", "Martinez", "Legrand", "Garnier", "Faure", "Rousseau", "Blanc",
+  "Guerin", "Muller", "Henry", "Roussel", "Nicolas",
+] as const;
+
+export function frFirstName(): string {
+  return pick(FIRST_NAMES);
+}
+
+export function frLastName(): string {
+  return pick(LAST_NAMES);
+}
+
+// Local-timezone YYYY-MM-DD (toISOString would shift the day around midnight).
+export function toLocalIsoDate(d: Date): string {
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+// Random date of birth for an adult aged 18–80 (uniform over days).
+export function adultBirthDate(): string {
+  const now = new Date();
+  const youngest = new Date(now.getFullYear() - 18, now.getMonth(), now.getDate());
+  const oldest = new Date(now.getFullYear() - 80, now.getMonth(), now.getDate());
+  const t = oldest.getTime() + Math.random() * (youngest.getTime() - oldest.getTime());
+  return toLocalIsoDate(new Date(t));
+}
+
+const STREET_NAMES = [
+  "de la République", "Victor Hugo", "des Lilas", "du Général de Gaulle",
+  "Jean Jaurès", "Pasteur", "des Écoles", "de la Gare", "du Moulin",
+  "des Tilleuls", "Saint-Michel", "de Verdun", "des Acacias", "Carnot",
+  "de la Fontaine",
+] as const;
+
+export function frStreetLine(): string {
+  const n = 1 + Math.floor(Math.random() * 120);
+  const kind = pick(["rue", "avenue", "boulevard"] as const);
+  return `${n} ${kind} ${pick(STREET_NAMES)}`;
+}
+
+// Coherent real city / postal-code pairs.
+const CITY_POSTALS = [
+  { city: "Paris", postalCode: "75011" },
+  { city: "Lyon", postalCode: "69003" },
+  { city: "Marseille", postalCode: "13006" },
+  { city: "Toulouse", postalCode: "31000" },
+  { city: "Nice", postalCode: "06000" },
+  { city: "Nantes", postalCode: "44000" },
+  { city: "Strasbourg", postalCode: "67000" },
+  { city: "Montpellier", postalCode: "34000" },
+  { city: "Bordeaux", postalCode: "33000" },
+  { city: "Lille", postalCode: "59000" },
+  { city: "Rennes", postalCode: "35000" },
+  { city: "Reims", postalCode: "51100" },
+  { city: "Le Havre", postalCode: "76600" },
+  { city: "Saint-Étienne", postalCode: "42000" },
+  { city: "Toulon", postalCode: "83000" },
+  { city: "Grenoble", postalCode: "38000" },
+  { city: "Dijon", postalCode: "21000" },
+  { city: "Angers", postalCode: "49000" },
+  { city: "Nîmes", postalCode: "30000" },
+  { city: "Clermont-Ferrand", postalCode: "63000" },
+] as const;
+
+export function frCityPostal(): { city: string; postalCode: string } {
+  return pick(CITY_POSTALS);
+}
+
+// Random whole-euro amount in [minEuros, maxEuros], returned in cents
+// (matches the Amount schema: value in cents with scale 2).
+export function randomAmountCents(minEuros: number, maxEuros: number): number {
+  const euros = minEuros + Math.floor(Math.random() * (maxEuros - minEuros + 1));
+  return euros * 100;
 }

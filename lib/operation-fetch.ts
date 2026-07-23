@@ -134,6 +134,8 @@ export async function callOperation(opts: {
   method?: string;
   body?: object | null;
   multipart?: MultipartPayload;
+  /** Caller-driven cancellation, forwarded to the HTTP layer. */
+  signal?: AbortSignal;
 }): Promise<ProxyResponse | null> {
   const resolved = await resolveAndAuth(
     opts.apiId,
@@ -150,6 +152,7 @@ export async function callOperation(opts: {
     body: opts.body,
     multipart: opts.multipart,
     custom: isCustomEnvActive(),
+    signal: opts.signal,
   });
 }
 

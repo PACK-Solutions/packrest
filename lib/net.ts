@@ -45,10 +45,14 @@ export interface TimedFetch {
 // unhandled "The resource id N is invalid" rejection (caught by the Next dev
 // overlay). Instead we drive our own AbortController and `clearTimeout` as soon
 // as the caller signals the body has been read via `done()`.
+// An optional caller `signal` (user cancellation) is bridged onto that same
+// internal controller — with its listener removed once the request settles, so
+// the plugin never sees a long-lived external signal.
 export async function tauriFetchWithTimeout(
   input: string,
   init: TauriRequestInit,
   timeoutMs: number,
+  signal?: AbortSignal,
 ): Promise<TimedFetch> {
   const controller = new AbortController();
   let timedOut = false;
@@ -56,11 +60,18 @@ export async function tauriFetchWithTimeout(
     timedOut = true;
     controller.abort();
   }, timeoutMs);
+  const onExternalAbort = () => controller.abort();
+  if (signal?.aborted) controller.abort();
+  else signal?.addEventListener("abort", onExternalAbort, { once: true });
+  const cleanup = () => {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", onExternalAbort);
+  };
   try {
     const res = await tauriFetch(input, { ...init, signal: controller.signal });
-    return { res, done: () => clearTimeout(timer) };
+    return { res, done: cleanup };
   } catch (err) {
-    clearTimeout(timer);
+    cleanup();
     if (timedOut) throw new FetchTimeoutError(timeoutMs);
     throw err;
   }

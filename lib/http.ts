@@ -123,8 +123,10 @@ export async function executeRequest(opts: {
   // When true (active env is custom), http:// and a localhost dev server are
   // permitted by the URL policy.
   custom?: boolean;
+  // Caller-driven cancellation (e.g. the Parcours auto-run's « Arrêter »).
+  signal?: AbortSignal;
 }): Promise<ProxyResponse> {
-  const { method, url, headers: rawHeaders = {}, body, multipart, custom } = opts;
+  const { method, url, headers: rawHeaders = {}, body, multipart, custom, signal } = opts;
   const urlCheck = checkUrl(url, { custom });
   if (!urlCheck.ok) throw new Error(urlCheck.reason);
 
@@ -155,6 +157,7 @@ export async function executeRequest(opts: {
       urlCheck.url.toString(),
       init,
       PROXY_TIMEOUT_MS,
+      signal,
     );
     upstream = timed.res;
     try {
@@ -167,15 +170,18 @@ export async function executeRequest(opts: {
     // i.e. after tauriFetchWithTimeout has returned: the AbortController then
     // rejects the read with a bare AbortError rather than FetchTimeoutError.
     // Map both (and TimeoutError) to the friendly timeout message, as the old
-    // AbortSignal.timeout path did.
+    // AbortSignal.timeout path did — unless the caller's signal cancelled the
+    // request, which is not a timeout.
     const name = (err as Error)?.name;
     const isTimeout =
       err instanceof FetchTimeoutError ||
       name === "AbortError" ||
       name === "TimeoutError";
-    const message = isTimeout
-      ? `Timeout après ${PROXY_TIMEOUT_MS}ms`
-      : (err as Error).message;
+    const message = signal?.aborted
+      ? "Requête annulée"
+      : isTimeout
+        ? `Timeout après ${PROXY_TIMEOUT_MS}ms`
+        : (err as Error).message;
     return {
       status: 0,
       statusText: "Fetch failed",

@@ -16,11 +16,14 @@ export default function ParcoursStepper({
   currentStepId,
   done,
   onSelect,
+  disabled,
 }: {
   def: ParcoursDef;
   currentStepId: string;
   done: string[];
   onSelect: (stepId: string) => void;
+  /** Freeze step navigation (e.g. while the auto-run executes). */
+  disabled?: boolean;
 }) {
   const total = def.steps.length;
   const doneCount = done.length;
@@ -104,7 +107,8 @@ export default function ParcoursStepper({
                   const isDone = done.includes(step.id);
                   const isCurrent = step.id === currentStepId;
                   const selectable =
-                    isDone || isCurrent || step.id === frontierId;
+                    !disabled &&
+                    (isDone || isCurrent || step.id === frontierId);
                   const theme = apiTheme(step.apiId);
                   return (
                     <li key={step.id}>
