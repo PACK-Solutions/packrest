@@ -37,13 +37,13 @@ jobs:
     env:
       CARGO_INCREMENTAL: 0
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         # Full history + tags so the release-notes step can diff against the
         # previous tag (default fetch-depth of 1 sees neither).
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
@@ -76,7 +76,7 @@ jobs:
 
       # Builds the frontend (npm run build → out/) and bundles the desktop app.
       # On a `v*` tag it also creates/uploads a GitHub Release.
-      - uses: tauri-apps/tauri-action@v0
+      - uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
@@ -89,7 +89,7 @@ jobs:
 
       # Always expose the installers as workflow artifacts (handy for a plain
       # workflow_dispatch run, without cutting a release).
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: packrest-${{ matrix.platform }}
           if-no-files-found: warn
