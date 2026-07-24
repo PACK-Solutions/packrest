@@ -3,7 +3,9 @@ import type { ProxyResponse } from "@/lib/http";
 import { SOUSCRIPTION_PARCOURS, type ContextValues } from "@/lib/parcours";
 import {
   AUTO_STOP_STEP_ID,
+  buildAutoDraftForStep,
   buildAutoRequest,
+  newAutoSeed,
   randomIdentity,
   runParcoursAuto,
   todayIso,
@@ -48,6 +50,7 @@ function makeCtx(values: ContextValues = {}) {
     },
     iban: "FR7630006000011234567890189",
     bic: "AGRIFRPP",
+    beneficiaryClause: "Mon conjoint, à défaut mes héritiers.",
     address: { line1: "1 rue de la Paix", postalCode: "75002", city: "Paris" },
   };
 }
@@ -214,6 +217,63 @@ describe("buildAutoRequest", () => {
     expect(amount.scale).toBe(2);
     expect(amount.currency).toBe("EUR");
     expect(amount.value % 100).toBe(0);
+  });
+});
+
+// --- buildAutoDraftForStep ------------------------------------------------------
+
+describe("buildAutoDraftForStep", () => {
+  const seed = {
+    identity: {
+      firstName: "Test",
+      lastName: "Durand",
+      birthDate: "1980-01-15",
+      fullName: "Test Durand",
+    },
+    iban: "FR7630006000011234567890189",
+    bic: "AGRIFRPP",
+    beneficiaryClause: "Mon conjoint, à défaut mes héritiers.",
+    address: { line1: "1 rue de la Paix", postalCode: "75002", city: "Paris" },
+  };
+
+  it("shapes a create-individual draft as {body} only (no params)", () => {
+    const draft = buildAutoDraftForStep(step("create-individual"), seed, {});
+    expect(draft).toEqual({
+      body: {
+        first_name: "Test",
+        last_name: "Durand",
+        birth: { date_of_birth: "1980-01-15" },
+      },
+    });
+    expect(draft?.params).toBeUndefined();
+  });
+
+  it("carries both params and body for person-address", () => {
+    const draft = buildAutoDraftForStep(step("person-address"), seed, {
+      person_id: "p-1",
+    });
+    expect(draft?.params).toEqual({
+      person_id: "p-1",
+      address_type: "PRINCIPAL",
+    });
+    expect(draft?.body).toMatchObject({ country_code: "FR" });
+  });
+
+  it("returns null when a step has nothing to pre-fill", () => {
+    // Optional step: no plan body, and its only seed param (person_id) is absent.
+    expect(buildAutoDraftForStep(step("person-fatca"), seed, {})).toBeNull();
+  });
+
+  it("newAutoSeed reuses the IBAN from a prior bank-account draft", () => {
+    const s = newAutoSeed({
+      "person-bank-account": {
+        body: { iban: "FR0012345678901234567890123" },
+      },
+    });
+    expect(s.iban).toBe("FR0012345678901234567890123");
+    expect(s.identity.fullName).toBe(
+      `${s.identity.firstName} ${s.identity.lastName}`,
+    );
   });
 });
 

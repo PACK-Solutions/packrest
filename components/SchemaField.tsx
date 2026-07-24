@@ -33,6 +33,10 @@ interface Props {
   // forwarded for label rendering.
   name?: string;
   required?: boolean;
+  /** Whether the field is required within its IMMEDIATE parent object,
+   *  independent of ancestor optionality. Drives clear-to-"" vs omit-key so an
+   *  optional ancestor never changes the payload shape. Defaults to `required`. */
+  declaredRequired?: boolean;
 }
 
 // Recursive renderer. Each subschema picks a control:
@@ -54,6 +58,7 @@ export default function SchemaField({
   onChange,
   name,
   required,
+  declaredRequired,
 }: Props) {
   const effective = useMemo(
     () => collapseNullableVariants(mergeAllOf(schema)),
@@ -197,6 +202,7 @@ export default function SchemaField({
           onChange={onChange}
           label={label}
           hint={hint}
+          required={required}
         />
       );
     case "null":
@@ -234,7 +240,8 @@ export default function SchemaField({
               // (`undefined` → JSON.stringify drops the key), not send `""`.
               onChange={(e) => {
                 const v = e.target.value;
-                if (v === "") return onChange(required ? "" : undefined);
+                if (v === "")
+                  return onChange((declaredRequired ?? required) ? "" : undefined);
                 onChange(effective.format === "date-time" ? toInstant(v) : v);
               }}
             />
@@ -291,15 +298,25 @@ function ObjectField({
   onChange,
   label,
   hint,
+  required,
 }: {
   schema: JsonSchema;
   value: unknown;
   onChange: (next: unknown) => void;
   label?: string;
   hint?: string;
+  required?: boolean;
 }) {
   const props = schema.properties ?? {};
-  const required = new Set(schema.required ?? []);
+  const requiredSet = new Set(schema.required ?? []);
+  // A required object's declared-required properties are genuinely required. An
+  // OPTIONAL object (explicit `required={false}`) can be omitted entirely, so
+  // its inner "required" fields are only *conditionally* required — presenting
+  // them as hard-required is misleading (the reported « marked required but are
+  // not »). `undefined` = the top-level body / a required ancestor → keep the
+  // markers. This cascades: an optional object passes `false` to its children.
+  const childRequired = (propName: string) =>
+    required !== false && requiredSet.has(propName);
   const obj = (value && typeof value === "object" && !Array.isArray(value)
     ? value
     : {}) as Record<string, unknown>;
@@ -308,7 +325,7 @@ function ObjectField({
   // `properties` are alphabetised. Shared with the multipart form.
   const visible = partitionRequiredFirst(
     Object.entries(props).filter(([, sub]) => !sub.readOnly),
-    required,
+    requiredSet,
   );
   return (
     <fieldset className="bg-muted/30 space-y-3 rounded-md border p-3">
@@ -327,7 +344,8 @@ function ObjectField({
           value={obj[propName]}
           onChange={(next) => onChange({ ...obj, [propName]: next })}
           name={propName}
-          required={required.has(propName)}
+          required={childRequired(propName)}
+          declaredRequired={requiredSet.has(propName)}
         />
       ))}
     </fieldset>

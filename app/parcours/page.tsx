@@ -18,9 +18,9 @@ import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import RequestBuilder from "@/components/RequestBuilder";
 import ParcoursStepper from "@/components/ParcoursStepper";
-import ParcoursAutoPanel, {
+import ParcoursModePanel, {
   type AutoPhase,
-} from "@/components/ParcoursAutoPanel";
+} from "@/components/ParcoursModePanel";
 import ParcoursContextPanel from "@/components/ParcoursContextPanel";
 import ParcoursSelect from "@/components/ParcoursSelect";
 import ParcoursDocuments, {
@@ -43,8 +43,11 @@ import {
 } from "@/lib/specs";
 import type { OpenApiDocument } from "@/lib/types";
 import type { ProxyResponse } from "@/lib/http";
+import type { ImportSeed } from "@/lib/bruno";
 import {
   advanceState,
+  asRecord,
+  bodyHasContent,
   buildSeedForStep,
   clearParcoursState,
   extractProduced,
@@ -60,8 +63,14 @@ import {
   type ParcoursState,
   type ParcoursStep,
   type StepDraft,
+  type ParcoursMode,
 } from "@/lib/parcours";
-import { AUTO_STOP_STEP_ID, runParcoursAuto } from "@/lib/parcours-auto";
+import {
+  AUTO_STOP_STEP_ID,
+  buildAutoDraftForStep,
+  newAutoSeed,
+  runParcoursAuto,
+} from "@/lib/parcours-auto";
 
 interface LoadedEntry {
   /** The step this entry was resolved for — guards against a stale async
@@ -108,6 +117,67 @@ function buildSrTargets(values: ContextValues): ParcoursSrTarget[] {
   return targets;
 }
 
+// The person's display name for the parcours context. The create-individual
+// response may echo the submitted identity — read first_name/last_name when
+// present so an edited name is captured, not the pre-filled one.
+function personNameFromBody(body: unknown): string | undefined {
+  const rec = asRecord(body);
+  if (!rec) return undefined;
+  const first = typeof rec.first_name === "string" ? rec.first_name.trim() : "";
+  const last = typeof rec.last_name === "string" ? rec.last_name.trim() : "";
+  const full = `${first} ${last}`.trim();
+  return full || undefined;
+}
+
+// The seed a step's RequestBuilder consumes. In semi-automatic mode the stored
+// pre-fill draft (the same random request the auto-run would send) is delivered
+// THROUGH the seed: RequestBuilder applies a seed live — no remount, and only
+// over fields the user hasn't touched — so the form fills the moment the draft
+// lands, without depending on a remount that a mount-only `initialDraft` would
+// need. Live context params (ids captured by earlier steps) still win over the
+// draft's snapshot. With no draft (manual/normal) this is just buildSeedForStep.
+function seedForBuilder(
+  step: ParcoursStep,
+  values: ContextValues,
+  draft: StepDraft | undefined,
+): ImportSeed | undefined {
+  const context = buildSeedForStep(step, values);
+  if (!draft) return context;
+  const params = { ...draft.params, ...context?.params };
+  // Live context values win over the stored draft so a corrected upstream pick
+  // (new product / subscriber) overrides the stale pre-fill; random fields the
+  // context doesn't supply stay from the draft.
+  const draftBody = asRecord(draft.body);
+  const contextBody = asRecord(context?.body);
+  const body =
+    draftBody && contextBody
+      ? { ...draftBody, ...contextBody }
+      : bodyHasContent(draft.body)
+        ? draft.body
+        : context?.body;
+  return {
+    apiId: step.apiId,
+    operationId: step.operationId,
+    ...(Object.keys(params).length ? { params } : {}),
+    ...(body !== undefined ? { body } : {}),
+  };
+}
+
+// Build the semi-auto pre-fill draft for a step, or null when it can't/shouldn't
+// be pre-filled here (picker/custom/create-premium — which needs the async fund
+// list — a done step, one already pre-filled, or nothing to fill). Shared by
+// setMode (fills the active step immediately) and the pre-fill effect.
+function semiPrefillDraft(
+  step: ParcoursStep,
+  state: Pick<ParcoursState, "done" | "semiPrefilled" | "values" | "autoSeed">,
+): StepDraft | null {
+  if (step.selects || step.custom || step.id === "create-premium") return null;
+  if (state.done.includes(step.id)) return null;
+  if ((state.semiPrefilled ?? []).includes(step.id)) return null;
+  if (!state.autoSeed) return null;
+  return buildAutoDraftForStep(step, state.autoSeed, state.values);
+}
+
 function Parcours() {
   const id = useSearchParams().get("id") || "souscription";
   const def = getParcours(id);
@@ -143,6 +213,13 @@ function Parcours() {
   const activeStep: ParcoursStep | null =
     (def && state && def.steps.find((s) => s.id === state.currentStepId)) ||
     null;
+
+  // Current step id in a ref so setMode (which doesn't depend on activeStep)
+  // can name the step whose form is about to be reset by a mode-switch remount.
+  const activeStepIdRef = useRef<string | undefined>(undefined);
+  activeStepIdRef.current = activeStep?.id;
+  // Step id whose next onDraftChange must be ignored (the mode-switch reset).
+  const skipDraftSaveRef = useRef<string | null>(null);
 
   // Resolve the active step's endpoint (spec + operation) the same way the
   // single-endpoint page does.
@@ -246,7 +323,21 @@ function Parcours() {
       if (step.selects) return; // picker step — wait for the user to choose a row
       setState((prev) => {
         if (!prev) return prev;
-        const next = advanceState(prev, def, step.id, extractProduced(step, res));
+        const produced = extractProduced(step, res);
+        // The person's name isn't part of `produces`. Prefer the name the
+        // create response echoes (reflects any edit the user made in the form);
+        // fall back to the semi-auto seed identity that was pre-filled so later
+        // steps (the bank-account holder) still have a matching value.
+        if (step.id === "create-individual" && !produced.person_name) {
+          const name =
+            personNameFromBody(res.body) ??
+            personNameFromBody(prev.drafts?.[step.id]?.body) ??
+            (prev.mode === "semi"
+              ? prev.autoSeed?.identity.fullName
+              : undefined);
+          if (name) produced.person_name = name;
+        }
+        const next = advanceState(prev, def, step.id, produced);
         // A GET is a read (consulter / suivre) — mark it done for progress but
         // keep the user on the step so they can read the response, instead of
         // skipping ahead. Writes (POST/PUT/DELETE) advance as before.
@@ -308,6 +399,10 @@ function Parcours() {
   // input. Keep `values`/`done` refs stable so the options-fetch effect (keyed
   // on `state.values`) doesn't re-run on a save.
   const saveDraft = useCallback((stepId: string, draft: StepDraft) => {
+    if (skipDraftSaveRef.current === stepId) {
+      skipDraftSaveRef.current = null; // discard the mode-switch reset snapshot
+      return;
+    }
     setState((prev) => {
       if (!prev) return prev;
       const next = { ...prev, drafts: { ...prev.drafts, [stepId]: draft } };
@@ -315,6 +410,25 @@ function Parcours() {
       return next;
     });
   }, []);
+
+  // Record a semi-auto pre-fill: store the draft (when any) and mark the step
+  // filled so a return never re-fills over the user's later edits or a
+  // deliberate clear.
+  const recordPrefill = useCallback(
+    (stepId: string, draft: StepDraft | null) => {
+      setState((prev) => {
+        if (!prev) return prev;
+        const semiPrefilled = prev.semiPrefilled?.includes(stepId)
+          ? prev.semiPrefilled
+          : [...(prev.semiPrefilled ?? []), stepId];
+        const drafts = draft ? { ...prev.drafts, [stepId]: draft } : prev.drafts;
+        const next = { ...prev, drafts, semiPrefilled };
+        saveParcoursState(next);
+        return next;
+      });
+    },
+    [],
+  );
 
   const skipStep = useCallback(() => {
     if (!def || !activeStep) return;
@@ -347,8 +461,89 @@ function Parcours() {
     setState(initialState(def));
   }, [def]);
 
-  // --- mode semi-automatique -------------------------------------------------
-  // Runs the remaining steps with random data (lib/parcours-auto.ts). The
+  const setMode = useCallback((mode: ParcoursMode) => {
+    // Leaving auto ends any suspended run (paused at the picker, or stopped on
+    // an error): clear its status + error card so no stale resume control
+    // lingers. The user continues from the frontier in the chosen mode, and
+    // re-selecting Auto starts a fresh run (already-done steps are skipped).
+    if (mode !== "auto") {
+      setAutoError(null);
+      setAutoStatus((s) => (s.phase === "idle" ? s : { phase: "idle" }));
+    }
+    // The mode-switch remount (the builder's key includes the mode) unmounts
+    // the active step's form; discard the single onDraftChange it fires so the
+    // old mode's values (e.g. the semi pre-fill) don't persist back as a draft.
+    skipDraftSaveRef.current = activeStepIdRef.current ?? null;
+    setState((prev) => {
+      if (!prev || prev.mode === mode) return prev; // no-op: already this mode
+      const next: ParcoursState = { ...prev, mode };
+      // Generate the stable identity/bank details the semi-auto pre-fill reuses
+      // across steps (person ↔ holder, bank account ↔ SEPA mandate IBAN).
+      if (mode === "semi" && !next.autoSeed) {
+        next.autoSeed = newAutoSeed(prev.drafts);
+        next.semiPrefilled = []; // fresh semi session → pre-fill each step once
+      }
+      // Manual mode promises empty forms for every not-yet-executed step, so
+      // drop the semi pre-fills / in-progress input, keeping only the drafts of
+      // steps already executed (worth restoring for inspection or retry).
+      if (mode === "manual") {
+        const kept: Record<string, StepDraft> = {};
+        for (const [id, d] of Object.entries(prev.drafts ?? {}))
+          if (prev.done.includes(id)) kept[id] = d;
+        next.drafts = kept;
+        next.semiPrefilled = [];
+        // Drop the random seed too, so re-selecting « semi » generates a fresh
+        // identity/bank/clause set rather than reusing the previous one.
+        next.autoSeed = undefined;
+      }
+      // Pre-fill the ACTIVE step's form synchronously so semi mode fills it on
+      // the very next render — no wait for the follow-up effect. create-premium
+      // (async fund list) and steps with nothing to fill are left to the effect.
+      if (mode === "semi" && def) {
+        const step = def.steps.find((s) => s.id === prev.currentStepId);
+        const draft = step ? semiPrefillDraft(step, next) : null;
+        if (step && draft) {
+          next.drafts = { ...next.drafts, [step.id]: draft };
+          next.semiPrefilled = [...(next.semiPrefilled ?? []), step.id];
+        }
+      }
+      saveParcoursState(next);
+      return next;
+    });
+  }, [def]);
+
+  // Semi-automatic mode: pre-fill the active step's form with random-but-
+  // plausible data (the same request the auto-run would send) so the user only
+  // reviews and presses « Exécuter ». Writes the draft once per step — never
+  // over a step already done or one the user has started editing — and skips
+  // pickers/custom steps. create-premium waits for the product's fund list.
+  useEffect(() => {
+    if (!def || !state || state.mode !== "semi" || !activeStep) return;
+    const step = activeStep;
+    if (step.selects || step.custom) return;
+    if (state.done.includes(step.id)) return;
+    if ((state.semiPrefilled ?? []).includes(step.id)) return; // filled once
+    if (!state.autoSeed) return;
+    if (step.id === "create-premium") {
+      // The fund catalogue is fetched into `fieldOpts` on step entry; wait only
+      // while it is still resolving for THIS step. Once resolved with no fund
+      // available (empty catalogue or a failed fetch), leave the form for the
+      // user — a premium with no fund can't be pre-filled into a valid request.
+      if (!fieldOpts || fieldOpts.stepId !== step.id) return; // still resolving
+      const funds = fieldOpts.map.fund_id;
+      if (!funds || !funds.length) return;
+      const fundId = funds[Math.floor(Math.random() * funds.length)].value;
+      recordPrefill(
+        step.id,
+        buildAutoDraftForStep(step, state.autoSeed, state.values, { fundId }),
+      );
+      return;
+    }
+    recordPrefill(step.id, semiPrefillDraft(step, state));
+  }, [def, activeStep, state, fieldOpts, recordPrefill]);
+
+  // --- mode automatique ------------------------------------------------------
+  // Runs every remaining step end to end with random data (lib/parcours-auto).
   // runner reports each completed step through onStepDone, which advances the
   // wizard state exactly like a manual 2xx — stepper + context update live.
   const [autoStatus, setAutoStatus] = useState<{
@@ -578,11 +773,14 @@ function Parcours() {
         <aside className="space-y-4 lg:sticky lg:top-[4.5rem] lg:self-start">
           {state && (
             <>
-              <ParcoursAutoPanel
-                phase={autoPhase}
-                stepTitle={autoStatus.stepTitle}
-                onStart={startAuto}
-                onStop={stopAuto}
+              <ParcoursModePanel
+                mode={state.mode ?? "manual"}
+                onModeChange={setMode}
+                disabled={autoRunning}
+                autoPhase={autoPhase}
+                autoStepTitle={autoStatus.stepTitle}
+                onAutoStart={startAuto}
+                onAutoStop={stopAuto}
               />
               <ParcoursStepper
                 def={def}
@@ -742,10 +940,12 @@ function Parcours() {
               }
             >
               <RequestBuilder
-                // Remount when the auto-run's failure lands so the freshly
-                // persisted draft (initialDraft is read at mount) pre-fills
-                // the form with the request that failed.
-                key={`${activeStep.id}${autoError?.stepId === activeStep.id ? ":auto-error" : ""}`}
+                // Remount on mode change (and on the auto-run's failed step) so
+                // the form's internal state resets: switching to manual clears
+                // the semi pre-fill, switching to semi shows the fresh draft via
+                // `initialDraft`. `seed` (below) still keeps context corrections
+                // live within a mode.
+                key={`${activeStep.id}:${state.mode ?? "manual"}${autoError?.stepId === activeStep.id ? ":auto-error" : ""}`}
                 apiId={activeStep.apiId}
                 apiTitle={stepEntry.spec.info.title}
                 method={stepEntry.entry.method.toUpperCase()}
@@ -756,7 +956,13 @@ function Parcours() {
                 defaultBaseUrl={stepEntry.spec.servers?.[0]?.url ?? ""}
                 scopes={stepEntry.scopes}
                 tokenUrl={stepEntry.tokenUrl}
-                seed={buildSeedForStep(activeStep, state.values)}
+                seed={seedForBuilder(
+                  activeStep,
+                  state.values,
+                  state.mode === "semi"
+                    ? state.drafts?.[activeStep.id]
+                    : undefined,
+                )}
                 onResult={(res) =>
                   onResult(activeStep, res, stepEntry.entry.method.toUpperCase())
                 }

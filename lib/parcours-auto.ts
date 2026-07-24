@@ -30,6 +30,7 @@ import {
 import {
   adultBirthDate,
   bic,
+  frBeneficiaryClause,
   frCityPostal,
   frFirstName,
   frIban,
@@ -65,17 +66,24 @@ export function todayIso(): string {
 
 // --- per-run context ---------------------------------------------------------
 
-// The runner's private mutable bag. `values` is a LOCAL authoritative copy of
-// the parcours context during the run (React state updates are async; the
-// runner must consume ids produced by the previous step immediately). One
-// identity/iban/address per run so the bank account and the SEPA mandate agree.
-export interface AutoRunCtx {
-  values: ContextValues;
+// Stable random identity + bank details for one run. The steps that must agree
+// — person ↔ bank-account holder, bank account ↔ SEPA mandate IBAN — read the
+// same values from here. Persisted in the parcours state so the semi-automatic
+// mode keeps pre-fills consistent across steps; regenerated per run in auto mode.
+export interface AutoSeed {
   identity: AutoIdentity;
   iban: string;
   bic: string;
+  /** Stable per-run beneficiary clause so create-contract and update-contract
+   *  send the same designation. */
+  beneficiaryClause: string;
   address: { line1: string; postalCode: string; city: string };
 }
+
+// The runner's private mutable bag: an AutoSeed plus a LOCAL authoritative copy
+// of the parcours context (React state updates are async; the runner must
+// consume ids produced by the previous step immediately).
+export type AutoRunCtx = AutoSeed & { values: ContextValues };
 
 // Read a string field out of a persisted step draft's body.
 function draftBodyField(
@@ -92,24 +100,32 @@ function draftBodyField(
   return typeof v === "string" && v ? v : null;
 }
 
-// The IBAN/BIC are reused from a previous run's persisted drafts when present,
-// so resuming between person-bank-account and create-payment-method keeps the
-// SEPA mandate on the same account the bank-account step registered.
-function newRunCtx(
-  values: ContextValues,
-  drafts?: ParcoursState["drafts"],
-): AutoRunCtx {
+// Generate a fresh AutoSeed. The IBAN/BIC are reused from a previous run's
+// persisted drafts when present, so resuming between person-bank-account and
+// create-payment-method keeps the SEPA mandate on the same account the
+// bank-account step registered.
+export function newAutoSeed(drafts?: ParcoursState["drafts"]): AutoSeed {
   const { city, postalCode } = frCityPostal();
   return {
-    values: { ...values },
     identity: randomIdentity(),
     iban:
       draftBodyField(drafts, "person-bank-account", "iban") ??
       draftBodyField(drafts, "create-payment-method", "iban") ??
       frIban(),
     bic: draftBodyField(drafts, "create-payment-method", "bic") ?? bic(),
+    beneficiaryClause:
+      draftBodyField(drafts, "create-contract", "beneficiary_clause") ??
+      draftBodyField(drafts, "update-contract", "beneficiary_clause") ??
+      frBeneficiaryClause(),
     address: { line1: frStreetLine(), postalCode, city },
   };
+}
+
+function newRunCtx(
+  values: ContextValues,
+  drafts?: ParcoursState["drafts"],
+): AutoRunCtx {
+  return { ...newAutoSeed(drafts), values: { ...values } };
 }
 
 // The holder name must match the person: prefer the context's person_name
@@ -135,10 +151,8 @@ export interface AutoExtras {
   fundId?: string;
 }
 
-// Standard French beneficiary designation — required by the contract API at
-// submission time (free text, ≤ 2000 chars).
-const BENEFICIARY_CLAUSE =
-  "Mon conjoint, à défaut mes enfants nés ou à naître, vivants ou représentés, à défaut mes héritiers.";
+// (Beneficiary clause is a stable per-run random value on AutoSeed —
+// create-contract and update-contract read `ctx.beneficiaryClause`.)
 // Bodies mirror the synced OpenAPI contracts (see the step descriptions in
 // lib/parcours.ts). Steps absent from this table and not optional run with the
 // seed alone (person-submit, submit-contract: no body).
@@ -189,9 +203,9 @@ export const AUTO_PLAN: Record<string, AutoStepPlan> = {
     // Set the submission-required fields at creation too. The backend may only
     // keep them from the update below, but sending them here is harmless and
     // means a fresh contract already carries them if creation does persist.
-    body: () => ({
+    body: (ctx) => ({
       date_of_effect: todayIso(),
-      beneficiary_clause: BENEFICIARY_CLAUSE,
+      beneficiary_clause: ctx.beneficiaryClause,
     }),
   },
   // A freshly created DRAFT contract doesn't reliably carry date_of_effect /
@@ -200,9 +214,9 @@ export const AUTO_PLAN: Record<string, AutoStepPlan> = {
   // optional step sets them explicitly on the DRAFT — a direct 200 update per
   // the contract API — before the contract is submitted.
   "update-contract": {
-    body: () => ({
+    body: (ctx) => ({
       date_of_effect: todayIso(),
-      beneficiary_clause: BENEFICIARY_CLAUSE,
+      beneficiary_clause: ctx.beneficiaryClause,
     }),
   },
   "create-premium": {
@@ -250,6 +264,28 @@ export function buildAutoRequest(
     pathParams,
     body: Object.keys(merged).length ? merged : null,
   };
+}
+
+// The {params, body} draft the semi-automatic mode pre-fills into a step's
+// form: the same request the runner would send (buildAutoRequest), shaped as a
+// StepDraft the RequestBuilder restores via `initialDraft`. Returns null when
+// the step has nothing to pre-fill (no seed params, no plan body — e.g. an
+// optional step the user fills or skips by hand).
+export function buildAutoDraftForStep(
+  step: ParcoursStep,
+  seed: AutoSeed,
+  values: ContextValues,
+  extras: AutoExtras = {},
+): StepDraft | null {
+  const req = buildAutoRequest(step, { ...seed, values }, extras);
+  // buildAutoRequest never returns null, so toDraft yields a StepDraft — {} for
+  // a step with neither params nor body. Return the draft only when it carries
+  // something; an empty draft means "nothing to pre-fill" (leave the form empty
+  // so the user fills or skips it).
+  const draft = toDraft(req);
+  if (draft && (draft.params !== undefined || draft.body !== undefined))
+    return draft;
+  return null;
 }
 
 // --- runner ---------------------------------------------------------------------

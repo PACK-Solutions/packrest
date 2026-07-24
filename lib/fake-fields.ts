@@ -200,3 +200,18 @@ export function randomAmountCents(minEuros: number, maxEuros: number): number {
   const euros = minEuros + Math.floor(Math.random() * (maxEuros - minEuros + 1));
   return euros * 100;
 }
+
+// Standard French beneficiary designations (clause bénéficiaire) — free text
+// the contract API requires at submission. All are valid, commonly-used clauses.
+const BENEFICIARY_CLAUSES = [
+  "Mon conjoint, à défaut mes enfants nés ou à naître, vivants ou représentés, à défaut mes héritiers.",
+  "Mon conjoint non séparé de corps, à défaut mes enfants nés ou à naître, vivants ou représentés par parts égales, à défaut mes héritiers.",
+  "Le partenaire avec lequel je suis lié par un pacte civil de solidarité, à défaut mes enfants, à défaut mes héritiers.",
+  "Mes enfants nés ou à naître, vivants ou représentés, par parts égales, à défaut mes héritiers.",
+  "Mon conjoint pour la moitié, mes enfants pour l'autre moitié par parts égales, à défaut mes héritiers.",
+  "Mes héritiers légaux selon la dévolution successorale.",
+] as const;
+
+export function frBeneficiaryClause(): string {
+  return pick(BENEFICIARY_CLAUSES);
+}

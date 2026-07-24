@@ -17,6 +17,9 @@
 
 import type { ImportSeed } from "@/lib/bruno";
 import type { ProxyResponse } from "@/lib/http";
+// Type-only (erased at build) — no runtime cycle with lib/parcours-auto, which
+// imports this module at runtime.
+import type { AutoSeed } from "@/lib/parcours-auto";
 
 // The values that flow between steps. Some are user-picked while browsing the
 // catalogue (product_id); the rest are captured from POST/submit
@@ -731,6 +734,21 @@ export interface StepDraft {
   body?: unknown;
 }
 
+// True when a body value carries content — a non-empty object/array or any
+// primitive. An untouched form serialises its body to null/undefined/{}.
+export function bodyHasContent(b: unknown): boolean {
+  return (
+    b != null &&
+    (typeof b !== "object" || Array.isArray(b) || Object.keys(b).length > 0)
+  );
+}
+
+// The run mode chosen in the mode panel. "manual" = empty forms the user fills
+// and sends; "semi" = each step's form pre-filled with random-but-plausible data
+// (the user reviews then sends step by step); "auto" = the runner drives every
+// step end to end (lib/parcours-auto).
+export type ParcoursMode = "manual" | "semi" | "auto";
+
 export interface ParcoursState {
   parcoursId: string;
   values: ContextValues;
@@ -740,6 +758,15 @@ export interface ParcoursState {
   currentStepId: string;
   /** Per-step form drafts (keyed by step id) so a return doesn't wipe input. */
   drafts?: Record<string, StepDraft>;
+  /** Selected run mode (default "manual"). */
+  mode?: ParcoursMode;
+  /** Stable random identity/bank details generated once for the semi-automatic
+   *  mode, so consecutive pre-filled steps agree (same person, same IBAN). */
+  autoSeed?: AutoSeed;
+  /** Step ids the semi-automatic mode has already pre-filled once, so a return
+   *  never re-fills over the user's edits (or a deliberate clear). Reset when a
+   *  fresh autoSeed is generated. */
+  semiPrefilled?: string[];
 }
 
 export function initialState(def: ParcoursDef): ParcoursState {
@@ -749,6 +776,7 @@ export function initialState(def: ParcoursDef): ParcoursState {
     done: [],
     currentStepId: def.steps[0]?.id ?? "",
     drafts: {},
+    mode: "manual",
   };
 }
 

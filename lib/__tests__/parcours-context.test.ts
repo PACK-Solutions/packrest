@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   advanceState,
+  bodyHasContent,
   mergeContextValues,
   type ContextValues,
   type ParcoursDef,
@@ -115,5 +116,29 @@ describe("advanceState clears stale contract-scoped ids", () => {
     const next = advanceState(state, def, "a", { contract_id: "c2" });
     expect(next.values.contract_id).toBe("c2");
     expect(next.values.premium_id).toBeUndefined();
+  });
+});
+
+describe("bodyHasContent", () => {
+  it("is false for a body an untouched form serialises", () => {
+    expect(bodyHasContent(undefined)).toBe(false);
+    expect(bodyHasContent(null)).toBe(false);
+    expect(bodyHasContent({})).toBe(false);
+  });
+
+  it("is true for a non-empty object, array, or any primitive", () => {
+    expect(bodyHasContent({ first_name: "A" })).toBe(true);
+    expect(bodyHasContent([1, 2])).toBe(true);
+    expect(bodyHasContent("raw string body")).toBe(true);
+    expect(bodyHasContent(0)).toBe(true);
+  });
+
+  it("treats a body-less unmount snapshot as empty", () => {
+    // A snapshot that carries only seeded path params (body lost on remount)
+    // must read as empty so it can't overwrite a stored pre-fill body.
+    const prefilled = { params: { person_id: "p1" }, body: { iban: "FR" } };
+    const unmountSnapshot = { params: { person_id: "p1" }, body: null };
+    expect(bodyHasContent(prefilled.body)).toBe(true);
+    expect(bodyHasContent(unmountSnapshot.body)).toBe(false);
   });
 });
