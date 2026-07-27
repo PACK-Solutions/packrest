@@ -6,6 +6,8 @@ import {
   isDocRequirementPending,
   isRequirementBlocking,
   isServiceRequestComplete,
+  requirementKeys,
+  requirementSetKey,
 } from "@/lib/parcours-documents";
 
 // The user's example: a CONTRACT_SUBSCRIPTION with 11 document requirements,
@@ -137,5 +139,68 @@ describe("areRequirementsComplete", () => {
     expect(areRequirementsComplete(extractRequirements(submittedSr))).toBe(true);
     expect(areRequirementsComplete(extractRequirements(freshSr))).toBe(false);
     expect(areRequirementsComplete([])).toBe(true);
+  });
+});
+
+describe("requirementKeys", () => {
+  const reqs = extractRequirements(freshSr);
+
+  it("keys a requirement by its signature, not its position", () => {
+    const keys = requirementKeys(reqs);
+    expect(keys).toHaveLength(reqs.length);
+    expect(new Set(keys).size).toBe(keys.length);
+    // Dropping an earlier entry leaves the survivors' keys untouched — an index
+    // would have shifted them onto the wrong requirement.
+    expect(requirementKeys(reqs.slice(1))).toEqual(keys.slice(1));
+    // So does reordering.
+    expect(requirementKeys([...reqs].reverse())).toEqual([...keys].reverse());
+  });
+
+  it("tells two identical-looking entries apart once a document is attached", () => {
+    const twin = {
+      kind: "DOCUMENT" as const,
+      state: "SUBMITTED" as const,
+      accepted_document_types: ["ID_CARD"],
+    };
+    const keys = requirementKeys([
+      { ...twin, document: { id: "doc-1", type: "ID_CARD" } },
+      { ...twin, document: { id: "doc-2", type: "ID_CARD" } },
+    ]);
+    // Keyed by the attached document, so dropping either leaves the other's key
+    // untouched — no position-driven inheritance of the neighbour's row state.
+    expect(keys[0]).not.toBe(keys[1]);
+    expect(
+      requirementKeys([{ ...twin, document: { id: "doc-2", type: "ID_CARD" } }]),
+    ).toEqual([keys[1]]);
+  });
+
+  // Two entries that share a signature AND carry no document can only be told
+  // apart by position, so the row state is dropped when the set changes instead
+  // of being inherited by the survivor (see requirementSetKey).
+  it("changes the set key when a same-signature entry disappears", () => {
+    const twin = {
+      kind: "DOCUMENT" as const,
+      state: "MISSING" as const,
+      accepted_document_types: ["ID_CARD"],
+    };
+    const before = requirementSetKey([twin, { ...twin }]);
+    const after = requirementSetKey([{ ...twin }]);
+    expect(before).not.toBe(after);
+    // Same requirements re-read → same key, so a plain refresh keeps row state.
+    expect(requirementSetKey([twin, { ...twin }])).toBe(before);
+    // A state transition also changes it (the row's pick no longer applies).
+    expect(
+      requirementSetKey([{ ...twin, state: "SUBMITTED" as const }, { ...twin }]),
+    ).not.toBe(before);
+  });
+
+  it("keeps entries with the same signature apart", () => {
+    const twin = {
+      kind: "DOCUMENT" as const,
+      state: "MISSING" as const,
+      accepted_document_types: ["PROOF_OF_IDENTITY"],
+    };
+    const keys = requirementKeys([twin, { ...twin }]);
+    expect(keys[0]).not.toBe(keys[1]);
   });
 });

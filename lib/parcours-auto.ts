@@ -30,7 +30,6 @@ import {
 import {
   adultBirthDate,
   bic,
-  frBeneficiaryClause,
   frCityPostal,
   frFirstName,
   frIban,
@@ -74,9 +73,9 @@ export interface AutoSeed {
   identity: AutoIdentity;
   iban: string;
   bic: string;
-  /** Stable per-run beneficiary clause so create-contract and update-contract
-   *  send the same designation. */
-  beneficiaryClause: string;
+  // (No beneficiary clause here: date_of_effect + beneficiary_clause are seeded
+  //  declaratively on both contract steps — DEFAULT_BENEFICIARY_CLAUSE in
+  //  lib/parcours.ts — so every mode sends the same values.)
   address: { line1: string; postalCode: string; city: string };
 }
 
@@ -113,10 +112,6 @@ export function newAutoSeed(drafts?: ParcoursState["drafts"]): AutoSeed {
       draftBodyField(drafts, "create-payment-method", "iban") ??
       frIban(),
     bic: draftBodyField(drafts, "create-payment-method", "bic") ?? bic(),
-    beneficiaryClause:
-      draftBodyField(drafts, "create-contract", "beneficiary_clause") ??
-      draftBodyField(drafts, "update-contract", "beneficiary_clause") ??
-      frBeneficiaryClause(),
     address: { line1: frStreetLine(), postalCode, city },
   };
 }
@@ -151,11 +146,10 @@ export interface AutoExtras {
   fundId?: string;
 }
 
-// (Beneficiary clause is a stable per-run random value on AutoSeed —
-// create-contract and update-contract read `ctx.beneficiaryClause`.)
 // Bodies mirror the synced OpenAPI contracts (see the step descriptions in
-// lib/parcours.ts). Steps absent from this table and not optional run with the
-// seed alone (person-submit, submit-contract: no body).
+// lib/parcours.ts). Steps absent from this table run with the seed alone —
+// person-submit / submit-contract (no body) and the contract steps, whose
+// date_of_effect + beneficiary_clause come from `seedFrom`.
 export const AUTO_PLAN: Record<string, AutoStepPlan> = {
   "create-individual": {
     skipIfPresent: "person_id",
@@ -200,25 +194,15 @@ export const AUTO_PLAN: Record<string, AutoStepPlan> = {
   },
   "create-contract": {
     skipIfPresent: "contract_id",
-    // Set the submission-required fields at creation too. The backend may only
-    // keep them from the update below, but sending them here is harmless and
-    // means a fresh contract already carries them if creation does persist.
-    body: (ctx) => ({
-      date_of_effect: todayIso(),
-      beneficiary_clause: ctx.beneficiaryClause,
-    }),
+    // No body: product_id / subscriber_id and the submission-required
+    // date_of_effect + beneficiary_clause all come from the step's `seedFrom`.
   },
   // A freshly created DRAFT contract doesn't reliably carry date_of_effect /
   // beneficiary_clause (creation drops them), so submission fails 422
   // (« Date of effect / Beneficiary clause is required »). This normally-
   // optional step sets them explicitly on the DRAFT — a direct 200 update per
-  // the contract API — before the contract is submitted.
-  "update-contract": {
-    body: (ctx) => ({
-      date_of_effect: todayIso(),
-      beneficiary_clause: ctx.beneficiaryClause,
-    }),
-  },
+  // the contract API — before the contract is submitted; its body seed is what
+  // makes the runner execute it instead of skipping it like other optional steps.
   "create-premium": {
     skipIfPresent: "premium_id",
     body: (_ctx, extras) => ({
@@ -425,10 +409,11 @@ export async function runParcoursAuto(
         continue;
       }
 
-      // Optional steps are skipped like the page's « Passer » button — unless
-      // the plan gives them a body (update-contract completes the DRAFT with
-      // the fields the submit endpoint requires), in which case they execute.
-      if (step.optional && !plan?.body) {
+      // Optional steps are skipped like the page's « Passer » button — unless the
+      // step declares `autoRun` (update-contract, which completes the DRAFT with
+      // the fields the submit endpoint requires). Declared on the step, so a body
+      // seed added to another optional step never enrols it by accident.
+      if (step.optional && !step.autoRun) {
         markDone(step, {});
         continue;
       }

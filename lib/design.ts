@@ -75,6 +75,24 @@ export function toneClasses(tone: StatusTone): ToneClasses {
   return TONE_CLASSES[tone];
 }
 
+// Tone of a service-request status (`ServiceRequestStatus` of the
+// service-request contract). Shared by the Parcours Phase C document form and
+// the Phase D decision view so the same demand never reads in two colours.
+export function srStatusTone(status: string | null | undefined): StatusTone {
+  switch (status) {
+    case "APPROVED":
+      return "success";
+    case "UNDER_REVIEW":
+      return "info";
+    case "REJECTED":
+    case "CANCELLED":
+    case "EXPIRED":
+      return "danger";
+    default:
+      return "warn"; // REQUIRES_INFORMATION / unknown
+  }
+}
+
 // Dark "terminal" surface shared by the JSON viewers, raw response bodies and
 // the token dump. Deliberately dark in BOTH themes so payloads read as code.
 export const CODE_SURFACE =

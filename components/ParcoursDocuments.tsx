@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   CheckCircle2,
   Loader2,
@@ -24,21 +24,33 @@ import { Input } from "@/components/ui/input";
 import { callOperation } from "@/lib/operation-fetch";
 import { buildMultipart } from "@/lib/multipart";
 import { isSuccess } from "@/lib/parcours";
-import { listApis } from "@/lib/specs";
+import { SPECS_CHANGED_EVENT } from "@/lib/specs";
+import {
+  describeOwnerProblem,
+  loadDocumentOwnerMap,
+  resolveDocumentOwner,
+  type DocumentOwnerField,
+  type DocumentOwnerIds,
+  type DocumentOwnerMap,
+  type ResolvedDocumentOwner,
+} from "@/lib/document-owner";
 import {
   extractRequirements,
   extractServiceRequestStatus,
   isDocRequirementPending,
   areRequirementsComplete,
+  requirementKeys,
+  requirementSetKey,
   type Requirement,
 } from "@/lib/parcours-documents";
-import type { StatusTone } from "@/lib/design";
-import type { ProxyResponse } from "@/lib/http";
+import { srStatusTone, type StatusTone } from "@/lib/design";
+import { apiErrorMessage } from "@/lib/http";
 import { cn, formatFileSize } from "@/lib/utils";
 
 // One service request the form should complete. Built by the Parcours page from
-// the shared context (contract / SEPA mandate / beneficiary clause SRs), with
-// the document owner inferred per SR type.
+// the shared context (contract / SEPA mandate / beneficiary clause SRs). The
+// document owner is *not* fixed by the SR: it is resolved per document type,
+// the SR only saying which owner it would prefer when several are valid.
 export interface ParcoursSrTarget {
   /** Context key of the SR id — used as a stable React key. */
   key: string;
@@ -46,9 +58,10 @@ export interface ParcoursSrTarget {
   id: string;
   /** Human label shown on the card header. */
   label: string;
-  /** Owner field of the created document (createDocument requires ≥1 owner). */
-  ownerField: "contract_id" | "payment_method_id" | "person_id";
-  ownerId: string;
+  /** Owner to favour when the document type accepts several. */
+  preferredOwner: DocumentOwnerField;
+  /** Owner ids available in the parcours context (empty ones dropped). */
+  owners: DocumentOwnerIds;
 }
 
 interface Props {
@@ -85,33 +98,16 @@ function reqTone(state: Requirement["state"]): StatusTone {
   }
 }
 
-function srTone(status: string | null): StatusTone {
-  switch (status) {
-    case "APPROVED":
-      return "success";
-    case "UNDER_REVIEW":
-      return "info";
-    case "REJECTED":
-    case "CANCELLED":
-    case "EXPIRED":
-      return "danger";
-    default:
-      return "warn"; // REQUIRES_INFORMATION / unknown
-  }
-}
+// (Status tone → lib/design `srStatusTone`; error message → lib/http
+//  `apiErrorMessage`. Both are shared with the Phase D decision view so the same
+//  demand never reads in two colours, nor an error in two wordings.)
 
-// Best-effort human message out of an error response body.
-function messageFromRes(res: ProxyResponse | null): string {
-  if (!res) return "API introuvable — la spec n'est peut-être pas synchronisée.";
-  const body = res.body;
-  if (body && typeof body === "object" && !Array.isArray(body)) {
-    const r = body as Record<string, unknown>;
-    for (const f of ["detail", "message", "title", "error"]) {
-      if (typeof r[f] === "string" && (r[f] as string).trim())
-        return `HTTP ${res.status} — ${(r[f] as string).trim()}`;
-    }
-  }
-  return `HTTP ${res.status || 0}${res.statusText ? ` — ${res.statusText}` : ""}`;
+// The type a row will send: the user's pick, or the only accepted type when the
+// requirement leaves no choice. Computed once per row and threaded down, so the
+// owner hint, the disabled state and the upload all agree.
+function effectiveType(req: Requirement, picked: string | undefined): string {
+  const accepted = req.accepted_document_types ?? [];
+  return picked || (accepted.length === 1 ? accepted[0] : "");
 }
 
 function readDocumentId(body: unknown): string | null {
@@ -127,50 +123,113 @@ function readDocumentId(body: unknown): string | null {
   return null;
 }
 
+// A document already created for a row, with what it was created from. Reused
+// only when the row still asks for exactly that — a retry after a failed attach
+// re-attaches instead of minting a duplicate, while a changed file/type/owner
+// creates the document the row now describes.
+interface CreatedDoc {
+  id: string;
+  type: string;
+  ownerField: DocumentOwnerField;
+  ownerId: string;
+  fileKey: string;
+}
+
+// Identity of a picked file, good enough to tell "same file" from "another one".
+function fileKeyOf(f: File): string {
+  return `${f.name}:${f.size}:${f.lastModified}`;
+}
+
+/** Reading of the document contract's owner mapping. */
+type OwnerMapStatus = "loading" | "ready" | "error";
+
 export default function ParcoursDocuments({
   serviceRequests,
   onComplete,
 }: Props) {
   const [details, setDetails] = useState<Record<string, SrDetail>>({});
-  // Per upload-row (`${srId}#${index}`) transient state.
+  // Per upload-row (`${srId}#${requirementKey}`) transient state.
   const [files, setFiles] = useState<Record<string, File | null>>({});
   const [types, setTypes] = useState<Record<string, string>>({});
   const [uploading, setUploading] = useState<Record<string, boolean>>({});
   const [rowError, setRowError] = useState<Record<string, string | null>>({});
-  // Document id created for a row but not yet attached — lets a retry after an
-  // attach failure re-use it instead of minting a duplicate document.
-  const [createdDocId, setCreatedDocId] = useState<Record<string, string>>({});
-  // Required contracts (service-request / document) that aren't synced yet.
-  const [missingApis, setMissingApis] = useState<string[]>([]);
+  // Document created for a row but not yet attached (see CreatedDoc).
+  const [createdDoc, setCreatedDoc] = useState<Record<string, CreatedDoc>>({});
+  // (Whether the service-request / document contracts are synced is checked by
+  //  the page, from the step's `requiresApis` — it gates this whole view.)
+  // Per-SR requirement-set identity of the last render, so row state tied to a
+  // requirement that changed identity is dropped instead of inherited.
+  const reqSetRef = useRef<Record<string, string>>({});
+  // Per-row owner override, used when a type accepts several owners that are
+  // both in the context (a RIB: person or payment method).
+  const [ownerOverride, setOwnerOverride] = useState<
+    Record<string, DocumentOwnerField>
+  >({});
+  // document_type → owner fields it may be attached to, read from the contract.
+  const [ownerMap, setOwnerMap] = useState<DocumentOwnerMap>({});
+  const [ownerMapStatus, setOwnerMapStatus] =
+    useState<OwnerMapStatus>("loading");
 
-  const fetchSr = useCallback(async (srId: string) => {
-    setDetails((prev) => ({
-      ...prev,
-      [srId]: { ...(prev[srId] ?? EMPTY_DETAIL), loading: true, error: null },
-    }));
-    const res = await callOperation({
-      apiId: "service-request",
-      operationId: "getServiceRequestById",
-      pathParams: { service_request_id: srId },
-    });
-    setDetails((prev) => ({
-      ...prev,
-      [srId]:
-        res && isSuccess(res)
-          ? {
-              loading: false,
-              error: null,
-              status: extractServiceRequestStatus(res.body),
-              requirements: extractRequirements(res.body),
-            }
-          : {
-              loading: false,
-              error: messageFromRes(res),
-              status: null,
-              requirements: [],
-            },
-    }));
+  // Drop every row state of an SR (picked file, chosen type/owner, created doc,
+  // error). Called when the server's requirement set changed identity: row keys
+  // disambiguate same-signature entries by position, so a dropped entry re-keys
+  // its neighbour — the surviving row would inherit a file, type or already-
+  // created document id chosen for a DIFFERENT requirement, and re-attach the
+  // wrong piece. Losing a pending pick is the safe side of that trade.
+  const resetSrRows = useCallback((srId: string) => {
+    const belongsToSr = (rowKey: string) => rowKey.startsWith(`${srId}#`);
+    const prune = <T,>(prev: Record<string, T>) => {
+      const next: Record<string, T> = {};
+      for (const [k, v] of Object.entries(prev)) if (!belongsToSr(k)) next[k] = v;
+      return next;
+    };
+    setFiles(prune);
+    setTypes(prune);
+    setOwnerOverride(prune);
+    setCreatedDoc(prune);
+    setRowError(prune);
   }, []);
+
+  const fetchSr = useCallback(
+    async (srId: string) => {
+      setDetails((prev) => ({
+        ...prev,
+        [srId]: { ...(prev[srId] ?? EMPTY_DETAIL), loading: true, error: null },
+      }));
+      const res = await callOperation({
+        apiId: "service-request",
+        operationId: "getServiceRequestById",
+        pathParams: { service_request_id: srId },
+      });
+      if (res && isSuccess(res)) {
+        const requirements = extractRequirements(res.body);
+        const setKey = requirementSetKey(requirements);
+        const previous = reqSetRef.current[srId];
+        reqSetRef.current[srId] = setKey;
+        if (previous !== undefined && previous !== setKey) resetSrRows(srId);
+        setDetails((prev) => ({
+          ...prev,
+          [srId]: {
+            loading: false,
+            error: null,
+            status: extractServiceRequestStatus(res.body),
+            requirements,
+          },
+        }));
+        return;
+      }
+      setDetails((prev) => ({
+        ...prev,
+        [srId]: {
+          loading: false,
+          error: apiErrorMessage(res),
+          status: null,
+          requirements: [],
+        },
+      }));
+    },
+    [resetSrRows],
+  );
 
   // Load (and reload) each SR when the target list changes.
   const srIds = serviceRequests.map((s) => s.id).join("|");
@@ -179,33 +238,86 @@ export default function ParcoursDocuments({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [srIds, fetchSr]);
 
-  // Flag any required contract that isn't synced — the upload needs both the
-  // service-request and document APIs — so we can prompt to synchronise rather
-  // than fail with an opaque per-row error.
+
+  // The document API's owner-scoped type sub-enums decide which id a document
+  // may be attached to, so the mapping is a prerequisite of any upload — not a
+  // nice-to-have: without it every row would fall back to the SR's own scope,
+  // which is exactly the wrong-owner 422 this form exists to avoid. Hence the
+  // explicit status (uploads wait for it, a failure is shown) and the re-read on
+  // SPECS_CHANGED_EVENT, so a sync while the page is open is picked up.
   useEffect(() => {
     let cancelled = false;
-    void listApis().then((ids) => {
-      if (cancelled) return;
-      setMissingApis(
-        ["service-request", "document"].filter((a) => !ids.includes(a)),
+    const load = () => {
+      setOwnerMapStatus((s) => (s === "ready" ? s : "loading"));
+      void loadDocumentOwnerMap().then(
+        (map) => {
+          if (cancelled) return;
+          setOwnerMap(map);
+          setOwnerMapStatus("ready");
+        },
+        () => {
+          if (!cancelled) setOwnerMapStatus("error");
+        },
       );
-    });
+    };
+    load();
+    window.addEventListener(SPECS_CHANGED_EVENT, load);
     return () => {
       cancelled = true;
+      window.removeEventListener(SPECS_CHANGED_EVENT, load);
     };
   }, []);
+
+  const clearRowError = useCallback((rowKey: string) => {
+    setRowError((p) => ({ ...p, [rowKey]: null }));
+  }, []);
+
+  // Owner a document of `documentType` must hang off. The type decides (the
+  // API validates it against an owner-scoped sub-enum and answers 422
+  // otherwise); the SR only supplies a preference, and the user can resolve an
+  // ambiguity from the row.
+  const resolveOwner = useCallback(
+    (sr: ParcoursSrTarget, documentType: string, rowKey: string) =>
+      resolveDocumentOwner({
+        documentType,
+        ownerMap,
+        preferred: sr.preferredOwner,
+        owners: sr.owners,
+        override: ownerOverride[rowKey],
+      }),
+    [ownerMap, ownerOverride],
+  );
 
   const upload = useCallback(
     async (sr: ParcoursSrTarget, req: Requirement, rowKey: string) => {
       const file = files[rowKey] ?? null;
       const accepted = req.accepted_document_types ?? [];
-      const type =
+      const rawType =
         types[rowKey] || (accepted.length === 1 ? accepted[0] : "");
-      if (!sr.ownerId) {
+      if (!rawType) {
+        setRowError((p) => ({
+          ...p,
+          [rowKey]: "Choisissez un type de document.",
+        }));
+        return;
+      }
+      if (ownerMapStatus !== "ready") {
         setRowError((p) => ({
           ...p,
           [rowKey]:
-            "Propriétaire manquant dans le contexte (contract_id / payment_method_id) — complétez-le avant de téléverser.",
+            ownerMapStatus === "loading"
+              ? "Lecture du contrat de l'API document en cours — réessayez dans un instant."
+              : "Contrat de l'API document illisible : impossible de déterminer le propriétaire du document. Synchronisez les specs.",
+        }));
+        return;
+      }
+      const owner = resolveOwner(sr, rawType, rowKey);
+      // Send the contract's spelling of the type, i.e. the one just validated.
+      const type = owner.type;
+      if (!owner.field) {
+        setRowError((p) => ({
+          ...p,
+          [rowKey]: describeOwnerProblem(owner) ?? "Propriétaire indéterminé.",
         }));
         return;
       }
@@ -213,24 +325,26 @@ export default function ParcoursDocuments({
         setRowError((p) => ({ ...p, [rowKey]: "Choisissez un fichier." }));
         return;
       }
-      if (!type) {
-        setRowError((p) => ({
-          ...p,
-          [rowKey]: "Choisissez un type de document.",
-        }));
-        return;
-      }
       setUploading((p) => ({ ...p, [rowKey]: true }));
       setRowError((p) => ({ ...p, [rowKey]: null }));
       try {
-        // 1) Create the document (multipart) with the SR's owner — but only
-        // once: if a prior attempt created the document and then failed at the
-        // attach step, reuse that id so a retry re-attaches instead of minting
-        // a duplicate. (A new file picked in between clears createdDocId.)
-        let documentId: string | null = createdDocId[rowKey] ?? null;
+        // 1) Create the document (multipart) on the resolved owner — unless a
+        // prior attempt already created exactly this document (same file, type
+        // and owner) and only failed to attach it, in which case reuse its id so
+        // the retry re-attaches instead of minting a duplicate.
+        const fileKey = fileKeyOf(file);
+        const prior = createdDoc[rowKey];
+        let documentId: string | null =
+          prior &&
+          prior.type === type &&
+          prior.ownerField === owner.field &&
+          prior.ownerId === owner.id &&
+          prior.fileKey === fileKey
+            ? prior.id
+            : null;
         if (!documentId) {
           const multipart = await buildMultipart(
-            { document_type: type, [sr.ownerField]: sr.ownerId },
+            { document_type: type, [owner.field]: owner.id },
             { file },
           );
           const created = await callOperation({
@@ -239,7 +353,7 @@ export default function ParcoursDocuments({
             multipart,
           });
           if (!created || !isSuccess(created)) {
-            setRowError((p) => ({ ...p, [rowKey]: messageFromRes(created) }));
+            setRowError((p) => ({ ...p, [rowKey]: apiErrorMessage(created) }));
             return;
           }
           documentId = readDocumentId(created.body);
@@ -250,8 +364,14 @@ export default function ParcoursDocuments({
             }));
             return;
           }
-          const createdId = documentId;
-          setCreatedDocId((p) => ({ ...p, [rowKey]: createdId }));
+          const entry: CreatedDoc = {
+            id: documentId,
+            type,
+            ownerField: owner.field,
+            ownerId: owner.id,
+            fileKey,
+          };
+          setCreatedDoc((p) => ({ ...p, [rowKey]: entry }));
         }
         // 2) Attach it to the service request (matches the requirement on type).
         const attached = await callOperation({
@@ -261,13 +381,13 @@ export default function ParcoursDocuments({
           body: { document_id: documentId, type },
         });
         if (!attached || !isSuccess(attached)) {
-          setRowError((p) => ({ ...p, [rowKey]: messageFromRes(attached) }));
+          setRowError((p) => ({ ...p, [rowKey]: apiErrorMessage(attached) }));
           return;
         }
         // Success — drop the picked file + remembered doc id, and refresh the SR
         // to reflect the new requirement state (and a possible UNDER_REVIEW).
         setFiles((p) => ({ ...p, [rowKey]: null }));
-        setCreatedDocId((p) => {
+        setCreatedDoc((p) => {
           const next = { ...p };
           delete next[rowKey];
           return next;
@@ -279,7 +399,7 @@ export default function ParcoursDocuments({
         setUploading((p) => ({ ...p, [rowKey]: false }));
       }
     },
-    [files, types, createdDocId, fetchSr],
+    [files, types, createdDoc, fetchSr, ownerMapStatus, resolveOwner],
   );
 
   const allLoaded =
@@ -313,21 +433,8 @@ export default function ParcoursDocuments({
 
   return (
     <div className="space-y-4">
-      {missingApis.length > 0 && (
-        <Card tone="warn">
-          <CardBody className="space-y-2 p-3 text-sm">
-            <p className="text-muted-foreground">
-              Contrat(s) non synchronisé(s) :{" "}
-              <span className="font-mono">{missingApis.join(", ")}</span>. Le
-              téléversement des pièces nécessite les APIs service-request et
-              document.
-            </p>
-            <a href="/settings" className="text-primary underline">
-              Ouvrir les Paramètres pour synchroniser
-            </a>
-          </CardBody>
-        </Card>
-      )}
+      {/* (The "contracts not synced" prompt lives on the page, driven by the
+          step's `requiresApis` — it gates this view entirely.) */}
       {allComplete && (
         <Card tone="success">
           <CardBody className="flex flex-wrap items-center gap-3 p-4 text-sm">
@@ -349,6 +456,10 @@ export default function ParcoursDocuments({
           !detail.loading &&
           !detail.error &&
           areRequirementsComplete(detail.requirements);
+        // Row state is keyed by requirement identity, not array position, so a
+        // refresh that reorders or shortens `requirements[]` can't move a user's
+        // file/type/owner choice onto a different requirement.
+        const reqKeys = requirementKeys(detail.requirements);
         return (
           <Card key={sr.key} tone="info">
             <CardHeader tone="info">
@@ -356,7 +467,7 @@ export default function ParcoursDocuments({
               {detail.status && (
                 <StatusBadge
                   label={detail.status}
-                  tone={srTone(detail.status)}
+                  tone={srStatusTone(detail.status)}
                   className="ml-2"
                 />
               )}
@@ -392,29 +503,38 @@ export default function ParcoursDocuments({
               ) : (
                 <ul className="space-y-2">
                   {detail.requirements.map((req, index) => {
-                    const rowKey = `${sr.id}#${index}`;
+                    const rowKey = `${sr.id}#${reqKeys[index]}`;
+                    const rowType = effectiveType(req, types[rowKey]);
                     return (
                       <li key={rowKey}>
                         <RequirementRow
                           req={req}
                           file={files[rowKey] ?? null}
                           selectedType={types[rowKey] ?? ""}
+                          effectiveType={rowType}
+                          owner={resolveOwner(sr, rowType, rowKey)}
+                          ownerMapStatus={ownerMapStatus}
                           uploading={!!uploading[rowKey]}
                           error={rowError[rowKey] ?? null}
                           onPickFile={(f) => {
                             setFiles((p) => ({ ...p, [rowKey]: f }));
-                            // A new file invalidates a document created in a
-                            // prior failed attempt, and clears the stale error.
-                            setCreatedDocId((p) => {
+                            clearRowError(rowKey);
+                          }}
+                          onPickType={(t) => {
+                            setTypes((p) => ({ ...p, [rowKey]: t }));
+                            // The type decides which owners are valid, so a
+                            // choice made for the previous type is moot.
+                            setOwnerOverride((p) => {
                               const next = { ...p };
                               delete next[rowKey];
                               return next;
                             });
-                            setRowError((p) => ({ ...p, [rowKey]: null }));
+                            clearRowError(rowKey);
                           }}
-                          onPickType={(t) =>
-                            setTypes((p) => ({ ...p, [rowKey]: t }))
-                          }
+                          onPickOwner={(f) => {
+                            setOwnerOverride((p) => ({ ...p, [rowKey]: f }));
+                            clearRowError(rowKey);
+                          }}
                           onUpload={() => void upload(sr, req, rowKey)}
                         />
                       </li>
@@ -457,19 +577,31 @@ function RequirementRow({
   req,
   file,
   selectedType,
+  effectiveType: rowType,
+  owner,
+  ownerMapStatus,
   uploading,
   error,
   onPickFile,
   onPickType,
+  onPickOwner,
   onUpload,
 }: {
   req: Requirement;
   file: File | null;
   selectedType: string;
+  /** The type this row will actually send (pick, or the sole accepted type) —
+   *  computed by the parent so the hint, the guard and the upload agree. */
+  effectiveType: string;
+  /** Owner the document will be attached to, resolved from the chosen type. */
+  owner: ResolvedDocumentOwner;
+  /** Whether the owner mapping has been read — uploads wait for it. */
+  ownerMapStatus: OwnerMapStatus;
   uploading: boolean;
   error: string | null;
   onPickFile: (f: File | null) => void;
   onPickType: (t: string) => void;
+  onPickOwner: (f: DocumentOwnerField) => void;
   onUpload: () => void;
 }) {
   // DATA_FIELD requirements aren't document uploads — show them read-only so
@@ -498,8 +630,15 @@ function RequirementRow({
 
   const accepted = req.accepted_document_types ?? [];
   const pending = isDocRequirementPending(req);
-  const effectiveType =
-    selectedType || (accepted.length === 1 ? accepted[0] : "");
+  // Why the owner isn't settled, if it isn't — the same text the upload guard
+  // would produce, shown here instead of behind a disabled button.
+  const ownerProblem = describeOwnerProblem(owner);
+  // Offer the choice both when several owners are valid and when none was
+  // settled but the context holds a usable one (an unknown type, or the owner
+  // this SR expects being absent): the user decides rather than being stuck.
+  const showOwnerSelect =
+    owner.candidates.length > 1 ||
+    (!owner.field && owner.candidates.length > 0);
 
   return (
     <div className="border-border rounded-md border px-3 py-2">
@@ -565,6 +704,57 @@ function RequirementRow({
               />
             </Field>
           ) : null}
+          {/* Which id the document hangs off is decided by its type, not by
+              the service request — surface it, and let an ambiguity (a RIB is
+              valid on the person *and* on the payment method) or a gap in the
+              context be resolved before anything is sent. */}
+          {ownerMapStatus !== "ready" ? (
+            <p
+              className={cn(
+                "text-[11px]",
+                ownerMapStatus === "error"
+                  ? "text-amber-600 dark:text-amber-400"
+                  : "text-muted-foreground",
+              )}
+            >
+              {ownerMapStatus === "error"
+                ? "Contrat de l'API document illisible — le propriétaire du document ne peut pas être déduit. Synchronisez les specs."
+                : "Lecture du contrat de l'API document…"}
+            </p>
+          ) : !rowType ? null : showOwnerSelect ? (
+            <Field
+              label="Rattaché à"
+              required
+              hint={
+                ownerProblem ??
+                "Propriétaire du document, déduit du type via le contrat de l'API document."
+              }
+            >
+              <Select
+                value={owner.field ?? ""}
+                onValueChange={(v) => onPickOwner(v as DocumentOwnerField)}
+              >
+                <SelectTrigger className="w-full" aria-required>
+                  <SelectValue placeholder="Choisir un propriétaire" />
+                </SelectTrigger>
+                <SelectContent>
+                  {owner.candidates.map((f) => (
+                    <SelectItem key={f} value={f} className="font-mono">
+                      {f}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </Field>
+          ) : owner.field ? (
+            <p className="text-muted-foreground text-[11px]">
+              Rattaché à <code className="font-mono">{owner.field}</code>
+            </p>
+          ) : (
+            <p className="text-[11px] text-amber-600 dark:text-amber-400">
+              {ownerProblem}
+            </p>
+          )}
           <div className="flex flex-wrap items-center gap-2">
             <label
               className={cn(
@@ -607,7 +797,13 @@ function RequirementRow({
               variant="success"
               size="sm"
               className="h-8 shrink-0 text-xs"
-              disabled={uploading || !file || !effectiveType}
+              disabled={
+                uploading ||
+                !file ||
+                !rowType ||
+                !owner.field ||
+                ownerMapStatus !== "ready"
+              }
               onClick={onUpload}
             >
               {uploading ? (

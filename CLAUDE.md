@@ -62,7 +62,10 @@ http/dialog) are unavailable there — see the fallback note below.
     IBAN/BIC/NIR/SIREN/SIRET) — all topbar tools.
   - Parcours (guided flow, behind `/parcours`): `ParcoursStepper` (collapsible
     phase rail), `ParcoursContextPanel` (shared values chained between steps),
-    `ParcoursSelect` (pick item(s) from a list response into the context).
+    `ParcoursSelect` (pick item(s) from a list response into the context),
+    `ParcoursDocuments` (Phase C: requirements-driven upload+attach per SR),
+    `ParcoursDecisions` (Phase D: quick APPROVED/REJECTED over the SRs of the
+    current run — replaces the old lister → consulter → décider steps).
   - Dialogs/theme: `ConfirmDialog` + `PromptDialog` (replace native
     confirm/prompt, unavailable in the webview), `theme-provider` +
     `ThemeToggle` (dark/light via `next-themes`).
@@ -97,6 +100,10 @@ http/dialog) are unavailable there — see the fallback note below.
     context mapping, response capture, sessionStorage progress) behind
     `/parcours`; `fake-fields.ts` — checksum-valid sample values
     (IBAN/BIC/NIR/SIREN/SIRET) for `FieldGenerator`.
+  - `parcours-documents.ts` / `parcours-decisions.ts` — pure (React-free)
+    analysis behind the two custom parcours steps: a SR's `requirements[]` for
+    the Phase C uploads, and the SR reading + `decisions` payload building for
+    the Phase D quick decision.
   - `deref.ts`, `spec-diff.ts` (single runtime diff, no build-time consumer),
     `example-extractor.ts`, `env.ts`, `types.ts`, `hal.ts`, `jwt.ts`,
     `design.ts`, `utils.ts`.

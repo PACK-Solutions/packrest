@@ -2,10 +2,127 @@ import { describe, expect, it } from "vitest";
 import {
   advanceState,
   bodyHasContent,
+  buildSeedForStep,
+  DEFAULT_BENEFICIARY_CLAUSE,
+  defaultContextValues,
+  defaultDateOfEffect,
+  extractProduced,
+  initialState,
   mergeContextValues,
+  SOUSCRIPTION_PARCOURS,
   type ContextValues,
   type ParcoursDef,
 } from "@/lib/parcours";
+import type { ProxyResponse } from "@/lib/http";
+
+const stepById = (id: string) => {
+  const step = SOUSCRIPTION_PARCOURS.steps.find((s) => s.id === id);
+  if (!step) throw new Error(`unknown step ${id}`);
+  return step;
+};
+
+const res = (body: unknown, status = 200): ProxyResponse => ({
+  status,
+  statusText: "OK",
+  headers: {},
+  body,
+  durationMs: 1,
+});
+
+// POST /contracts/{id}/submit takes no body, so date_of_effect and
+// beneficiary_clause must already be on the DRAFT or submission answers 422
+// (« Date of effect / Beneficiary clause is required for submission »). They are
+// context values, seeded with a default and captured back from each contract
+// response — so an edited value is what the next contract step sends.
+describe("contract submission fields", () => {
+  it("starts a run with a usable date_of_effect + beneficiary_clause", () => {
+    const values = initialState(SOUSCRIPTION_PARCOURS).values;
+    expect(values.date_of_effect).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(values.date_of_effect).toBe(defaultDateOfEffect());
+    expect(values.beneficiary_clause).toBe(DEFAULT_BENEFICIARY_CLAUSE);
+  });
+
+  it("create-contract seeds the context ids plus both submission fields", () => {
+    const seed = buildSeedForStep(stepById("create-contract"), {
+      ...defaultContextValues(),
+      product_id: "prod-1",
+      person_id: "p-1",
+    });
+    expect(seed?.body).toEqual({
+      product_id: "prod-1",
+      subscriber_id: "p-1",
+      date_of_effect: defaultDateOfEffect(),
+      beneficiary_clause: DEFAULT_BENEFICIARY_CLAUSE,
+    });
+  });
+
+  it("update-contract re-sends the CONTEXT value, not the default — a clause typed at creation is not overwritten", () => {
+    const edited = "Mon épouse, à défaut mes enfants nés ou à naître.";
+    const seed = buildSeedForStep(stepById("update-contract"), {
+      ...defaultContextValues(),
+      contract_id: "c-1",
+      beneficiary_clause: edited,
+      date_of_effect: "2027-01-01",
+    });
+    expect(seed?.params).toEqual({ contract_id: "c-1" });
+    expect(seed?.body).toEqual({
+      date_of_effect: "2027-01-01",
+      beneficiary_clause: edited,
+    });
+  });
+
+  it("captures back what the contract responses echo, so the update step reuses it", () => {
+    const created = extractProduced(
+      stepById("create-contract"),
+      res({
+        id: "c-1",
+        date_of_effect: "2027-03-01",
+        beneficiary_clause: "Mes enfants, par parts égales.",
+      }),
+    );
+    expect(created).toMatchObject({
+      contract_id: "c-1",
+      date_of_effect: "2027-03-01",
+      beneficiary_clause: "Mes enfants, par parts égales.",
+    });
+    // A response that echoes neither leaves the context value untouched.
+    expect(
+      extractProduced(stepById("create-contract"), res({ id: "c-2" })),
+    ).toEqual({ contract_id: "c-2" });
+  });
+
+  it("seeds nothing when the user deliberately clears a context value", () => {
+    const seed = buildSeedForStep(stepById("update-contract"), {
+      contract_id: "c-1",
+      date_of_effect: "",
+      beneficiary_clause: "",
+    });
+    expect(seed?.params).toEqual({ contract_id: "c-1" });
+    expect(seed?.body).toBeUndefined();
+  });
+
+  it("keeps the seed stable across calls (the RequestBuilder keys its effect on it)", () => {
+    const values = defaultContextValues();
+    const a = buildSeedForStep(stepById("update-contract"), values);
+    const b = buildSeedForStep(stepById("update-contract"), values);
+    expect(JSON.stringify(a)).toBe(JSON.stringify(b));
+  });
+
+  it("submit-contract carries no body (both fields must already be on the DRAFT)", () => {
+    const seed = buildSeedForStep(stepById("submit-contract"), {
+      contract_id: "c-1",
+    });
+    expect(seed?.params).toEqual({ contract_id: "c-1" });
+    expect(seed?.body).toBeUndefined();
+  });
+
+  it("only the update step is opted into the automatic mode among optional steps", () => {
+    const autoRunOptional = SOUSCRIPTION_PARCOURS.steps
+      .filter((s) => s.optional && s.autoRun)
+      .map((s) => s.id);
+    expect(autoRunOptional).toEqual(["update-contract"]);
+  });
+});
 
 describe("mergeContextValues", () => {
   it("merges incoming values over the previous ones", () => {

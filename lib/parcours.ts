@@ -17,6 +17,8 @@
 
 import type { ImportSeed } from "@/lib/bruno";
 import type { ProxyResponse } from "@/lib/http";
+// Pure module (no React/Tauri) — safe to import here.
+import { toLocalIsoDate } from "@/lib/fake-fields";
 // Type-only (erased at build) — no runtime cycle with lib/parcours-auto, which
 // imports this module at runtime.
 import type { AutoSeed } from "@/lib/parcours-auto";
@@ -36,7 +38,14 @@ export type ContextKey =
   | "sr_mandate_id"
   | "premium_id"
   | "periodic_premium_id"
-  | "sr_beneficiary_id";
+  | "sr_beneficiary_id"
+  // Contract fields required at submission. They live in the context (not as a
+  // per-step constant) so the value the user settles on is the one BOTH contract
+  // steps send: « Mettre à jour le contrat » must not overwrite a clause typed at
+  // creation with a default. Seeded with a default by `initialState`, captured
+  // back from each contract response, editable in the context panel.
+  | "date_of_effect"
+  | "beneficiary_clause";
 
 export interface ContextField {
   key: ContextKey;
@@ -62,6 +71,12 @@ export const CONTEXT_FIELDS: ContextField[] = [
   { key: "sr_contract_id", label: "SR contrat (id)" },
   { key: "sr_mandate_id", label: "SR mandat SEPA (id)" },
   { key: "sr_beneficiary_id", label: "SR clause bénéficiaire (id)" },
+  { key: "date_of_effect", label: "date_of_effect (contrat)", manual: true },
+  {
+    key: "beneficiary_clause",
+    label: "beneficiary_clause (contrat)",
+    manual: true,
+  },
 ];
 
 export type ContextValues = Partial<Record<ContextKey, string>>;
@@ -76,6 +91,41 @@ export type SeedMapping =
       | { from: ContextKey }
       | { const: string }
     ));
+
+// Default beneficiary designation. `beneficiary_clause` and `date_of_effect` are
+// both required at submission (POST /contracts/{id}/submit has no body), so the
+// context starts with a usable pair (see `initialState`) and both contract steps
+// seed them FROM the context — never from a constant, so a value the user edits
+// (in the form, then captured back, or directly in the context panel) survives
+// « Mettre à jour le contrat » instead of being overwritten.
+export const DEFAULT_BENEFICIARY_CLAUSE = "Mes héritiers légaux, à parts égales";
+
+/** Today, as the `date` the contract API expects (local, not UTC). */
+export function defaultDateOfEffect(): string {
+  return toLocalIsoDate(new Date());
+}
+
+// The submission-required contract fields, seeded identically on « Créer le
+// contrat » and « Mettre à jour le contrat » (a DRAFT that lost them is
+// completed by re-running the update step).
+const CONTRACT_SUBMISSION_SEEDS: SeedMapping[] = [
+  { target: "body", name: "date_of_effect", from: "date_of_effect" },
+  { target: "body", name: "beneficiary_clause", from: "beneficiary_clause" },
+];
+
+// Captured back from a contract response so the value the contract actually
+// carries (which may be the one the user typed over the default) becomes the
+// context value the next contract step re-sends.
+const CONTRACT_SUBMISSION_PRODUCES: Array<{
+  key: ContextKey;
+  from: ProducerSpec;
+}> = [
+  { key: "date_of_effect", from: { kind: "bodyField", fields: ["date_of_effect"] } },
+  {
+    key: "beneficiary_clause",
+    from: { kind: "bodyField", fields: ["beneficiary_clause"] },
+  },
+];
 
 // One entry of `produces`: how to read a captured value out of the 2xx
 // response body.
@@ -127,6 +177,16 @@ export interface ParcoursStep {
   description?: string;
   /** Skippable (e.g. versement périodique). */
   optional?: boolean;
+  /** Optional steps are skipped by the automatic mode unless they declare this:
+   *  « Mettre à jour le contrat » must run, because it is what puts the
+   *  submission-required fields on the DRAFT. Declared here rather than inferred
+   *  from "the request happens to carry a body", so adding a body seed to
+   *  another optional step never silently enrols it in every auto run. */
+  autoRun?: boolean;
+  /** Extra API ids a `custom` view calls directly (the document form uploads
+   *  through the document API). The page checks these are synced before
+   *  rendering the view, on top of the step's own `apiId`. */
+  requiresApis?: string[];
   seedFrom?: SeedMapping[];
   produces?: Array<{ key: ContextKey; from: ProducerSpec }>;
   selects?: SelectSpec;
@@ -135,8 +195,10 @@ export interface ParcoursStep {
   fieldOptions?: FieldOptionSource[];
   /** Renders a bespoke component instead of the RequestBuilder (see
    *  app/parcours/page.tsx). "documents" → the requirements-driven upload form
-   *  that analyses each SR's `requirements[]` and uploads+attaches per document. */
-  custom?: "documents";
+   *  that analyses each SR's `requirements[]` and uploads+attaches per document;
+   *  "decisions" → the reviewer's quick-decision view over the SRs of the
+   *  current run (APPROVED / REJECTED inline, no list → consult → decide). */
+  custom?: "documents" | "decisions";
 }
 
 export interface ParcoursDef {
@@ -302,11 +364,21 @@ const STEPS: ParcoursStep[] = [
     title: "Créer le contrat",
     description:
       "Renseignez product_id (requis), subscriber_id et date_of_effect. Le contrat est créé au statut DRAFT. Pour compléter un contrat déjà créé, ne relancez pas cette étape (elle en créerait un nouveau) : utilisez « Mettre à jour le contrat ».",
+    // date_of_effect + beneficiary_clause are required at submission (the submit
+    // endpoint takes no body) and come from the context, so an edited value is
+    // what both contract steps send.
     seedFrom: [
       { target: "body", name: "product_id", from: "product_id" },
       { target: "body", name: "subscriber_id", from: "person_id" },
+      ...CONTRACT_SUBMISSION_SEEDS,
     ],
-    produces: [{ key: "contract_id", from: { kind: "bodyField", fields: ["id", "contract_id"] } }],
+    produces: [
+      { key: "contract_id", from: { kind: "bodyField", fields: ["id", "contract_id"] } },
+      // What the created contract actually carries wins over the seeded default:
+      // a clause the user typed here is echoed back and becomes the context
+      // value « Mettre à jour le contrat » re-sends.
+      ...CONTRACT_SUBMISSION_PRODUCES,
+    ],
   },
   {
     id: "update-contract",
@@ -317,7 +389,15 @@ const STEPS: ParcoursStep[] = [
     description:
       "Complète ou corrige le contrat DRAFT **existant** sans le recréer — mise à jour partielle : seuls les champs renseignés sont modifiés. Utilisez cette étape (et non « Créer le contrat », qui créerait un nouveau contrat et perdrait le contexte) pour ajouter un champ manquant avant la soumission : clause bénéficiaire (beneficiary_clause), date d'effet, garanties optionnelles, etc. Le contract_id est prérempli.",
     optional: true,
-    seedFrom: [{ target: "param", name: "contract_id", from: "contract_id" }],
+    // Skippable by hand, but the automatic mode must run it: it is what puts the
+    // submission-required fields on a DRAFT that lost them.
+    autoRun: true,
+    // Same two fields as at creation, read from the context — so this step
+    // completes a DRAFT without overwriting the designation the user settled on.
+    seedFrom: [
+      { target: "param", name: "contract_id", from: "contract_id" },
+      ...CONTRACT_SUBMISSION_SEEDS,
+    ],
     // On an ACCEPTED contract a sensitive change (e.g. beneficiary_clause)
     // returns 202 and opens a BENEFICIARY_CLAUSE_CHANGE service request; capture
     // its id so Phase C can attach documents to it. Absent on a DRAFT (200).
@@ -326,6 +406,7 @@ const STEPS: ParcoursStep[] = [
         key: "sr_beneficiary_id",
         from: { kind: "embeddedSr", srType: "BENEFICIARY_CLAUSE_CHANGE" },
       },
+      ...CONTRACT_SUBMISSION_PRODUCES,
     ],
   },
   // (The standalone « Lister les fonds » / « Lister les allocations
@@ -439,9 +520,11 @@ const STEPS: ParcoursStep[] = [
     phase: PHASE_C,
     custom: "documents",
     // A real operation on the SR API so the page's spec-resolution/gating still
-    // validates the service-request contract is synced before rendering.
+    // validates the service-request contract is synced before rendering; the
+    // uploads also go through the document API, hence `requiresApis`.
     apiId: "service-request",
     operationId: "getServiceRequestById",
+    requiresApis: ["service-request", "document"],
     title: "Compléter les demandes (pièces justificatives)",
     description:
       "Pour chaque demande ouverte (souscription du contrat, signature du mandat SEPA, changement de clause bénéficiaire), les pièces requises sont analysées automatiquement. Téléversez chaque document demandé : il est créé puis rattaché à la bonne demande en une seule action. Lorsque toutes les pièces d'une demande sont fournies, celle-ci passe au statut UNDER_REVIEW.",
@@ -449,47 +532,23 @@ const STEPS: ParcoursStep[] = [
 
   // ---- Phase D : décision back-office + suivi ------------------------------
   {
-    id: "list-under-review",
+    id: "review-service-requests",
     phase: PHASE_D,
     actor: "Backoffice",
-    apiId: "service-request",
-    operationId: "listServiceRequests",
-    title: "Lister les demandes à instruire",
-    description:
-      "Back-office : liste des demandes en attente d'instruction (statut UNDER_REVIEW). Sélectionnez dans la liste la demande à instruire : son id préremplit la consultation et la décision. Revenez sur cette étape pour instruire une autre demande une fois la précédente traitée.",
-    seedFrom: [{ target: "param", name: "status", const: "UNDER_REVIEW" }],
-    // Turn the response into a picker so the reviewer chooses which SR to
-    // instruct; the chosen id feeds « Consulter » and « Décider ». Re-run this
-    // step (via the stepper) to pick a different SR after deciding one.
-    selects: {
-      key: "sr_contract_id",
-      collections: ["service_requests"],
-      idFields: ["id"],
-      labelFields: ["type"],
-      detailFields: ["status", "reason", "id"],
-    },
-  },
-  {
-    id: "get-service-request",
-    phase: PHASE_D,
-    actor: "Backoffice",
-    apiId: "service-request",
-    operationId: "getServiceRequestById",
-    title: "Consulter le détail de la demande",
-    description:
-      "Consulte le détail de la demande : requirements et documents rattachés.",
-    seedFrom: [{ target: "param", name: "service_request_id", from: "sr_contract_id" }],
-  },
-  {
-    id: "decide-service-request",
-    phase: PHASE_D,
-    actor: "Backoffice",
+    // Replaces the former lister → consulter → décider triplet: one view over
+    // the SRs of THIS run (context ids + a listServiceRequests filtered on each
+    // target resource), deciding APPROVED / REJECTED in place. The reviewer
+    // never sees the tenant's whole UNDER_REVIEW backlog, and never has to
+    // carry an SR id from one step's response into the next step's form.
+    custom: "decisions",
+    // A real operation on the SR API so the page's spec-resolution/gating still
+    // validates the service-request contract is synced before rendering.
     apiId: "service-request",
     operationId: "decideServiceRequest",
-    title: "Décider (APPROVED / REJECTED)",
+    requiresApis: ["service-request"],
+    title: "Instruire les demandes (décision)",
     description:
-      "Nécessite le scope service-requests:admin. Choisissez outcome=APPROVED, ou REJECTED avec rejection_reasons[]. La réponse est un 204 : reconsultez la demande pour observer son nouveau statut. Un outcome RETURNED_FOR_INFORMATION rouvre la demande (retour à la Phase C).",
-    seedFrom: [{ target: "param", name: "service_request_id", from: "sr_contract_id" }],
+      "Back-office (scope service-requests:admin) : les demandes ouvertes par ce parcours sont listées avec leur statut et leurs exigences. Approuvez ou rejetez chacune directement — la décision est un 204, la demande est relue aussitôt pour afficher son nouveau statut. Un retour pour information (RETURNED_FOR_INFORMATION), qui exige de composer requirements[], reste à faire depuis l'endpoint « Décider » de l'API service-request.",
   },
   {
     id: "poll-contract",
@@ -654,6 +713,28 @@ function firstArray(obj: Record<string, unknown>): unknown[] | null {
   return null;
 }
 
+// Locate a collection in a response body: one of the named arrays under
+// `_embedded`, else at the root, else (opt-in) the first array found anywhere in
+// either — the HAL shape every list/collection reader in the app needs. Shared
+// by the picker options, the SR requirements and the SR collection so a shape
+// quirk fixed once is fixed everywhere.
+export function findCollectionArray(
+  body: unknown,
+  names: string[],
+  opts: { anyArrayFallback?: boolean } = {},
+): unknown[] | null {
+  if (Array.isArray(body)) return body;
+  const root = asRecord(body);
+  if (!root) return null;
+  const embedded = asRecord(root._embedded);
+  for (const name of names) {
+    if (embedded && Array.isArray(embedded[name])) return embedded[name];
+    if (Array.isArray(root[name])) return root[name];
+  }
+  if (!opts.anyArrayFallback) return null;
+  return (embedded && firstArray(embedded)) ?? firstArray(root);
+}
+
 function firstString(
   item: Record<string, unknown>,
   fields?: string[],
@@ -688,24 +769,9 @@ export function extractOptions(
   body: unknown,
   spec: Pick<SelectSpec, "collections" | "idFields" | "labelFields" | "detailFields">,
 ): SelectOption[] {
-  let items: unknown[] | null = null;
-  const root = asRecord(body);
-  if (Array.isArray(body)) items = body;
-  else if (root) {
-    const embedded = asRecord(root._embedded);
-    for (const name of spec.collections) {
-      if (embedded && Array.isArray(embedded[name])) {
-        items = embedded[name] as unknown[];
-        break;
-      }
-      if (Array.isArray(root[name])) {
-        items = root[name] as unknown[];
-        break;
-      }
-    }
-    if (!items && embedded) items = firstArray(embedded);
-    if (!items) items = firstArray(root);
-  }
+  const items = findCollectionArray(body, spec.collections, {
+    anyArrayFallback: true,
+  });
   if (!items) return [];
   const out: SelectOption[] = [];
   for (const raw of items) {
@@ -769,10 +835,21 @@ export interface ParcoursState {
   semiPrefilled?: string[];
 }
 
+// The context values a run starts with: the two fields the submit endpoint
+// requires but takes no body for, so they are on the contract from the first
+// « Créer le contrat » onwards — in every mode, and editable like any other
+// context value.
+export function defaultContextValues(): ContextValues {
+  return {
+    date_of_effect: defaultDateOfEffect(),
+    beneficiary_clause: DEFAULT_BENEFICIARY_CLAUSE,
+  };
+}
+
 export function initialState(def: ParcoursDef): ParcoursState {
   return {
     parcoursId: def.id,
-    values: {},
+    values: defaultContextValues(),
     done: [],
     currentStepId: def.steps[0]?.id ?? "",
     drafts: {},
@@ -793,7 +870,15 @@ export function loadParcoursState(def: ParcoursDef): ParcoursState {
         parsed.currentStepId &&
         def.steps.some((s) => s.id === parsed.currentStepId)
       )
-        return parsed;
+        // Back-fill defaults absent from a state persisted before a key existed
+        // (a run in progress must not lose its submission-required fields),
+        // without touching a value the user has since cleared on purpose… which
+        // an absent key is indistinguishable from — so only missing keys are
+        // filled, never empty ones.
+        return {
+          ...parsed,
+          values: { ...defaultContextValues(), ...parsed.values },
+        };
     }
   } catch {
     /* private mode / bad JSON → fresh */

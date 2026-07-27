@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { ProxyResponse } from "@/lib/http";
-import { SOUSCRIPTION_PARCOURS, type ContextValues } from "@/lib/parcours";
+import {
+  DEFAULT_BENEFICIARY_CLAUSE,
+  defaultContextValues,
+  SOUSCRIPTION_PARCOURS,
+  type ContextValues,
+} from "@/lib/parcours";
 import {
   AUTO_STOP_STEP_ID,
   buildAutoDraftForStep,
@@ -38,10 +43,12 @@ function res(status: number, body: unknown = {}): ProxyResponse {
   };
 }
 
-// A ctx as the runner would build it, with a fixed identity for assertions.
+// A ctx as the runner would build it, with a fixed identity for assertions. The
+// context always carries the parcours defaults (the page seeds them in
+// initialState), so the contract steps find date_of_effect / beneficiary_clause.
 function makeCtx(values: ContextValues = {}) {
   return {
-    values,
+    values: { ...defaultContextValues(), ...values },
     identity: {
       firstName: "Test",
       lastName: "Durand",
@@ -50,7 +57,6 @@ function makeCtx(values: ContextValues = {}) {
     },
     iban: "FR7630006000011234567890189",
     bic: "AGRIFRPP",
-    beneficiaryClause: "Mon conjoint, à défaut mes héritiers.",
     address: { line1: "1 rue de la Paix", postalCode: "75002", city: "Paris" },
   };
 }
@@ -194,7 +200,7 @@ describe("buildAutoRequest", () => {
       product_id: "prod-1",
       subscriber_id: "p-1",
       date_of_effect: todayIso(),
-      beneficiary_clause: expect.stringContaining("héritiers"),
+      beneficiary_clause: DEFAULT_BENEFICIARY_CLAUSE,
     });
   });
 
@@ -232,7 +238,6 @@ describe("buildAutoDraftForStep", () => {
     },
     iban: "FR7630006000011234567890189",
     bic: "AGRIFRPP",
-    beneficiaryClause: "Mon conjoint, à défaut mes héritiers.",
     address: { line1: "1 rue de la Paix", postalCode: "75002", city: "Paris" },
   };
 
@@ -310,7 +315,7 @@ describe("runParcoursAuto", () => {
   it("runs Phase A + A bis, skips optionals, pauses at the product picker", async () => {
     const { call, calls } = mockCall(happyHandlers);
     const { cb, done } = collectingCallbacks();
-    const result = await runParcoursAuto(DEF, { values: {}, done: [] }, noAbort, cb, call);
+    const result = await runParcoursAuto(DEF, { values: defaultContextValues(), done: [] }, noAbort, cb, call);
 
     expect(result.kind).toBe("paused-picker");
     if (result.kind === "paused-picker") {
@@ -352,6 +357,7 @@ describe("runParcoursAuto", () => {
       DEF,
       {
         values: {
+          ...defaultContextValues(),
           person_id: "p-1",
           person_name: "Test Durand",
           payment_method_id: "pm-1",
@@ -372,13 +378,13 @@ describe("runParcoursAuto", () => {
       "createPremium",
       "submitContract",
     ]);
-    // update-contract completes the DRAFT with the fields the submit endpoint
-    // requires (date of effect + beneficiary clause).
+    // update-contract is optional, yet it runs (its body seed opts it in) and
+    // completes the DRAFT with the fields the submit endpoint requires.
     const update = calls.find((c) => c.operationId === "updateContract");
     expect(update?.pathParams).toEqual({ contract_id: "c-1" });
     expect(update?.body).toMatchObject({
       date_of_effect: todayIso(),
-      beneficiary_clause: expect.stringContaining("héritiers"),
+      beneficiary_clause: DEFAULT_BENEFICIARY_CLAUSE,
     });
     // The premium carries the fund source required at submission.
     const premium = calls.find((c) => c.operationId === "createPremium");
@@ -399,7 +405,10 @@ describe("runParcoursAuto", () => {
     const { cb, done } = collectingCallbacks();
     const result = await runParcoursAuto(
       DEF,
-      { values: { product_id: "prod-1" }, done: [] },
+      {
+        values: { ...defaultContextValues(), product_id: "prod-1" },
+        done: [],
+      },
       noAbort,
       cb,
       call,
@@ -415,7 +424,7 @@ describe("runParcoursAuto", () => {
       createIndividual: (n) => (n < 2 ? res(409, {}) : res(201, { id: "p-1" })),
     });
     const { cb, done } = collectingCallbacks();
-    const result = await runParcoursAuto(DEF, { values: {}, done: [] }, noAbort, cb, call);
+    const result = await runParcoursAuto(DEF, { values: defaultContextValues(), done: [] }, noAbort, cb, call);
     expect(result.kind).toBe("paused-picker");
 
     const attempts = calls.filter((c) => c.operationId === "createIndividual");
@@ -449,7 +458,7 @@ describe("runParcoursAuto", () => {
       createIndividual: () => res(409, {}),
     });
     const { cb } = collectingCallbacks();
-    const result = await runParcoursAuto(DEF, { values: {}, done: [] }, noAbort, cb, call);
+    const result = await runParcoursAuto(DEF, { values: defaultContextValues(), done: [] }, noAbort, cb, call);
     expect(result).toMatchObject({ kind: "error", stepId: "create-individual" });
     expect(calls.filter((c) => c.operationId === "createIndividual")).toHaveLength(3);
   });
@@ -460,7 +469,7 @@ describe("runParcoursAuto", () => {
       upsertPersonAddressByType: () => res(422, { detail: "bad address" }),
     });
     const { cb, done } = collectingCallbacks();
-    const result = await runParcoursAuto(DEF, { values: {}, done: [] }, noAbort, cb, call);
+    const result = await runParcoursAuto(DEF, { values: defaultContextValues(), done: [] }, noAbort, cb, call);
     expect(result).toMatchObject({ kind: "error", stepId: "person-address" });
     expect(done.map((d) => d.id)).toEqual(["create-individual"]);
   });
@@ -473,7 +482,10 @@ describe("runParcoursAuto", () => {
     const { cb } = collectingCallbacks();
     const result = await runParcoursAuto(
       DEF,
-      { values: { product_id: "prod-1" }, done: [] },
+      {
+        values: { ...defaultContextValues(), product_id: "prod-1" },
+        done: [],
+      },
       noAbort,
       cb,
       call,
@@ -492,7 +504,7 @@ describe("runParcoursAuto", () => {
     const { cb } = collectingCallbacks();
     const result = await runParcoursAuto(
       DEF,
-      { values: {}, done: [] },
+      { values: defaultContextValues(), done: [] },
       controller.signal,
       cb,
       call,
@@ -535,6 +547,7 @@ describe("runParcoursAuto", () => {
       DEF,
       {
         values: {
+          ...defaultContextValues(),
           person_id: "p-1",
           payment_method_id: "pm-1",
           product_id: "prod-1",
@@ -589,7 +602,7 @@ describe("runParcoursAuto", () => {
     const { cb, done } = collectingCallbacks();
     const result = await runParcoursAuto(
       DEF,
-      { values: {}, done: [] },
+      { values: defaultContextValues(), done: [] },
       controller.signal,
       cb,
       call,
@@ -609,7 +622,7 @@ describe("runParcoursAuto", () => {
     const { cb } = collectingCallbacks();
     const result = await runParcoursAuto(
       DEF,
-      { values: {}, done: [] },
+      { values: defaultContextValues(), done: [] },
       noAbort,
       cb,
       throwingCall,
@@ -627,7 +640,7 @@ describe("runParcoursAuto", () => {
       upsertPersonAddressByType: () => res(422, { detail: "bad address" }),
     });
     const { cb } = collectingCallbacks();
-    const result = await runParcoursAuto(DEF, { values: {}, done: [] }, noAbort, cb, call);
+    const result = await runParcoursAuto(DEF, { values: defaultContextValues(), done: [] }, noAbort, cb, call);
     expect(result.kind).toBe("error");
     if (result.kind === "error") {
       expect(result.draft?.params).toMatchObject({ person_id: "p-1" });

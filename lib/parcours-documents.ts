@@ -9,7 +9,7 @@
 // attached; once no requirement is left MISSING/INVALID the SR auto-transitions
 // REQUIRES_INFORMATION → UNDER_REVIEW.
 
-import { asRecord } from "@/lib/parcours";
+import { asRecord, findCollectionArray } from "@/lib/parcours";
 
 export type RequirementKind = "DOCUMENT" | "DATA_FIELD";
 export type RequirementState =
@@ -77,13 +77,8 @@ function parseRequirement(raw: unknown): Requirement | null {
 // Pull the `requirements[]` out of a service-request response body, tolerating
 // an `_embedded` wrapper and a missing/empty array.
 export function extractRequirements(srBody: unknown): Requirement[] {
-  const root = asRecord(srBody);
-  if (!root) return [];
-  const embedded = asRecord(root._embedded);
-  const list =
-    (Array.isArray(root.requirements) && root.requirements) ||
-    (embedded && Array.isArray(embedded.requirements) && embedded.requirements) ||
-    null;
+  if (!asRecord(srBody)) return [];
+  const list = findCollectionArray(srBody, ["requirements"]);
   if (!list) return [];
   const out: Requirement[] = [];
   for (const raw of list) {
@@ -91,6 +86,45 @@ export function extractRequirements(srBody: unknown): Requirement[] {
     if (req) out.push(req);
   }
   return out;
+}
+
+// Per-requirement keys for the upload form's row state (picked file, chosen
+// type, chosen owner). A requirement carries no id in the contract, so the key
+// is its signature — kind + accepted types + pointer — plus an occurrence index
+// to keep entries with the same signature apart. Unlike a plain array index,
+// this survives the reordering/shrinking of `requirements[]` that a refresh
+// brings (a satisfied entry moving, a malformed one dropped), so a user's
+// choices stay attached to the requirement they were made for.
+export function requirementKeys(reqs: Requirement[]): string[] {
+  const seen = new Map<string, number>();
+  return reqs.map((r) => {
+    const signature = [
+      r.kind,
+      (r.accepted_document_types ?? []).join("+"),
+      r.pointer ?? "",
+      // The attached document, once there is one, is what tells two otherwise
+      // identical entries apart (two pieces of the same type).
+      r.document?.id ?? "",
+    ].join("|");
+    const occurrence = seen.get(signature) ?? 0;
+    seen.set(signature, occurrence + 1);
+    return `${signature}#${occurrence}`;
+  });
+}
+
+// Identity of a whole requirement set, so a caller can tell "the same
+// requirements, re-read" from "the server changed them".
+//
+// Needed because the occurrence counter above is still position-dependent for
+// entries that share a signature AND carry no document yet: if such an entry is
+// dropped (satisfied, or malformed), the survivor is re-keyed `…#0` and would
+// inherit the row state of the one that disappeared — the picked file, the
+// chosen type/owner, even an already-created document id. Row state is therefore
+// dropped whenever this key changes: the only case where a user loses a picked
+// file is one where the mapping became genuinely ambiguous.
+export function requirementSetKey(reqs: Requirement[]): string {
+  const keys = requirementKeys(reqs);
+  return reqs.map((r, i) => `${keys[i]}:${r.state}`).join(";");
 }
 
 // The current SR `status`, when present.

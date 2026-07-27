@@ -52,6 +52,35 @@ export interface ProxyResponse {
   };
 }
 
+// Best-effort human message out of a failed response: the problem+json
+// `detail`/`message`/`title`/`error` when there is one, else the bare status.
+// `hints` adds a per-status explanation ALONGSIDE that text (not instead of it —
+// a problem+json body almost always carries a detail, so a hint placed in the
+// fallback branch would never be seen). Shared by the Parcours forms, which run
+// operations outside the RequestBuilder's response panel.
+export function apiErrorMessage(
+  res: ProxyResponse | null,
+  opts: { missingSpec?: string; hints?: Record<number, string> } = {},
+): string {
+  if (!res)
+    return (
+      opts.missingSpec ??
+      "API introuvable — la spec n'est peut-être pas synchronisée."
+    );
+  const hint = opts.hints?.[res.status];
+  const suffix = hint ? ` (${hint})` : "";
+  const body = res.body;
+  if (body && typeof body === "object" && !Array.isArray(body)) {
+    const r = body as Record<string, unknown>;
+    for (const f of ["detail", "message", "title", "error"]) {
+      const v = r[f];
+      if (typeof v === "string" && v.trim())
+        return `HTTP ${res.status} — ${v.trim()}${suffix}`;
+    }
+  }
+  return `HTTP ${res.status || 0}${res.statusText ? ` — ${res.statusText}` : ""}${suffix}`;
+}
+
 // A multipart/form-data payload. Files carry base64 for a uniform interface
 // with the previous proxy; they're decoded back into Blobs here.
 export interface MultipartPayload {

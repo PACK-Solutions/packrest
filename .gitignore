@@ -3,6 +3,9 @@ node_modules
 out
 .packrest.config.json
 
+# TypeScript incremental build state (rewritten by every `npm run typecheck`)
+tsconfig.tsbuildinfo
+
 # Playwright MCP session artifacts
 .playwright-mcp/
 

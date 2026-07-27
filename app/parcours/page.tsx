@@ -26,6 +26,9 @@ import ParcoursSelect from "@/components/ParcoursSelect";
 import ParcoursDocuments, {
   type ParcoursSrTarget,
 } from "@/components/ParcoursDocuments";
+import ParcoursDecisions, {
+  type ParcoursDecisionScope,
+} from "@/components/ParcoursDecisions";
 import Markdown from "@/components/Markdown";
 import {
   FieldOptionsProvider,
@@ -41,6 +44,17 @@ import {
   SPECS_CHANGED_EVENT,
   type EndpointEntry,
 } from "@/lib/specs";
+import {
+  OWNER_FIELDS,
+  type DocumentOwnerField,
+  type DocumentOwnerIds,
+} from "@/lib/document-owner";
+import {
+  CONTEXT_SR_KEYS,
+  CONTEXT_SR_TYPES,
+  srTypeLabel,
+  type ContextSrKey,
+} from "@/lib/parcours-decisions";
 import type { OpenApiDocument } from "@/lib/types";
 import type { ProxyResponse } from "@/lib/http";
 import type { ImportSeed } from "@/lib/bruno";
@@ -82,39 +96,65 @@ interface LoadedEntry {
   tokenUrl: string;
 }
 
+// The service requests this parcours can open, in display order: the context key
+// holding the id (typed by lib/parcours-decisions, so the union is declared
+// once) and the owner the document form should favour when a document type
+// accepts several. Card labels come from the SR type, shared with the Phase D
+// decision view so an SR is named the same way throughout.
+const PREFERRED_OWNER_BY_SR: Record<ContextSrKey, DocumentOwnerField> = {
+  sr_contract_id: "contract_id",
+  sr_mandate_id: "payment_method_id",
+  sr_beneficiary_id: "contract_id",
+};
+
 // Build the list of service requests the Phase C document form should complete,
-// from the parcours context. Each SR present in the context becomes a card;
-// the document owner is inferred per SR type (contract SR + beneficiary clause
-// are owned by the contract, the SEPA mandate SR by the payment method).
+// from the parcours context. Each SR present in the context becomes a card.
+// Every owner id the context holds travels with it: the document owner is
+// decided by the *document type* (the document API accepts a type only on the
+// owners its sub-enum lists), the SR merely stating its own preference — a
+// subscription SR still requires person-scoped pieces (PROOF_OF_ADDRESS,
+// CERFA_3916, a RIB…) that a contract_id would reject with a 422.
 function buildSrTargets(values: ContextValues): ParcoursSrTarget[] {
-  const contractId = values.contract_id ?? "";
-  const paymentMethodId = values.payment_method_id ?? "";
+  const owners: DocumentOwnerIds = {};
+  for (const f of OWNER_FIELDS) {
+    const id = values[f]?.trim();
+    if (id) owners[f] = id;
+  }
   const targets: ParcoursSrTarget[] = [];
-  if (values.sr_contract_id)
+  for (const key of CONTEXT_SR_KEYS) {
+    const id = values[key]?.trim();
+    if (!id) continue;
     targets.push({
-      key: "sr_contract_id",
-      id: values.sr_contract_id,
-      label: "Souscription du contrat",
-      ownerField: "contract_id",
-      ownerId: contractId,
+      key,
+      id,
+      label: srTypeLabel(CONTEXT_SR_TYPES[key]),
+      preferredOwner: PREFERRED_OWNER_BY_SR[key],
+      owners,
     });
-  if (values.sr_mandate_id)
-    targets.push({
-      key: "sr_mandate_id",
-      id: values.sr_mandate_id,
-      label: "Signature du mandat SEPA",
-      ownerField: "payment_method_id",
-      ownerId: paymentMethodId,
-    });
-  if (values.sr_beneficiary_id)
-    targets.push({
-      key: "sr_beneficiary_id",
-      id: values.sr_beneficiary_id,
-      label: "Changement de clause bénéficiaire",
-      ownerField: "contract_id",
-      ownerId: contractId,
-    });
+  }
   return targets;
+}
+
+// Scope of the Phase D quick-decision view: the SR ids this run captured, plus
+// the resources it created. The view filters `listServiceRequests` on each
+// (target_resource_type, target_resource_id) — and re-checks the rows it gets
+// back — so the reviewer only ever sees the current parcours, while an SR the
+// context lost (a re-run, a hand-edited id) still surfaces.
+function buildDecisionScope(values: ContextValues): ParcoursDecisionScope {
+  const contextSrIds: string[] = [];
+  for (const key of CONTEXT_SR_KEYS) {
+    const id = values[key]?.trim();
+    if (id) contextSrIds.push(id);
+  }
+  const discover: ParcoursDecisionScope["discover"] = [];
+  const addTarget = (resourceType: string, raw: string | undefined) => {
+    const resourceId = raw?.trim();
+    if (resourceId) discover.push({ resourceType, resourceId });
+  };
+  addTarget("CONTRACT", values.contract_id);
+  addTarget("PAYMENT_METHOD", values.payment_method_id);
+  addTarget("INDIVIDUAL", values.person_id);
+  return { contextSrIds, discover };
 }
 
 // The person's display name for the parcours context. The create-individual
@@ -213,6 +253,32 @@ function Parcours() {
   const activeStep: ParcoursStep | null =
     (def && state && def.steps.find((s) => s.id === state.currentStepId)) ||
     null;
+
+  // Contracts a `custom` view calls directly that aren't synced. Checked here,
+  // once, for whichever view the step declares (`requiresApis`) — the views
+  // themselves must not each re-implement the check: the step's own `apiId` is
+  // already gated by the resolution below, which made an in-component check for
+  // it unreachable dead code.
+  const [missingStepApis, setMissingStepApis] = useState<string[]>([]);
+  const stepRequiresApis = activeStep?.requiresApis?.join("|") ?? "";
+  useEffect(() => {
+    const required = stepRequiresApis ? stepRequiresApis.split("|") : [];
+    if (!required.length) {
+      setMissingStepApis([]);
+      return;
+    }
+    let cancelled = false;
+    const check = () =>
+      listApis().then((ids) => {
+        if (!cancelled) setMissingStepApis(required.filter((a) => !ids.includes(a)));
+      });
+    void check();
+    window.addEventListener(SPECS_CHANGED_EVENT, check);
+    return () => {
+      cancelled = true;
+      window.removeEventListener(SPECS_CHANGED_EVENT, check);
+    };
+  }, [stepRequiresApis]);
 
   // Current step id in a ref so setMode (which doesn't depend on activeStep)
   // can name the step whose form is about to be reset by a mode-switch remount.
@@ -380,6 +446,28 @@ function Parcours() {
       const next = {
         ...prev,
         values: mergeContextValues(prev.values, { [key]: value }),
+      };
+      saveParcoursState(next);
+      return next;
+    });
+  }, []);
+
+  // Values a custom view captured (the Phase D decision view writes back the ids
+  // of demands it discovered, so a run whose sr_* ids were cleared can still be
+  // completed in Phase C). Only fills EMPTY keys: a view must never overwrite an
+  // id the user pasted or an earlier step captured.
+  const captureValues = useCallback((incoming: ContextValues) => {
+    setState((prev) => {
+      if (!prev) return prev;
+      const fresh: ContextValues = {};
+      for (const [k, v] of Object.entries(incoming)) {
+        const key = k as ContextKey;
+        if (v && !prev.values[key]?.trim()) fresh[key] = v;
+      }
+      if (!Object.keys(fresh).length) return prev;
+      const next = {
+        ...prev,
+        values: mergeContextValues(prev.values, fresh),
       };
       saveParcoursState(next);
       return next;
@@ -974,16 +1062,43 @@ function Parcours() {
             </FieldOptionsProvider>
           )}
 
-          {!resolving &&
-            activeStep?.custom === "documents" &&
-            stepEntry &&
-            state && (
-              <ParcoursDocuments
-                key={`documents-${activeStep.id}`}
-                serviceRequests={buildSrTargets(state.values)}
-                onComplete={() => completeCustomStep(activeStep.id)}
-              />
-            )}
+          {/* A custom view's own extra contracts (the document API for the
+              uploads): prompt to synchronise rather than let the view fail
+              request by request. */}
+          {!resolving && activeStep?.custom && missingStepApis.length > 0 && (
+            <Card tone="warn">
+              <CardBody className="space-y-2 p-3 text-sm">
+                <p className="text-muted-foreground">
+                  Contrat(s) non synchronisé(s) :{" "}
+                  <span className="font-mono">{missingStepApis.join(", ")}</span>.
+                  Cette étape en a besoin.
+                </p>
+                <Link href="/settings" className="text-primary underline">
+                  Ouvrir les Paramètres pour synchroniser
+                </Link>
+              </CardBody>
+            </Card>
+          )}
+
+          {!resolving && activeStep?.custom && stepEntry && state && (
+            <>
+              {activeStep.custom === "documents" && (
+                <ParcoursDocuments
+                  key={`documents-${activeStep.id}`}
+                  serviceRequests={buildSrTargets(state.values)}
+                  onComplete={() => completeCustomStep(activeStep.id)}
+                />
+              )}
+              {activeStep.custom === "decisions" && (
+                <ParcoursDecisions
+                  key={`decisions-${activeStep.id}`}
+                  scope={buildDecisionScope(state.values)}
+                  onCapture={captureValues}
+                  onComplete={() => completeCustomStep(activeStep.id)}
+                />
+              )}
+            </>
+          )}
 
           {activeStep?.selects &&
             stepResponse &&
