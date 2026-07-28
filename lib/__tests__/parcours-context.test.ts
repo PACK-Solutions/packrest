@@ -6,6 +6,7 @@ import {
   DEFAULT_BENEFICIARY_CLAUSE,
   defaultContextValues,
   defaultDateOfEffect,
+  draftWithoutSeededFields,
   extractProduced,
   initialState,
   mergeContextValues,
@@ -257,5 +258,141 @@ describe("bodyHasContent", () => {
     const unmountSnapshot = { params: { person_id: "p1" }, body: null };
     expect(bodyHasContent(prefilled.body)).toBe(true);
     expect(bodyHasContent(unmountSnapshot.body)).toBe(false);
+  });
+});
+
+describe("draftWithoutSeededFields", () => {
+  const periodic = stepById("create-periodic-premium");
+
+  it("drops a stale pre-fill, so the live context values win on return", () => {
+    // Snapshot taken while contract A was current — and never edited, so what it
+    // holds equals what was seeded. The context now holds B.
+    const draft = {
+      params: { contract_id: "contract-A" },
+      body: { payment_method_id: "pm-A", periodicity: "MONTHLY" },
+      seeded: {
+        params: { contract_id: "contract-A" },
+        body: { payment_method_id: "pm-A" },
+      },
+    };
+    const kept = draftWithoutSeededFields(
+      periodic,
+      { contract_id: "contract-B", payment_method_id: "pm-B" },
+      draft,
+    );
+    // Both pre-filled fields are gone (the seed re-fills them from the context)…
+    expect(kept?.params).toBeUndefined();
+    expect(kept?.body).toEqual({ periodicity: "MONTHLY" });
+    // …and the RequestBuilder would restore nothing that pins contract A.
+    expect(JSON.stringify(kept)).not.toContain("contract-A");
+    expect(JSON.stringify(kept)).not.toContain("pm-A");
+  });
+
+  it("keeps a draft value the context cannot supply", () => {
+    const draft = {
+      params: { contract_id: "contract-A" },
+      body: { payment_method_id: "pm-A" },
+      seeded: {
+        params: { contract_id: "contract-A" },
+        body: { payment_method_id: "pm-A" },
+      },
+    };
+    // Nothing in the context: the draft is all the form has (`seeded` is dropped
+    // from the result — it is bookkeeping, not form content).
+    expect(draftWithoutSeededFields(periodic, {}, draft)).toEqual({
+      params: draft.params,
+      body: draft.body,
+    });
+    // Only the contract is known: the payment method stays from the draft.
+    expect(
+      draftWithoutSeededFields(periodic, { contract_id: "contract-B" }, draft),
+    ).toEqual({ body: { payment_method_id: "pm-A" } });
+  });
+
+  it("drops a pre-seed-recording draft, which is what a stale id needs", () => {
+    // No `seeded` (saved by an older build, same session): an edit cannot be told
+    // from a stale pre-fill, so the context wins — the original defect this guards.
+    expect(
+      draftWithoutSeededFields(
+        periodic,
+        { contract_id: "contract-B" },
+        { params: { contract_id: "contract-A" } },
+      ),
+    ).toEqual({});
+  });
+
+  it("passes through a missing draft and a non-object body", () => {
+    expect(draftWithoutSeededFields(periodic, { contract_id: "c-1" }, undefined))
+      .toBeUndefined();
+    // A raw (non-object) body has no keys to strip.
+    expect(
+      draftWithoutSeededFields(periodic, { contract_id: "c-1" }, {
+        body: "raw",
+      }),
+    ).toEqual({ body: "raw" });
+  });
+
+  it("leaves a step with no seed mapping untouched", () => {
+    const draft = { body: { first_name: "Alice" } };
+    expect(
+      draftWithoutSeededFields(stepById("create-individual"), {}, draft),
+    ).toEqual(draft);
+  });
+
+  it("keeps a value the user typed over, drops the pre-fill left untouched", () => {
+    // The snapshot was seeded with the context defaults; the user then replaced
+    // the clause. On return, the edited clause must survive while the untouched
+    // date and the stale ids are refreshed from the live context.
+    const seededDefault = defaultDateOfEffect();
+    const draft = {
+      body: {
+        product_id: "prod-OLD",
+        subscriber_id: "person-OLD",
+        date_of_effect: seededDefault,
+        beneficiary_clause: "Mon conjoint survivant",
+      },
+      seeded: {
+        body: {
+          product_id: "prod-OLD",
+          subscriber_id: "person-OLD",
+          date_of_effect: seededDefault,
+          beneficiary_clause: DEFAULT_BENEFICIARY_CLAUSE,
+        },
+      },
+    };
+    const kept = draftWithoutSeededFields(
+      stepById("create-contract"),
+      {
+        product_id: "prod-NEW",
+        person_id: "person-NEW",
+        date_of_effect: seededDefault,
+        beneficiary_clause: DEFAULT_BENEFICIARY_CLAUSE,
+      },
+      draft,
+    );
+    expect(kept?.body).toEqual({
+      beneficiary_clause: "Mon conjoint survivant",
+    });
+  });
+
+  it("keeps an id the user deliberately pointed elsewhere", () => {
+    // The premium was pre-filled with the run's payment method; the user replaced
+    // it with a mandate created outside the parcours. Re-entering the step must
+    // not silently restore the original one and post against the wrong mandate.
+    const kept = draftWithoutSeededFields(
+      periodic,
+      { contract_id: "c-1", payment_method_id: "pm-run" },
+      {
+        params: { contract_id: "c-1" },
+        body: { payment_method_id: "pm-typed-by-hand" },
+        seeded: {
+          params: { contract_id: "c-1" },
+          body: { payment_method_id: "pm-run" },
+        },
+      },
+    );
+    expect(kept?.body).toEqual({ payment_method_id: "pm-typed-by-hand" });
+    // The path param was untouched, so it is refreshed from the context.
+    expect(kept?.params).toBeUndefined();
   });
 });

@@ -84,6 +84,13 @@ function siret(): string {
   return base + luhnCheckDigit(base); // 14, Luhn-valid
 }
 
+// A foreign tax identification number (TIN), as the FATCA/CRS fiscal records
+// expect under `tax_identification_number.number`. No checksum exists to honour
+// (each jurisdiction has its own format), so 9 plausible digits are enough.
+export function tinNumber(): string {
+  return digits(9);
+}
+
 export interface FieldGenerator {
   key: string;
   label: string;

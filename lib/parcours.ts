@@ -31,6 +31,9 @@ export type ContextKey =
   | "person_id"
   | "person_name"
   | "payment_method_id"
+  // The bank account backing the SEPA payment method: the IBAN/BIC live there,
+  // and the payment method only references it (payment-method API).
+  | "bank_account_id"
   | "rum"
   | "contract_id"
   | "contract_number"
@@ -63,6 +66,7 @@ export const CONTEXT_FIELDS: ContextField[] = [
   { key: "person_id", label: "person_id" },
   { key: "person_name", label: "person_name (souscripteur)" },
   { key: "payment_method_id", label: "payment_method_id" },
+  { key: "bank_account_id", label: "bank_account_id" },
   { key: "rum", label: "rum" },
   { key: "contract_id", label: "contract_id" },
   { key: "contract_number", label: "contract_number" },
@@ -127,6 +131,38 @@ const CONTRACT_SUBMISSION_PRODUCES: Array<{
   },
 ];
 
+// The chosen product's catalogue, as dropdown options for the allocation leaves
+// of a premium body. Shared by both premium steps (versement initial and
+// versement périodique) so a fund is picked the same way in either — and so the
+// automatic mode can prefetch a fund for both (see `stepNeedsFund` in
+// lib/parcours-auto.ts, which recognises a step by this `fund_id` source).
+const PREMIUM_FIELD_OPTIONS: FieldOptionSource[] = [
+  {
+    field: "fund_id",
+    apiId: "product",
+    operationId: "listProductFunds",
+    params: [{ name: "product_id", from: "product_id" }],
+    select: {
+      collections: ["funds", "fund", "product_funds"],
+      idFields: ["id", "fund_id", "isin"],
+      labelFields: ["name", "label", "fund_name", "isin"],
+      detailFields: ["isin", "category", "asset_class", "management_type"],
+    },
+  },
+  {
+    field: "preset_allocation_id",
+    apiId: "product",
+    operationId: "listProductPresetAllocations",
+    params: [{ name: "product_id", from: "product_id" }],
+    select: {
+      collections: ["preset_allocations", "presetAllocations", "preset-allocations"],
+      idFields: ["id", "preset_allocation_id"],
+      labelFields: ["name", "label", "title"],
+      detailFields: ["description", "risk_profile", "management_type"],
+    },
+  },
+];
+
 // One entry of `produces`: how to read a captured value out of the 2xx
 // response body.
 export type ProducerSpec =
@@ -175,13 +211,13 @@ export interface ParcoursStep {
   operationId: string;
   title: string;
   description?: string;
-  /** Skippable (e.g. versement périodique). */
+  /** Skippable (e.g. versement périodique) — « Passer » in the step card, and in
+   *  the automatic mode a step the user must tick to have it executed
+   *  (`ParcoursState.autoOptional`). */
   optional?: boolean;
-  /** Optional steps are skipped by the automatic mode unless they declare this:
-   *  « Mettre à jour le contrat » must run, because it is what puts the
-   *  submission-required fields on the DRAFT. Declared here rather than inferred
-   *  from "the request happens to carry a body", so adding a body seed to
-   *  another optional step never silently enrols it in every auto run. */
+  /** An optional step the automatic mode runs UNCONDITIONALLY, without waiting
+   *  for the user to tick it: « Mettre à jour le contrat » must run, because it
+   *  is what puts the submission-required fields on the DRAFT. */
   autoRun?: boolean;
   /** Extra API ids a `custom` view calls directly (the document form uploads
    *  through the document API). The page checks these are synced before
@@ -308,8 +344,15 @@ const STEPS: ParcoursStep[] = [
     operationId: "createBankAccount",
     title: "Compte bancaire",
     description:
-      "Renseignez le compte bancaire : account_holder_name, iban, currency, date_of_validity_start.",
+      "Renseignez le compte bancaire : account_holder_name, iban, bic, currency, date_of_validity_start. C'est ce compte que le moyen de paiement SEPA référencera (son id est capté dans le contexte).",
     seedFrom: [{ target: "param", name: "person_id", from: "person_id" }],
+    // The payment method references this account by id, so capture it.
+    produces: [
+      {
+        key: "bank_account_id",
+        from: { kind: "bodyField", fields: ["id", "bank_account_id"] },
+      },
+    ],
   },
   {
     id: "person-submit",
@@ -330,8 +373,11 @@ const STEPS: ParcoursStep[] = [
     operationId: "createPaymentMethod",
     title: "Créer le moyen de paiement (SEPA_DEBIT)",
     description:
-      "Renseignez type=SEPA_DEBIT, iban, bic, mandate_type et date_of_validity_start (ne renseignez pas rum). La création ouvre automatiquement une demande de signature de mandat SEPA (service request SEPA_MANDATE_SIGNATURE).",
-    seedFrom: [{ target: "param", name: "person_id", from: "person_id" }],
+      "Renseignez type=SEPA_DEBIT, bank_account_id, mandate_type et date_of_validity_start (ne renseignez ni rum — généré par le serveur — ni IBAN/BIC : ils appartiennent au compte bancaire, que le moyen de paiement référence par son id). Le bank_account_id est prérempli depuis l'étape « Compte bancaire ». La création ouvre automatiquement une demande de signature de mandat SEPA (service request SEPA_MANDATE_SIGNATURE).",
+    seedFrom: [
+      { target: "param", name: "person_id", from: "person_id" },
+      { target: "body", name: "bank_account_id", from: "bank_account_id" },
+    ],
     produces: [
       { key: "payment_method_id", from: { kind: "bodyField", fields: ["payment_method_id", "id"] } },
       { key: "rum", from: { kind: "bodyField", fields: ["rum"] } },
@@ -426,32 +472,7 @@ const STEPS: ParcoursStep[] = [
     ],
     // Populate the fund_id / preset_allocation_id inputs of the allocations
     // arrays with the chosen product's catalogue (fetched on step entry).
-    fieldOptions: [
-      {
-        field: "fund_id",
-        apiId: "product",
-        operationId: "listProductFunds",
-        params: [{ name: "product_id", from: "product_id" }],
-        select: {
-          collections: ["funds", "fund", "product_funds"],
-          idFields: ["id", "fund_id", "isin"],
-          labelFields: ["name", "label", "fund_name", "isin"],
-          detailFields: ["isin", "category", "asset_class", "management_type"],
-        },
-      },
-      {
-        field: "preset_allocation_id",
-        apiId: "product",
-        operationId: "listProductPresetAllocations",
-        params: [{ name: "product_id", from: "product_id" }],
-        select: {
-          collections: ["preset_allocations", "presetAllocations", "preset-allocations"],
-          idFields: ["id", "preset_allocation_id"],
-          labelFields: ["name", "label", "title"],
-          detailFields: ["description", "risk_profile", "management_type"],
-        },
-      },
-    ],
+    fieldOptions: PREMIUM_FIELD_OPTIONS,
     produces: [{ key: "premium_id", from: { kind: "bodyField", fields: ["id", "premium_id"] } }],
   },
   {
@@ -477,7 +498,13 @@ const STEPS: ParcoursStep[] = [
     description:
       "Renseignez dates, periodic_amount et periodicity. Modifiable tant que le contrat n'est pas soumis, via « Modifier le versement périodique ».",
     optional: true,
-    seedFrom: [{ target: "param", name: "contract_id", from: "contract_id" }],
+    seedFrom: [
+      { target: "param", name: "contract_id", from: "contract_id" },
+      // Recurring collection needs the payment method, like the initial premium.
+      { target: "body", name: "payment_method_id", from: "payment_method_id" },
+    ],
+    // Same catalogue pickers as the versement initial (see PREMIUM_FIELD_OPTIONS).
+    fieldOptions: PREMIUM_FIELD_OPTIONS,
     produces: [{ key: "periodic_premium_id", from: { kind: "bodyField", fields: ["id", "periodic_premium_id"] } }],
   },
   {
@@ -621,6 +648,61 @@ export function buildSeedForStep(
     operationId: step.operationId,
     ...(hasParam ? { params } : {}),
     ...(hasBody ? { body } : {}),
+  };
+}
+
+// A step's restored draft, minus the pre-filled values that have gone STALE.
+//
+// A draft is a snapshot of the form as the user left the step, so a context-fed
+// field in it can be an id captured under a previous contract/person (« Créer le
+// contrat » re-run, a re-picked product, a second automatic run). The
+// RequestBuilder restores that snapshot at mount and then refuses to overwrite
+// any non-empty value it didn't seed itself, which would pin the stale id for
+// good — so those fields are dropped here and the live seed re-supplies them.
+//
+// A field is only dropped when the draft still holds exactly what was seeded
+// into it (`draft.seeded`, recorded on every save): an untouched pre-fill, safe
+// to refresh. A value the user typed over differs from the seeded one and is
+// kept — including a `beneficiary_clause` or `date_of_effect` edited away from
+// its default, and an id deliberately pointed at another resource.
+//
+// A draft saved before seeds were recorded (`seeded` absent — only possible
+// within a session started on an older build) falls back to dropping, which is
+// what the stale-id case needs.
+export function draftWithoutSeededFields(
+  step: ParcoursStep,
+  values: ContextValues,
+  draft: StepDraft | undefined,
+): StepDraft | undefined {
+  if (!draft) return undefined;
+  const current = seedSnapshot(step, values);
+  const { seeded, ...rest } = draft;
+  // Drop `name` when the context can re-supply it and the draft's value is still
+  // the one seeded there (or predates seed recording).
+  const isStale = (
+    target: "params" | "body",
+    name: string,
+    value: unknown,
+  ): boolean => {
+    const now = current?.[target]?.[name];
+    if (now === undefined) return false; // nothing to put in its place
+    const was = seeded?.[target]?.[name];
+    return was === undefined || was === value;
+  };
+  const params: Record<string, string> = {};
+  for (const [k, v] of Object.entries(rest.params ?? {}))
+    if (!isStale("params", k, v)) params[k] = v;
+  let body = rest.body;
+  const draftBody = asRecord(body);
+  if (draftBody) {
+    const kept: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(draftBody))
+      if (!isStale("body", k, v)) kept[k] = v;
+    body = kept;
+  }
+  return {
+    ...(Object.keys(params).length ? { params } : {}),
+    ...(body !== undefined ? { body } : {}),
   };
 }
 
@@ -798,6 +880,41 @@ export const PARCOURS_STATE_KEY = "packrest.parcours";
 export interface StepDraft {
   params?: Record<string, string>;
   body?: unknown;
+  /** The context-fed values the form had been SEEDED with when this snapshot was
+   *  taken (see `seedSnapshot`). Comparing a restored field against it tells a
+   *  value the user typed over the pre-fill (keep it) from an untouched pre-fill
+   *  that has since gone stale (let the live context re-supply it) — see
+   *  `draftWithoutSeededFields`. */
+  seeded?: SeedSnapshot;
+}
+
+/** Seeded values per target, keyed by field name (both are strings: a context
+ *  value or a `const` mapping). */
+export interface SeedSnapshot {
+  params?: Record<string, string>;
+  body?: Record<string, string>;
+}
+
+// The seed a step would receive right now, flattened for storage next to a
+// draft. Recorded on every draft save so the next restore can tell an edit from
+// a stale pre-fill.
+export function seedSnapshot(
+  step: ParcoursStep,
+  values: ContextValues,
+): SeedSnapshot | undefined {
+  const params: Record<string, string> = {};
+  const body: Record<string, string> = {};
+  for (const m of step.seedFrom ?? []) {
+    const value = "const" in m ? m.const : values[m.from];
+    if (value == null || value === "") continue;
+    if (m.target === "param") params[m.name] = value;
+    else body[m.name] = value;
+  }
+  if (!Object.keys(params).length && !Object.keys(body).length) return undefined;
+  return {
+    ...(Object.keys(params).length ? { params } : {}),
+    ...(Object.keys(body).length ? { body } : {}),
+  };
 }
 
 // True when a body value carries content — a non-empty object/array or any
@@ -833,6 +950,11 @@ export interface ParcoursState {
    *  never re-fills over the user's edits (or a deliberate clear). Reset when a
    *  fresh autoSeed is generated. */
   semiPrefilled?: string[];
+  /** Ids of the `optional` steps the automatic mode must EXECUTE. Every other
+   *  optional step is marked done without a call, exactly like « Passer » — so
+   *  an absent/empty list keeps the historical behaviour (nothing optional
+   *  runs). Steps declaring `autoRun` always run and are not listed here. */
+  autoOptional?: string[];
 }
 
 // The context values a run starts with: the two fields the submit endpoint
@@ -878,6 +1000,15 @@ export function loadParcoursState(def: ParcoursDef): ParcoursState {
         return {
           ...parsed,
           values: { ...defaultContextValues(), ...parsed.values },
+          // Drop ids of steps that no longer exist or are no longer optional, so
+          // a renamed step doesn't linger as a phantom selection for the session.
+          ...(parsed.autoOptional
+            ? {
+                autoOptional: parsed.autoOptional.filter((id) =>
+                  def.steps.some((s) => s.id === id && s.optional),
+                ),
+              }
+            : {}),
         };
     }
   } catch {
@@ -917,7 +1048,7 @@ const CONTRACT_SCOPED_KEYS: ContextKey[] = [
 // Same idea for values scoped to a specific person: when person_id changes,
 // the captured name belongs to the previous person and must not leak into
 // later requests (e.g. the auto-run's account_holder_name).
-const PERSON_SCOPED_KEYS: ContextKey[] = ["person_name"];
+const PERSON_SCOPED_KEYS: ContextKey[] = ["person_name", "bank_account_id"];
 
 // Merge captured/edited values into the context. When `incoming` sets a
 // contract_id (resp. person_id) different from the current one, ids scoped to

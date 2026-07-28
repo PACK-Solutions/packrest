@@ -3,8 +3,10 @@
 import { Hand, ListChecks, Loader2, Square, Wand2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Label } from "@/components/ui/label";
 import { Card, CardBody } from "@/components/Card";
-import type { ParcoursMode } from "@/lib/parcours";
+import type { ParcoursMode, ParcoursStep } from "@/lib/parcours";
 
 // Status of the fully-automatic run, owned by app/parcours/page.tsx.
 export type AutoPhase =
@@ -40,9 +42,16 @@ const MODES: {
   },
 ];
 
+// Steps whose title already says « (optionnel) » would read « ... (optionnel) »
+// twice next to a checkbox that says as much — drop the suffix.
+function shortTitle(step: ParcoursStep): string {
+  return step.title.replace(/\s*\(optionnel\)\s*$/i, "");
+}
+
 // Mode selector for the parcours + the launch/stop/resume controls of the fully
-// automatic run. Purely presentational: the mode value and the runner lifecycle
-// (aborts, state advancement) live in the page (see lib/parcours-auto.ts).
+// automatic run, and (in auto mode) the checklist of optional steps the run must
+// execute. Purely presentational: the mode value, the selection and the runner
+// lifecycle (aborts, state advancement) live in the page (see lib/parcours-auto.ts).
 export default function ParcoursModePanel({
   mode,
   onModeChange,
@@ -51,6 +60,9 @@ export default function ParcoursModePanel({
   autoStepTitle,
   onAutoStart,
   onAutoStop,
+  optionalSteps,
+  selectedOptional,
+  onToggleOptional,
 }: {
   mode: ParcoursMode;
   onModeChange: (mode: ParcoursMode) => void;
@@ -61,6 +73,14 @@ export default function ParcoursModePanel({
   autoStepTitle?: string;
   onAutoStart: () => void;
   onAutoStop: () => void;
+  /** The optional steps the auto run can be told to execute (page-computed via
+   *  `optionalAutoSteps`). */
+  optionalSteps: ParcoursStep[];
+  /** Ids among them the run must execute; the others are skipped. A tick stays
+   *  actionable even once the step is "done": the runner cannot tell a step that
+   *  ran from one skipped for being unticked, so it retries a ticked one. */
+  selectedOptional: string[];
+  onToggleOptional: (stepId: string, run: boolean) => void;
 }) {
   const active = MODES.find((m) => m.value === mode) ?? MODES[0];
   return (
@@ -142,9 +162,44 @@ export default function ParcoursModePanel({
                 ? "Sélectionnez un produit ci-contre, puis reprenez."
                 : autoPhase === "error"
                   ? "L'exécution s'est arrêtée sur une erreur — corrigez l'étape ou reprenez avec de nouvelles données."
-                  : "Exécute les étapes restantes avec des données aléatoires ; s'arrête au choix du produit et aux pièces justificatives."}
+                  : "Exécute les étapes restantes avec des données aléatoires — dont les étapes facultatives cochées ci-dessous ; s'arrête au choix du produit et aux pièces justificatives."}
             </p>
           </>
+        )}
+
+        {/* Which optional steps the run must execute. Rendered in every auto
+            phase (so the choice is visible while a run is in flight) but locked
+            while the runner drives the steps. */}
+        {mode === "auto" && optionalSteps.length > 0 && (
+          <div className="border-border/60 space-y-1.5 rounded-md border p-2">
+            <p className="text-muted-foreground text-[11px] font-medium">
+              Étapes facultatives à exécuter
+            </p>
+            {optionalSteps.map((step) => {
+              const inputId = `auto-optional-${step.id}`;
+              return (
+                <div key={step.id} className="flex items-start gap-2">
+                  <Checkbox
+                    id={inputId}
+                    className="mt-px"
+                    checked={selectedOptional.includes(step.id)}
+                    disabled={disabled}
+                    onCheckedChange={(c) => onToggleOptional(step.id, c === true)}
+                  />
+                  <Label
+                    htmlFor={inputId}
+                    className="text-muted-foreground text-[11px] leading-snug font-normal"
+                  >
+                    {shortTitle(step)}
+                  </Label>
+                </div>
+              );
+            })}
+            <p className="text-muted-foreground text-[11px] leading-snug">
+              Décochée, une étape facultative est marquée comme faite sans appel
+              d&apos;API — comme « Passer ». Cochez-la puis relancez pour l&apos;exécuter.
+            </p>
+          </div>
         )}
       </CardBody>
     </Card>

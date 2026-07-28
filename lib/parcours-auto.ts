@@ -1,5 +1,6 @@
 // Mode semi-automatique du parcours — runs the mandatory steps of the
-// souscription parcours with random-but-plausible data, from the current
+// souscription parcours with random-but-plausible data (plus the optional steps
+// the user ticked in the mode panel — see `optionalAutoSteps`), from the current
 // frontier up to the Phase C documents step (which stays manual, as does
 // Phase D). Driven by app/parcours/page.tsx; executes through callOperation
 // (lib/operation-fetch.ts) — never through the RequestBuilder UI.
@@ -36,6 +37,7 @@ import {
   frLastName,
   frStreetLine,
   randomAmountCents,
+  tinNumber,
   toLocalIsoDate,
 } from "@/lib/fake-fields";
 
@@ -60,7 +62,14 @@ export function randomIdentity(): AutoIdentity {
 }
 
 export function todayIso(): string {
-  return toLocalIsoDate(new Date());
+  return isoInDays(0);
+}
+
+/** A date `days` from today, in the `date` format the APIs expect. */
+export function isoInDays(days: number): string {
+  const d = new Date();
+  d.setDate(d.getDate() + days);
+  return toLocalIsoDate(d);
 }
 
 // --- per-run context ---------------------------------------------------------
@@ -82,7 +91,12 @@ export interface AutoSeed {
 // The runner's private mutable bag: an AutoSeed plus a LOCAL authoritative copy
 // of the parcours context (React state updates are async; the runner must
 // consume ids produced by the previous step immediately).
-export type AutoRunCtx = AutoSeed & { values: ContextValues };
+// Plus the fund picked for this run's premiums (prefetched once, on the first
+// step that needs one — see `stepNeedsFund`).
+export type AutoRunCtx = AutoSeed & {
+  values: ContextValues;
+  fundId?: string;
+};
 
 // Read a string field out of a persisted step draft's body.
 function draftBodyField(
@@ -99,20 +113,34 @@ function draftBodyField(
   return typeof v === "string" && v ? v : null;
 }
 
-// Generate a fresh AutoSeed. The IBAN/BIC are reused from a previous run's
-// persisted drafts when present, so resuming between person-bank-account and
-// create-payment-method keeps the SEPA mandate on the same account the
-// bank-account step registered.
+// Generate a fresh AutoSeed. The IBAN/BIC and the address are reused from the
+// « Compte bancaire » draft of a previous run when present, so a resumed run
+// keeps writing the same person: the bank details stay the ones already
+// registered (the payment method only references that account by id), and an
+// address step that runs after the resume — the optional CORRESPONDENCE /
+// FISCAL ones, or one that failed — repeats the street the PRINCIPAL address
+// carries instead of inventing another.
 export function newAutoSeed(drafts?: ParcoursState["drafts"]): AutoSeed {
-  const { city, postalCode } = frCityPostal();
+  const fresh = frCityPostal();
+  const drafted = {
+    line1: draftBodyField(drafts, "person-address", "line1"),
+    postalCode: draftBodyField(drafts, "person-address", "postal_code"),
+    city: draftBodyField(drafts, "person-address", "city"),
+  };
   return {
     identity: randomIdentity(),
-    iban:
-      draftBodyField(drafts, "person-bank-account", "iban") ??
-      draftBodyField(drafts, "create-payment-method", "iban") ??
-      frIban(),
-    bic: draftBodyField(drafts, "create-payment-method", "bic") ?? bic(),
-    address: { line1: frStreetLine(), postalCode, city },
+    iban: draftBodyField(drafts, "person-bank-account", "iban") ?? frIban(),
+    bic: draftBodyField(drafts, "person-bank-account", "bic") ?? bic(),
+    // All three or none: a postal code from one town with another's name would
+    // be less plausible than a freshly generated pair.
+    address:
+      drafted.line1 && drafted.postalCode && drafted.city
+        ? {
+            line1: drafted.line1,
+            postalCode: drafted.postalCode,
+            city: drafted.city,
+          }
+        : { line1: frStreetLine(), postalCode: fresh.postalCode, city: fresh.city },
   };
 }
 
@@ -136,14 +164,50 @@ interface AutoStepPlan {
   /** Creating step whose output already exists in the context: mark done
    *  without executing (avoids duplicates on a mid-parcours relaunch). */
   skipIfPresent?: ContextKey;
+  /** Path params the step's `seedFrom` cannot supply, merged OVER the seed ones
+   *  — the CRS record is keyed by a `country_code` no earlier step captures. */
+  params?: (ctx: AutoRunCtx) => Record<string, string>;
   /** Random fields for the step's JSON body; merged OVER the seed body
    *  (buildSeedForStep supplies product_id / subscriber_id / payment_method_id). */
   body?: (ctx: AutoRunCtx, extras: AutoExtras) => Record<string, unknown>;
 }
 
 export interface AutoExtras {
-  /** Randomly-picked fund for create-premium (prefetched from the product). */
+  /** Randomly-picked fund for the premium steps (prefetched from the product). */
   fundId?: string;
+}
+
+/** The country of fiscal residency the automatic CRS declaration is filed for
+ *  (a plausible non-French residency — the point of a CRS record). */
+export const AUTO_CRS_COUNTRY = "BE";
+
+// The run's single address, shared by the principal / correspondence / fiscal
+// address steps (all three POST the same schema).
+function addressBody(ctx: AutoRunCtx): Record<string, unknown> {
+  return {
+    line1: ctx.address.line1,
+    postal_code: ctx.address.postalCode,
+    city: ctx.address.city,
+    country_code: "FR",
+  };
+}
+
+// A FATCA/CRS `tax_identification_number`, NUMBER variant of the oneOf.
+function tin(prefix = ""): Record<string, unknown> {
+  return { tin_type: "NUMBER", number: `${prefix}${tinNumber()}` };
+}
+
+// One fund carrying the whole premium: rate scale is fixed at 5, so 10000000 =
+// 100.00000%. Shared by the initial and the periodic premium.
+function fullAllocation(fundId?: string): Record<string, unknown> {
+  return {
+    funds: [{ fund_id: fundId, allocation_rate: { value: 10000000, scale: 5 } }],
+  };
+}
+
+// A monthly-instalment amount, in cents like every other amount.
+function periodicAmount(): Record<string, unknown> {
+  return { value: randomAmountCents(50, 500), scale: 2, currency: "EUR" };
 }
 
 // Bodies mirror the synced OpenAPI contracts (see the step descriptions in
@@ -159,31 +223,56 @@ export const AUTO_PLAN: Record<string, AutoStepPlan> = {
       birth: { date_of_birth: ctx.identity.birthDate },
     }),
   },
-  "person-address": {
-    body: (ctx) => ({
-      line1: ctx.address.line1,
-      postal_code: ctx.address.postalCode,
-      city: ctx.address.city,
-      country_code: "FR",
-    }),
-  },
+  "person-address": { body: addressBody },
+  // Optional address variants: same address as the principal one — the parcours
+  // exists to exercise the endpoints, and a coherent person beats three
+  // unrelated streets. `address_type` comes from each step's `seedFrom` const.
+  "person-address-correspondence": { body: addressBody },
+  "person-address-fiscal": { body: addressBody },
   "person-fiscal": {
     body: () => ({ fiscal_type: "FRENCH_RESIDENCY" }),
+  },
+  // Optional fiscal declarations, filed only when the auto run opts into them:
+  // a US tax link (FATCA) and a non-French residency (CRS, one record per
+  // country — the auto run files the single AUTO_CRS_COUNTRY one).
+  "person-fatca": {
+    body: () => ({
+      fiscal_type: "FATCA",
+      tax_identification_number: tin(),
+      is_pre_existing_contract: false,
+      us_indicia: ["US_CITIZENSHIP_OR_GREEN_CARD"],
+    }),
+  },
+  "person-crs": {
+    // The record is keyed by a country_code path param no step captures.
+    params: () => ({ country_code: AUTO_CRS_COUNTRY }),
+    body: () => ({
+      fiscal_type: "CRS",
+      tax_identification_number: tin("CRS-"),
+      is_self_certification_present: true,
+      date_of_self_certification: todayIso(),
+    }),
   },
   "person-bank-account": {
     body: (ctx) => ({
       account_holder_name: holderName(ctx),
       iban: ctx.iban,
+      // The IBAN/BIC live here, on the account: the SEPA payment method carries
+      // neither and only references this account by id. The person API requires
+      // the BIC on creation (the synced contract lists it as a plain property —
+      // the requirement is enforced server-side).
+      bic: ctx.bic,
       currency: "EUR",
       date_of_validity_start: todayIso(),
     }),
   },
   "create-payment-method": {
     skipIfPresent: "payment_method_id",
-    body: (ctx) => ({
+    // No iban/bic: PaymentMethodCreate doesn't define them — the bank details
+    // belong to the bank account, which this references through the
+    // `bank_account_id` its `seedFrom` takes from the context (required).
+    body: () => ({
       type: "SEPA_DEBIT",
-      iban: ctx.iban,
-      bic: ctx.bic,
       mandate_type: "RECURRENT",
       date_of_validity_start: todayIso(),
     }),
@@ -197,12 +286,11 @@ export const AUTO_PLAN: Record<string, AutoStepPlan> = {
     // No body: product_id / subscriber_id and the submission-required
     // date_of_effect + beneficiary_clause all come from the step's `seedFrom`.
   },
-  // A freshly created DRAFT contract doesn't reliably carry date_of_effect /
-  // beneficiary_clause (creation drops them), so submission fails 422
-  // (« Date of effect / Beneficiary clause is required »). This normally-
-  // optional step sets them explicitly on the DRAFT — a direct 200 update per
-  // the contract API — before the contract is submitted; its body seed is what
-  // makes the runner execute it instead of skipping it like other optional steps.
+  // (« Mettre à jour le contrat » needs no entry here: its whole body comes from
+  // `seedFrom`. A freshly created DRAFT contract doesn't reliably carry
+  // date_of_effect / beneficiary_clause — creation drops them — so submission
+  // fails 422; that normally-optional step sets them explicitly on the DRAFT,
+  // hence its `autoRun`, which makes the runner execute it unconditionally.)
   "create-premium": {
     skipIfPresent: "premium_id",
     body: (_ctx, extras) => ({
@@ -213,16 +301,39 @@ export const AUTO_PLAN: Record<string, AutoStepPlan> = {
         scale: 2,
         currency: "EUR",
       },
-      allocations: {
-        funds: [
-          {
-            fund_id: extras.fundId,
-            // Rate schema: fixed scale 5; 10000000 = 100.00000%.
-            allocation_rate: { value: 10000000, scale: 5 },
-          },
-        ],
-      },
+      allocations: fullAllocation(extras.fundId),
     }),
+  },
+  // The two edit steps of Phase B: partial updates the API accepts only while
+  // the contract is still DRAFT. Both sit before « Soumettre le contrat », so an
+  // auto run that opts into them edits before submitting (a 409 afterwards).
+  "update-premium": {
+    // A new amount only: the allocations (which must keep summing to 100%) stay
+    // exactly as created.
+    body: () => ({
+      amount: { value: randomAmountCents(1000, 10000), scale: 2, currency: "EUR" },
+    }),
+  },
+  "create-periodic-premium": {
+    skipIfPresent: "periodic_premium_id",
+    body: (_ctx, extras) => ({
+      type_of_fund_source: "OWN_FUNDS",
+      // `date_of_start` is deliberately absent: the contract API then defaults it,
+      // at acceptance, to max(date_of_effect, date_of_acceptance) + 30 days — i.e.
+      // just outside the renunciation window. Any date computed here would instead
+      // be validated against that window whenever the back-office decision lands,
+      // so a decision taken later than the margin we guessed would fail the
+      // acceptance and leave the parcours unfinishable.
+      dates: { date_of_end: isoInDays(365 * 5) },
+      periodic_amount: periodicAmount(),
+      periodicity: "MONTHLY",
+      allocations: fullAllocation(extras.fundId),
+    }),
+  },
+  "update-periodic-premium": {
+    // Amount + periodicity only: re-sending `dates` would re-run the
+    // renunciation-window validation for no benefit.
+    body: () => ({ periodic_amount: periodicAmount(), periodicity: "QUARTERLY" }),
   },
 };
 
@@ -230,6 +341,40 @@ export const AUTO_PLAN: Record<string, AutoStepPlan> = {
 export const AUTO_STOP_STEP_ID = "complete-service-requests";
 
 const CREATE_INDIVIDUAL_MAX_ATTEMPTS = 3;
+
+/** The optional steps the automatic mode can be asked to execute: the `optional`
+ *  steps it could reach — so before the documents step it never crosses — minus
+ *  those that always run anyway (`autoRun`). Drives the checkbox list of the mode
+ *  panel and the runner's opt-in set. */
+export function optionalAutoSteps(def: ParcoursDef): ParcoursStep[] {
+  const stop = def.steps.findIndex((s) => s.id === AUTO_STOP_STEP_ID);
+  return def.steps
+    .slice(0, stop >= 0 ? stop : undefined)
+    .filter((s) => s.optional && !s.autoRun);
+}
+
+/** True when a step's body needs a fund from the product's catalogue, i.e. it
+ *  declares a `fund_id` option source (both premium steps). The runner prefetches
+ *  one; the semi-automatic pre-fill waits for the same list. */
+export function stepNeedsFund(step: ParcoursStep): boolean {
+  return !!step.fieldOptions?.some((f) => f.field === "fund_id");
+}
+
+/** Context keys a step needs as PATH params but that the context doesn't hold —
+ *  e.g. « Modifier le versement périodique » without a periodic_premium_id,
+ *  because its creation step wasn't part of the run. Sending the request anyway
+ *  would put an empty segment in the URL, so the runner skips such a step. */
+export function missingSeedParams(
+  step: ParcoursStep,
+  values: ContextValues,
+): ContextKey[] {
+  const missing: ContextKey[] = [];
+  for (const m of step.seedFrom ?? []) {
+    if (m.target !== "param" || !("from" in m)) continue;
+    if (!values[m.from]?.trim()) missing.push(m.from);
+  }
+  return missing;
+}
 
 // --- request building ----------------------------------------------------------
 
@@ -239,10 +384,11 @@ export function buildAutoRequest(
   ctx: AutoRunCtx,
   extras: AutoExtras = {},
 ): { pathParams: Record<string, string>; body: Record<string, unknown> | null } {
+  const plan = AUTO_PLAN[step.id];
   const seed = buildSeedForStep(step, ctx.values);
-  const pathParams = seed?.params ?? {};
+  const pathParams = { ...(seed?.params ?? {}), ...(plan?.params?.(ctx) ?? {}) };
   const seedBody = (seed?.body ?? {}) as Record<string, unknown>;
-  const planBody = AUTO_PLAN[step.id]?.body?.(ctx, extras);
+  const planBody = plan?.body?.(ctx, extras);
   const merged = { ...seedBody, ...(planBody ?? {}) };
   return {
     pathParams,
@@ -370,6 +516,7 @@ export async function runParcoursAuto(
   def: ParcoursDef,
   snapshot: Pick<ParcoursState, "values" | "done"> & {
     drafts?: ParcoursState["drafts"];
+    autoOptional?: ParcoursState["autoOptional"];
   },
   signal: AbortSignal,
   cb: AutoRunCallbacks,
@@ -377,6 +524,9 @@ export async function runParcoursAuto(
 ): Promise<AutoRunResult> {
   const ctx = newRunCtx(snapshot.values, snapshot.drafts);
   const done = new Set(snapshot.done);
+  // Optional steps the user ticked in the mode panel; everything else optional
+  // is marked done without a call.
+  const optIn = new Set(snapshot.autoOptional ?? []);
 
   const markDone = (step: ParcoursStep, produced: ContextValues, draft?: StepDraft) => {
     ctx.values = mergeContextValues(ctx.values, produced);
@@ -385,18 +535,30 @@ export async function runParcoursAuto(
   };
 
   let current: ParcoursStep | null = null;
+  // First failure of a step the user only ticked: reported after the run has done
+  // everything else, so an optional step can never cost the parcours its ending.
+  let optionalFailure: AutoRunResult | null = null;
   try {
     for (const step of def.steps) {
       current = step;
       // The hard stop comes before the done-skip: even when the documents step
       // has been completed by hand, the auto mode never crosses into Phase C/D.
-      if (step.id === AUTO_STOP_STEP_ID) return { kind: "reached-documents" };
+      if (step.id === AUTO_STOP_STEP_ID)
+        return optionalFailure ?? { kind: "reached-documents" };
 
       const plan = AUTO_PLAN[step.id];
 
+      // "Optional, and only run when the user asks for it" — the one predicate
+      // every optional-step rule below shares.
+      const optionalByChoice = !!step.optional && !step.autoRun;
+
       // A done step is skipped — unless its captured output has since been
       // cleared from the context (hand-edited): then it must run again (e.g.
-      // list-products re-pauses at the picker to re-choose the product).
+      // list-products re-pauses at the picker to re-choose the product). Ticking
+      // an optional step in the panel un-completes it (see the page's
+      // `toggleAutoOptional`), which is what makes a relaunch reach it — the
+      // runner never replays a done step on its own, so a run that pauses at the
+      // picker cannot POST the same optional step twice.
       const outputMissing =
         !!plan?.skipIfPresent && !ctx.values[plan.skipIfPresent];
       if (done.has(step.id) && !outputMissing) continue;
@@ -410,13 +572,23 @@ export async function runParcoursAuto(
       }
 
       // Optional steps are skipped like the page's « Passer » button — unless the
-      // step declares `autoRun` (update-contract, which completes the DRAFT with
-      // the fields the submit endpoint requires). Declared on the step, so a body
-      // seed added to another optional step never enrols it by accident.
-      if (step.optional && !step.autoRun) {
+      // user ticked them in the mode panel (`autoOptional`), or the step declares
+      // `autoRun` (update-contract, which completes the DRAFT with the fields the
+      // submit endpoint requires). Both are explicit: a body added to AUTO_PLAN
+      // never enrols an optional step in every run by accident.
+      if (optionalByChoice && !optIn.has(step.id)) {
         markDone(step, {});
         continue;
       }
+
+      // A ticked step whose prerequisite was never created (« Modifier le versement
+      // périodique » without its creation step) has no id for its path: requesting
+      // an empty segment would be worse than not trying. Left NOT done, so the
+      // stepper still shows it pending — the user asked for it, and reporting it as
+      // complete when nothing was sent would be a lie. `autoRun` is excluded: «
+      // Mettre à jour le contrat » must always run, so a missing contract_id has
+      // to surface as its own failure instead of being silently dropped.
+      if (optionalByChoice && missingSeedParams(step, ctx.values).length) continue;
 
       cb.onStepStart(step);
 
@@ -436,12 +608,20 @@ export async function runParcoursAuto(
         return { kind: "paused-picker", stepId: step.id, res };
       }
 
-      // create-premium needs a fund from the selected product's catalogue.
+      // Both premium steps allocate onto a fund of the selected product's
+      // catalogue, fetched through the step's own `fieldOptions`.
       const extras: AutoExtras = {};
-      if (step.id === "create-premium") {
-        const fundId = await pickRandomFund(step, ctx, signal, call);
+      if (stepNeedsFund(step)) {
+        // Fetched once per run: both premiums then allocate onto the same fund,
+        // and the catalogue (the slowest GET of Phase B) is not re-read.
+        ctx.fundId ??= (await pickRandomFund(step, ctx, signal, call)) ?? undefined;
         if (signal.aborted) return { kind: "cancelled", stepId: step.id };
-        if (!fundId) {
+        if (!ctx.fundId) {
+          // No fund to allocate onto. Mandatory (« Versement initial ») is fatal:
+          // the contract can't be submitted without it. A ticked optional step is
+          // left pending instead, so a product with no fund list doesn't abandon
+          // the run on a half-built contract.
+          if (optionalByChoice) continue;
           return {
             kind: "error",
             stepId: step.id,
@@ -449,7 +629,7 @@ export async function runParcoursAuto(
             message: "Aucun fonds disponible pour ce produit.",
           };
         }
-        extras.fundId = fundId;
+        extras.fundId = ctx.fundId;
       }
 
       // Execute — with a regenerate-identity retry on create-individual's 409
@@ -477,7 +657,16 @@ export async function runParcoursAuto(
         // A stop request aborts the in-flight fetch, which surfaces as a
         // failed response — report the cancel, not an error.
         if (signal.aborted) return { kind: "cancelled", stepId: step.id };
-        return httpError(step, res, toDraft(sent));
+        const failure = httpError(step, res, toDraft(sent));
+        // A step the user merely ticked must not cost the rest of the parcours:
+        // remember the first such failure, carry on, and report it once the run
+        // has reached the documents step. The step stays NOT done, so the stepper
+        // shows it pending and the error card points at it.
+        if (optionalByChoice) {
+          optionalFailure ??= failure;
+          continue;
+        }
+        return failure;
       }
 
       // The request succeeded: capture its outputs BEFORE honouring a stop
@@ -503,5 +692,5 @@ export async function runParcoursAuto(
 
   // Ran off the end without meeting the documents step (defensive: the
   // souscription parcours always has one).
-  return { kind: "reached-documents" };
+  return optionalFailure ?? { kind: "reached-documents" };
 }

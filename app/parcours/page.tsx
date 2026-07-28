@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useCallback, useEffect, useRef, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { ChevronLeft, ChevronRight, SkipForward } from "lucide-react";
@@ -64,6 +64,7 @@ import {
   bodyHasContent,
   buildSeedForStep,
   clearParcoursState,
+  draftWithoutSeededFields,
   extractProduced,
   extractOptions,
   getParcours,
@@ -72,9 +73,11 @@ import {
   loadParcoursState,
   mergeContextValues,
   saveParcoursState,
+  seedSnapshot,
   type ContextKey,
   type ContextValues,
   type ParcoursState,
+  type ParcoursDef,
   type ParcoursStep,
   type StepDraft,
   type ParcoursMode,
@@ -83,7 +86,9 @@ import {
   AUTO_STOP_STEP_ID,
   buildAutoDraftForStep,
   newAutoSeed,
+  optionalAutoSteps,
   runParcoursAuto,
+  stepNeedsFund,
 } from "@/lib/parcours-auto";
 
 interface LoadedEntry {
@@ -203,15 +208,49 @@ function seedForBuilder(
   };
 }
 
+// Forget the drafts of every step whose fetched option lists are keyed on
+// `changed` — the chosen product's funds and preset allocations. Those ids live
+// in nested body arrays (`allocations.funds[].fund_id`), so no `seedFrom` mapping
+// describes them and `draftWithoutSeededFields` cannot see them: a re-picked
+// product would otherwise leave the form posting a fund the new product's
+// catalogue doesn't contain. Dropping the draft (and its `semiPrefilled` mark)
+// makes the step re-fill from the new catalogue instead.
+function dropOptionDependentDrafts(
+  state: ParcoursState,
+  def: ParcoursDef,
+  changed: ContextKey | undefined,
+): ParcoursState {
+  if (!changed) return state;
+  const ids = def.steps
+    .filter((s) =>
+      s.fieldOptions?.some((f) => f.params.some((p) => p.from === changed)),
+    )
+    .map((s) => s.id);
+  if (!ids.length) return state;
+  const drafts = { ...state.drafts };
+  let dropped = false;
+  for (const id of ids)
+    if (drafts[id]) {
+      delete drafts[id];
+      dropped = true;
+    }
+  const semiPrefilled = (state.semiPrefilled ?? []).filter(
+    (id) => !ids.includes(id),
+  );
+  if (!dropped && semiPrefilled.length === (state.semiPrefilled ?? []).length)
+    return state;
+  return { ...state, drafts, semiPrefilled };
+}
+
 // Build the semi-auto pre-fill draft for a step, or null when it can't/shouldn't
-// be pre-filled here (picker/custom/create-premium — which needs the async fund
+// be pre-filled here (picker/custom/a premium step — which needs the async fund
 // list — a done step, one already pre-filled, or nothing to fill). Shared by
 // setMode (fills the active step immediately) and the pre-fill effect.
 function semiPrefillDraft(
   step: ParcoursStep,
   state: Pick<ParcoursState, "done" | "semiPrefilled" | "values" | "autoSeed">,
 ): StepDraft | null {
-  if (step.selects || step.custom || step.id === "create-premium") return null;
+  if (step.selects || step.custom || stepNeedsFund(step)) return null;
   if (state.done.includes(step.id)) return null;
   if ((state.semiPrefilled ?? []).includes(step.id)) return null;
   if (!state.autoSeed) return null;
@@ -426,10 +465,13 @@ function Parcours() {
       if (!value) return;
       setState((prev) => {
         if (!prev) return prev;
-        const withValue = {
-          ...prev,
-          values: { ...prev.values, [key]: value },
-        };
+        // A new pick invalidates the option ids a later step's draft holds (the
+        // product's funds), hence the purge.
+        const withValue = dropOptionDependentDrafts(
+          { ...prev, values: { ...prev.values, [key]: value } },
+          def,
+          prev.values[key] === value ? undefined : key,
+        );
         const next = advanceState(withValue, def, step.id, {});
         saveParcoursState(next);
         return next;
@@ -438,19 +480,27 @@ function Parcours() {
     [def],
   );
 
-  const setValue = useCallback((key: ContextKey, value: string) => {
-    setState((prev) => {
-      if (!prev) return prev;
-      // Route through mergeContextValues so editing contract_id by hand clears
-      // ids scoped to the previous contract (premium, periodic premium, SRs…).
-      const next = {
-        ...prev,
-        values: mergeContextValues(prev.values, { [key]: value }),
-      };
-      saveParcoursState(next);
-      return next;
-    });
-  }, []);
+  const setValue = useCallback(
+    (key: ContextKey, value: string) => {
+      setState((prev) => {
+        if (!prev) return prev;
+        if (!def || prev.values[key] === value) return prev;
+        // Route through mergeContextValues so editing contract_id by hand clears
+        // ids scoped to the previous contract (premium, periodic premium, SRs…).
+        const next = dropOptionDependentDrafts(
+          {
+            ...prev,
+            values: mergeContextValues(prev.values, { [key]: value }),
+          },
+          def,
+          key,
+        );
+        saveParcoursState(next);
+        return next;
+      });
+    },
+    [def],
+  );
 
   // Values a custom view captured (the Phase D decision view writes back the ids
   // of demands it discovered, so a run whose sr_* ids were cleared can still be
@@ -484,16 +534,26 @@ function Parcours() {
   }, []);
 
   // Persist a step's form draft (params + body) so returning to it restores the
-  // input. Keep `values`/`done` refs stable so the options-fetch effect (keyed
-  // on `state.values`) doesn't re-run on a save.
-  const saveDraft = useCallback((stepId: string, draft: StepDraft) => {
-    if (skipDraftSaveRef.current === stepId) {
+  // input. The seed in effect at this moment is stored with it, so a later
+  // restore can tell a value the user typed over from an untouched pre-fill that
+  // has since gone stale (see `draftWithoutSeededFields`). Keep `values`/`done`
+  // refs stable so the options-fetch effect (keyed on `state.values`) doesn't
+  // re-run on a save.
+  const saveDraft = useCallback((step: ParcoursStep, draft: StepDraft) => {
+    if (skipDraftSaveRef.current === step.id) {
       skipDraftSaveRef.current = null; // discard the mode-switch reset snapshot
       return;
     }
     setState((prev) => {
       if (!prev) return prev;
-      const next = { ...prev, drafts: { ...prev.drafts, [stepId]: draft } };
+      const seeded = seedSnapshot(step, prev.values);
+      const next = {
+        ...prev,
+        drafts: {
+          ...prev.drafts,
+          [step.id]: { ...draft, ...(seeded ? { seeded } : {}) },
+        },
+      };
       saveParcoursState(next);
       return next;
     });
@@ -516,6 +576,34 @@ function Parcours() {
       });
     },
     [],
+  );
+
+  // Enrol/withdraw an optional step from the automatic run. Persisted, so the
+  // choice survives a refresh, a mode switch and a stop/resume.
+  const toggleAutoOptional = useCallback((stepId: string, run: boolean) => {
+    setState((prev) => {
+      if (!prev) return prev;
+      const current = prev.autoOptional ?? [];
+      if (run === current.includes(stepId)) return prev;
+      const autoOptional = run
+        ? [...current, stepId]
+        : current.filter((id) => id !== stepId);
+      // Ticking a step the runner already marked done — skipped without a call,
+      // or executed — means « run this »: un-complete it so the next launch
+      // reaches it. That is also what brings the launch button back, since the
+      // run no longer reads as finished. The runner itself keeps its plain
+      // done-skip, so nothing is ever replayed without this explicit click.
+      const done = run ? prev.done.filter((id) => id !== stepId) : prev.done;
+      const next = { ...prev, autoOptional, done };
+      saveParcoursState(next);
+      return next;
+    });
+  }, []);
+
+  // The optional steps offered in the mode panel — fixed for a given parcours.
+  const autoOptionalChoices = useMemo(
+    () => (def ? optionalAutoSteps(def) : []),
+    [def],
   );
 
   const skipStep = useCallback(() => {
@@ -585,8 +673,8 @@ function Parcours() {
         next.autoSeed = undefined;
       }
       // Pre-fill the ACTIVE step's form synchronously so semi mode fills it on
-      // the very next render — no wait for the follow-up effect. create-premium
-      // (async fund list) and steps with nothing to fill are left to the effect.
+      // the very next render — no wait for the follow-up effect. The premium
+      // steps (async fund list) and steps with nothing to fill are left to it.
       if (mode === "semi" && def) {
         const step = def.steps.find((s) => s.id === prev.currentStepId);
         const draft = step ? semiPrefillDraft(step, next) : null;
@@ -604,7 +692,7 @@ function Parcours() {
   // plausible data (the same request the auto-run would send) so the user only
   // reviews and presses « Exécuter ». Writes the draft once per step — never
   // over a step already done or one the user has started editing — and skips
-  // pickers/custom steps. create-premium waits for the product's fund list.
+  // pickers/custom steps. A premium step waits for the product's fund list.
   useEffect(() => {
     if (!def || !state || state.mode !== "semi" || !activeStep) return;
     const step = activeStep;
@@ -612,7 +700,7 @@ function Parcours() {
     if (state.done.includes(step.id)) return;
     if ((state.semiPrefilled ?? []).includes(step.id)) return; // filled once
     if (!state.autoSeed) return;
-    if (step.id === "create-premium") {
+    if (stepNeedsFund(step)) {
       // The fund catalogue is fetched into `fieldOpts` on step entry; wait only
       // while it is still resolving for THIS step. Once resolved with no fund
       // available (empty catalogue or a failed fetch), leave the form for the
@@ -659,7 +747,12 @@ function Parcours() {
     setAutoStatus({ phase: "running" });
     void runParcoursAuto(
       def,
-      { values: state.values, done: state.done, drafts: state.drafts },
+      {
+        values: state.values,
+        done: state.done,
+        drafts: state.drafts,
+        autoOptional: state.autoOptional,
+      },
       controller.signal,
       {
         onStepStart: (step) =>
@@ -869,6 +962,9 @@ function Parcours() {
                 autoStepTitle={autoStatus.stepTitle}
                 onAutoStart={startAuto}
                 onAutoStop={stopAuto}
+                optionalSteps={autoOptionalChoices}
+                selectedOptional={state.autoOptional ?? []}
+                onToggleOptional={toggleAutoOptional}
               />
               <ParcoursStepper
                 def={def}
@@ -1055,8 +1151,15 @@ function Parcours() {
                   onResult(activeStep, res, stepEntry.entry.method.toUpperCase())
                 }
                 simplified
-                initialDraft={state.drafts?.[activeStep.id]}
-                onDraftChange={(draft) => saveDraft(activeStep.id, draft)}
+                // Restored WITHOUT the fields the context feeds: those come from
+                // `seed` above, so a re-created contract (or an edited context
+                // value) wins over the ids this step's snapshot was taken with.
+                initialDraft={draftWithoutSeededFields(
+                  activeStep,
+                  state.values,
+                  state.drafts?.[activeStep.id],
+                )}
+                onDraftChange={(draft) => saveDraft(activeStep, draft)}
                 compactResponse={!!activeStep.selects}
               />
             </FieldOptionsProvider>

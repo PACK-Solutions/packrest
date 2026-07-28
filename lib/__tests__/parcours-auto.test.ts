@@ -3,14 +3,20 @@ import type { ProxyResponse } from "@/lib/http";
 import {
   DEFAULT_BENEFICIARY_CLAUSE,
   defaultContextValues,
+  extractProduced,
   SOUSCRIPTION_PARCOURS,
   type ContextValues,
 } from "@/lib/parcours";
 import {
+  AUTO_CRS_COUNTRY,
+  AUTO_PLAN,
   AUTO_STOP_STEP_ID,
   buildAutoDraftForStep,
   buildAutoRequest,
+  isoInDays,
+  missingSeedParams,
   newAutoSeed,
+  optionalAutoSteps,
   randomIdentity,
   runParcoursAuto,
   todayIso,
@@ -168,22 +174,46 @@ describe("buildAutoRequest", () => {
     });
   });
 
-  it("bank account and payment method share the same IBAN, holder = person", () => {
-    const ctx = makeCtx({ person_id: "p-1", person_name: "Test Durand" });
+  it("the bank account carries the IBAN/BIC, the payment method only its id", () => {
+    const ctx = makeCtx({
+      person_id: "p-1",
+      person_name: "Test Durand",
+      bank_account_id: "ba-1",
+    });
     const bank = buildAutoRequest(step("person-bank-account"), ctx);
     const pm = buildAutoRequest(step("create-payment-method"), ctx);
     expect(bank.body).toMatchObject({
       account_holder_name: "Test Durand",
       iban: ctx.iban,
+      // Required by the person API on creation.
+      bic: ctx.bic,
       currency: "EUR",
       date_of_validity_start: todayIso(),
     });
-    expect(pm.body).toMatchObject({
+    // PaymentMethodCreate requires bank_account_id and defines no iban/bic:
+    // the bank details live on the account the payment method references.
+    expect(pm.body).toEqual({
       type: "SEPA_DEBIT",
-      iban: ctx.iban,
-      bic: ctx.bic,
+      bank_account_id: "ba-1",
       mandate_type: "RECURRENT",
+      date_of_validity_start: todayIso(),
     });
+  });
+
+  it("captures the bank account id the payment method needs", () => {
+    // The 400 this guards: « Field 'bank_account_id' is required ».
+    expect(
+      extractProduced(
+        step("person-bank-account"),
+        res(201, { id: "ba-created" }),
+      ),
+    ).toEqual({ bank_account_id: "ba-created" });
+    // Without it in the context the seed omits it rather than sending "".
+    const { body } = buildAutoRequest(
+      step("create-payment-method"),
+      makeCtx({ person_id: "p-1" }),
+    );
+    expect(body).not.toHaveProperty("bank_account_id");
   });
 
   it("person-submit has no body, only the path param", () => {
@@ -223,6 +253,141 @@ describe("buildAutoRequest", () => {
     expect(amount.scale).toBe(2);
     expect(amount.currency).toBe("EUR");
     expect(amount.value % 100).toBe(0);
+  });
+
+  it("person-fatca declares the TIN the FATCA record requires", () => {
+    const ctx = makeCtx({ person_id: "p-1" });
+    const { pathParams, body } = buildAutoRequest(step("person-fatca"), ctx);
+    expect(pathParams).toEqual({ person_id: "p-1" });
+    expect(body).toMatchObject({
+      fiscal_type: "FATCA",
+      tax_identification_number: { tin_type: "NUMBER" },
+    });
+    const tin = (body as { tax_identification_number: { number: string } })
+      .tax_identification_number;
+    expect(tin.number).toMatch(/^\d{9}$/);
+  });
+
+  it("person-crs carries the country_code path param no context key feeds", () => {
+    const ctx = makeCtx({ person_id: "p-1" });
+    const { pathParams, body } = buildAutoRequest(step("person-crs"), ctx);
+    // The CRS record is keyed by country: supplied by the plan, not by `seedFrom`.
+    expect(pathParams).toEqual({
+      person_id: "p-1",
+      country_code: AUTO_CRS_COUNTRY,
+    });
+    expect(body).toMatchObject({
+      fiscal_type: "CRS",
+      is_self_certification_present: true,
+      date_of_self_certification: todayIso(),
+    });
+    // The country belongs to the path only (CRSCreate forbids extra properties).
+    expect(body).not.toHaveProperty("country_code");
+  });
+
+  it("create-periodic-premium: monthly instalment, one fund, server-defaulted start", () => {
+    const ctx = makeCtx({ contract_id: "c-1", payment_method_id: "pm-1" });
+    const { pathParams, body } = buildAutoRequest(
+      step("create-periodic-premium"),
+      ctx,
+      { fundId: "fund-7" },
+    );
+    expect(pathParams).toEqual({ contract_id: "c-1" });
+    expect(body).toMatchObject({
+      type_of_fund_source: "OWN_FUNDS",
+      payment_method_id: "pm-1",
+      periodicity: "MONTHLY",
+      allocations: {
+        funds: [
+          { fund_id: "fund-7", allocation_rate: { value: 10000000, scale: 5 } },
+        ],
+      },
+    });
+    const { dates, periodic_amount: amount } = body as {
+      dates: { date_of_start?: string; date_of_end: string };
+      periodic_amount: { value: number; scale: number; currency: string };
+    };
+    // No date_of_start: the API defaults it at acceptance to
+    // max(date_of_effect, date_of_acceptance) + 30 days, i.e. just outside the
+    // renunciation window. Any value computed here is validated against that
+    // window whenever the decision lands, so a late decision would fail it.
+    expect(dates.date_of_start).toBeUndefined();
+    expect(dates.date_of_end > todayIso()).toBe(true);
+    expect(amount).toMatchObject({ scale: 2, currency: "EUR" });
+    expect(amount.value % 100).toBe(0);
+  });
+
+  it("never sends a date_of_start, whatever date_of_effect holds", () => {
+    // A future date of effect used to shift a computed start date; the field is
+    // now the server's business, so the context value can't put it in the window.
+    const ctx = makeCtx({
+      contract_id: "c-1",
+      payment_method_id: "pm-1",
+      date_of_effect: isoInDays(180),
+    });
+    const { body } = buildAutoRequest(step("create-periodic-premium"), ctx, {
+      fundId: "fund-7",
+    });
+    expect((body as { dates: Record<string, unknown> }).dates).not.toHaveProperty(
+      "date_of_start",
+    );
+  });
+});
+
+// --- optionalAutoSteps / missingSeedParams ---------------------------------------
+
+describe("optionalAutoSteps", () => {
+  it("lists the optional steps except those that always run", () => {
+    const ids = optionalAutoSteps(DEF).map((s) => s.id);
+    // update-contract is optional but declares autoRun — it is never a choice.
+    expect(ids).not.toContain("update-contract");
+    expect(ids).toEqual([
+      "person-address-correspondence",
+      "person-address-fiscal",
+      "person-fatca",
+      "person-crs",
+      "update-premium",
+      "create-periodic-premium",
+      "update-periodic-premium",
+    ]);
+  });
+
+  it("never offers a step beyond the documents stop", () => {
+    const stopIdx = DEF.steps.findIndex((s) => s.id === AUTO_STOP_STEP_ID);
+    for (const s of optionalAutoSteps(DEF))
+      expect(DEF.steps.findIndex((x) => x.id === s.id)).toBeLessThan(stopIdx);
+  });
+
+  it("every selectable optional step can build a request", () => {
+    // A ticked step must never fire an empty body the API would 422 on: the plan
+    // is what makes it a valid request, so the two lists can't drift apart.
+    for (const s of optionalAutoSteps(DEF))
+      expect(AUTO_PLAN[s.id]?.body).toBeTypeOf("function");
+  });
+});
+
+describe("missingSeedParams", () => {
+  it("reports the path params the context can't fill", () => {
+    expect(missingSeedParams(step("update-periodic-premium"), {})).toEqual([
+      "contract_id",
+      "periodic_premium_id",
+    ]);
+    expect(
+      missingSeedParams(step("update-periodic-premium"), {
+        contract_id: "c-1",
+        periodic_premium_id: "pp-1",
+      }),
+    ).toEqual([]);
+  });
+
+  it("ignores const seeds and body seeds", () => {
+    // address_type is a const param, payment_method_id a body seed.
+    expect(
+      missingSeedParams(step("person-address-correspondence"), { person_id: "p-1" }),
+    ).toEqual([]);
+    expect(
+      missingSeedParams(step("create-periodic-premium"), { contract_id: "c-1" }),
+    ).toEqual([]);
   });
 });
 
@@ -265,17 +430,32 @@ describe("buildAutoDraftForStep", () => {
   });
 
   it("returns null when a step has nothing to pre-fill", () => {
-    // Optional step: no plan body, and its only seed param (person_id) is absent.
-    expect(buildAutoDraftForStep(step("person-fatca"), seed, {})).toBeNull();
+    // No plan body (submitting takes none), and its only seed param (person_id)
+    // is absent from the context.
+    expect(buildAutoDraftForStep(step("person-submit"), seed, {})).toBeNull();
   });
 
-  it("newAutoSeed reuses the IBAN from a prior bank-account draft", () => {
+  it("pre-fills an optional step that has an auto plan (FATCA)", () => {
+    // Optional steps now carry a plan body too, so semi mode pre-fills them —
+    // the user still reviews, then executes or presses « Passer ».
+    const draft = buildAutoDraftForStep(step("person-fatca"), seed, {
+      person_id: "p-1",
+    });
+    expect(draft?.params).toEqual({ person_id: "p-1" });
+    expect(draft?.body).toMatchObject({ fiscal_type: "FATCA" });
+  });
+
+  it("newAutoSeed reuses the IBAN and BIC from a prior bank-account draft", () => {
+    // Resuming between person-bank-account and create-payment-method must keep
+    // the SEPA mandate on the very account the bank-account step registered —
+    // for the BIC too, now that the bank account carries one.
     const s = newAutoSeed({
       "person-bank-account": {
-        body: { iban: "FR0012345678901234567890123" },
+        body: { iban: "FR0012345678901234567890123", bic: "CMCIFR2A" },
       },
     });
     expect(s.iban).toBe("FR0012345678901234567890123");
+    expect(s.bic).toBe("CMCIFR2A");
     expect(s.identity.fullName).toBe(
       `${s.identity.firstName} ${s.identity.lastName}`,
     );
@@ -303,6 +483,12 @@ describe("runParcoursAuto", () => {
     listProductFunds: () => res(200, { funds: [{ id: "fund-1", name: "F" }] }),
     createContract: () => res(201, { id: "c-1" }),
     createPremium: () => res(201, { id: "prem-1" }),
+    // Optional steps: only called when the run opts into them.
+    upsertPersonFatca: () => res(200, {}),
+    upsertPersonCrsByCountry: () => res(200, {}),
+    updatePremium: () => res(200, { id: "prem-1" }),
+    createPeriodicPremium: () => res(201, { id: "pp-1" }),
+    updatePeriodicPremium: () => res(200, { id: "pp-1" }),
     submitContract: () =>
       res(200, {
         contract_number: "K-123",
@@ -378,7 +564,7 @@ describe("runParcoursAuto", () => {
       "createPremium",
       "submitContract",
     ]);
-    // update-contract is optional, yet it runs (its body seed opts it in) and
+    // update-contract is optional, yet it runs unticked (its `autoRun`) and
     // completes the DRAFT with the fields the submit endpoint requires.
     const update = calls.find((c) => c.operationId === "updateContract");
     expect(update?.pathParams).toEqual({ contract_id: "c-1" });
@@ -398,6 +584,312 @@ describe("runParcoursAuto", () => {
       contract_number: "K-123",
       sr_contract_id: "sr-c-1",
     });
+  });
+
+  it("executes the optional steps the run opted into, and only those", async () => {
+    const { call, calls } = mockCall(happyHandlers);
+    const { cb } = collectingCallbacks();
+    const result = await runParcoursAuto(
+      DEF,
+      {
+        values: defaultContextValues(),
+        done: [],
+        autoOptional: ["person-fatca"],
+      },
+      noAbort,
+      cb,
+      call,
+    );
+
+    expect(result.kind).toBe("paused-picker");
+    const fatca = calls.filter((c) => c.operationId === "upsertPersonFatca");
+    expect(fatca).toHaveLength(1);
+    expect(fatca[0].pathParams).toEqual({ person_id: "p-1" });
+    expect((fatca[0].body as Record<string, unknown>).fiscal_type).toBe("FATCA");
+    // The optional steps left unticked never fired — including the two extra
+    // addresses, so the principal one is still the only address posted.
+    expect(calls.some((c) => c.operationId === "upsertPersonCrsByCountry")).toBe(
+      false,
+    );
+    expect(
+      calls.filter((c) => c.operationId === "upsertPersonAddressByType"),
+    ).toHaveLength(1);
+  });
+
+  it("chains the optional premium steps on the ids the same run produced", async () => {
+    const { call, calls } = mockCall(happyHandlers);
+    const { cb } = collectingCallbacks();
+    const doneIds = DEF.steps
+      .slice(0, DEF.steps.findIndex((s) => s.id === "list-products") + 1)
+      .map((s) => s.id);
+    const result = await runParcoursAuto(
+      DEF,
+      {
+        values: {
+          ...defaultContextValues(),
+          person_id: "p-1",
+          payment_method_id: "pm-1",
+          product_id: "prod-1",
+        },
+        done: doneIds,
+        autoOptional: [
+          "update-premium",
+          "create-periodic-premium",
+          "update-periodic-premium",
+        ],
+      },
+      noAbort,
+      cb,
+      call,
+    );
+
+    expect(result.kind).toBe("reached-documents");
+    // The fund catalogue is fetched ONCE for the run, not once per premium step.
+    expect(calls.map((c) => c.operationId)).toEqual([
+      "createContract",
+      "updateContract",
+      "listProductFunds",
+      "createPremium",
+      "updatePremium",
+      "createPeriodicPremium",
+      "updatePeriodicPremium",
+      "submitContract",
+    ]);
+    // Each edit step targets the id its creation step produced within the run.
+    expect(
+      calls.find((c) => c.operationId === "updatePremium")?.pathParams,
+    ).toEqual({ contract_id: "c-1", premium_id: "prem-1" });
+    expect(
+      calls.find((c) => c.operationId === "updatePeriodicPremium")?.pathParams,
+    ).toEqual({ contract_id: "c-1", periodic_premium_id: "pp-1" });
+    // Both premiums allocate onto the SAME fund — picked once for the run.
+    const periodic = calls.find((c) => c.operationId === "createPeriodicPremium");
+    expect(periodic?.body).toMatchObject({
+      periodicity: "MONTHLY",
+      allocations: { funds: [{ fund_id: "fund-1" }] },
+    });
+    const initial = calls.find((c) => c.operationId === "createPremium");
+    expect(initial?.body).toMatchObject({
+      allocations: { funds: [{ fund_id: "fund-1" }] },
+    });
+  });
+
+  it("skips an opted-in optional step whose prerequisite id is missing", async () => {
+    const { call, calls } = mockCall(happyHandlers);
+    const { cb, done } = collectingCallbacks();
+    const doneIds = DEF.steps
+      .slice(0, DEF.steps.findIndex((s) => s.id === "list-products") + 1)
+      .map((s) => s.id);
+    // « Modifier le versement périodique » ticked, but its creation step was not:
+    // no periodic_premium_id exists, so the request would carry an empty segment.
+    const result = await runParcoursAuto(
+      DEF,
+      {
+        values: {
+          ...defaultContextValues(),
+          person_id: "p-1",
+          payment_method_id: "pm-1",
+          product_id: "prod-1",
+        },
+        done: doneIds,
+        autoOptional: ["update-periodic-premium"],
+      },
+      noAbort,
+      cb,
+      call,
+    );
+
+    expect(result.kind).toBe("reached-documents");
+    expect(calls.some((c) => c.operationId === "updatePeriodicPremium")).toBe(
+      false,
+    );
+    // NOT reported done: the user asked for this step, so claiming it completed
+    // when nothing was sent would be a lie — the stepper keeps it pending, and
+    // the run carries on to the end regardless.
+    expect(done.some((d) => d.id === "update-periodic-premium")).toBe(false);
+    expect(calls.some((c) => c.operationId === "submitContract")).toBe(true);
+  });
+
+  it("never replays a ticked optional step that is already done", async () => {
+    const { call, calls } = mockCall(happyHandlers);
+    const { cb } = collectingCallbacks();
+    // A run always pauses at the product picker, so resuming is the norm — and
+    // the resume pass must not POST the Phase A optional steps a second time
+    // (upsert or not, a duplicate write is visible and can open an unwanted
+    // ADDRESS_CHANGE demand once the person is ENGAGED). Ticking a step again in
+    // the panel is what un-completes it (the page's `toggleAutoOptional`); the
+    // runner itself never decides to replay.
+    const doneIds = DEF.steps
+      .slice(0, DEF.steps.findIndex((s) => s.id === "list-products") + 1)
+      .map((s) => s.id);
+    const result = await runParcoursAuto(
+      DEF,
+      {
+        values: {
+          ...defaultContextValues(),
+          person_id: "p-1",
+          payment_method_id: "pm-1",
+          product_id: "prod-1",
+        },
+        done: doneIds,
+        autoOptional: [
+          "person-address-correspondence",
+          "person-address-fiscal",
+          "person-fatca",
+          "person-crs",
+        ],
+      },
+      noAbort,
+      cb,
+      call,
+    );
+    expect(result.kind).toBe("reached-documents");
+    for (const op of [
+      "upsertPersonAddressByType",
+      "upsertPersonFatca",
+      "upsertPersonCrsByCountry",
+    ])
+      expect(calls.some((c) => c.operationId === op)).toBe(false);
+  });
+
+  it("runs a ticked optional step the panel un-completed", async () => {
+    const { call, calls } = mockCall(happyHandlers);
+    const { cb } = collectingCallbacks();
+    // What `toggleAutoOptional` leaves behind: the id ticked AND dropped from
+    // `done`, so the next launch reaches the step exactly once.
+    const doneIds = DEF.steps
+      .slice(0, DEF.steps.findIndex((s) => s.id === "list-products") + 1)
+      .map((s) => s.id)
+      .filter((id) => id !== "person-fatca");
+    const result = await runParcoursAuto(
+      DEF,
+      {
+        values: {
+          ...defaultContextValues(),
+          person_id: "p-1",
+          payment_method_id: "pm-1",
+          product_id: "prod-1",
+        },
+        done: doneIds,
+        autoOptional: ["person-fatca"],
+      },
+      noAbort,
+      cb,
+      call,
+    );
+    expect(result.kind).toBe("reached-documents");
+    const fatca = calls.filter((c) => c.operationId === "upsertPersonFatca");
+    expect(fatca).toHaveLength(1);
+    expect(fatca[0].pathParams).toEqual({ person_id: "p-1" });
+    // Everything else that was done stays skipped.
+    expect(calls.some((c) => c.operationId === "createIndividual")).toBe(false);
+    expect(calls.some((c) => c.operationId === "upsertPersonCrsByCountry")).toBe(
+      false,
+    );
+  });
+
+  it("does not duplicate a ticked creating step whose output already exists", async () => {
+    const { call, calls } = mockCall(happyHandlers);
+    const { cb } = collectingCallbacks();
+    // The retry must not defeat `skipIfPresent`: a periodic premium already
+    // captured means re-running the step would create a second one.
+    const doneIds = DEF.steps
+      .slice(0, DEF.steps.findIndex((s) => s.id === "submit-contract"))
+      .map((s) => s.id);
+    await runParcoursAuto(
+      DEF,
+      {
+        values: {
+          ...defaultContextValues(),
+          person_id: "p-1",
+          payment_method_id: "pm-1",
+          product_id: "prod-1",
+          contract_id: "c-1",
+          premium_id: "prem-1",
+          periodic_premium_id: "pp-1",
+        },
+        done: doneIds,
+        autoOptional: ["create-periodic-premium"],
+      },
+      noAbort,
+      cb,
+      call,
+    );
+    expect(calls.some((c) => c.operationId === "createPeriodicPremium")).toBe(
+      false,
+    );
+  });
+
+  it("skips a ticked optional premium when the product has no fund, without aborting", async () => {
+    const { call, calls } = mockCall({
+      ...happyHandlers,
+      listProductFunds: () => res(200, { funds: [] }),
+      // The mandatory premium is already done and its id captured, so the run
+      // reaches the optional periodic premium — which cannot get a fund either.
+    });
+    const { cb, done } = collectingCallbacks();
+    const doneIds = DEF.steps
+      .slice(0, DEF.steps.findIndex((s) => s.id === "update-premium"))
+      .map((s) => s.id);
+    const result = await runParcoursAuto(
+      DEF,
+      {
+        values: {
+          ...defaultContextValues(),
+          person_id: "p-1",
+          payment_method_id: "pm-1",
+          product_id: "prod-1",
+          contract_id: "c-1",
+          premium_id: "prem-1",
+        },
+        done: doneIds,
+        autoOptional: ["create-periodic-premium"],
+      },
+      noAbort,
+      cb,
+      call,
+    );
+    // The run finishes rather than abandoning a DRAFT contract, and the step it
+    // could not build is left pending instead of being reported as complete.
+    expect(result.kind).toBe("reached-documents");
+    expect(calls.some((c) => c.operationId === "createPeriodicPremium")).toBe(
+      false,
+    );
+    expect(done.some((d) => d.id === "create-periodic-premium")).toBe(false);
+    expect(calls.some((c) => c.operationId === "submitContract")).toBe(true);
+  });
+
+  it("runs update-contract even with no contract_id, so the failure surfaces there", async () => {
+    const { call, calls } = mockCall({
+      ...happyHandlers,
+      // 2xx without an id the producer matches: contract_id stays empty.
+      createContract: () => res(201, {}),
+      updateContract: () => res(404, { detail: "not found" }),
+    });
+    const { cb } = collectingCallbacks();
+    const doneIds = DEF.steps
+      .slice(0, DEF.steps.findIndex((s) => s.id === "list-products") + 1)
+      .map((s) => s.id);
+    const result = await runParcoursAuto(
+      DEF,
+      {
+        values: {
+          ...defaultContextValues(),
+          person_id: "p-1",
+          payment_method_id: "pm-1",
+          product_id: "prod-1",
+        },
+        done: doneIds,
+        autoOptional: [],
+      },
+      noAbort,
+      cb,
+      call,
+    );
+    // `autoRun` means unconditional: the missing-prerequisite skip must not
+    // swallow it, or the run fails later at submit with a misleading 422.
+    expect(calls.some((c) => c.operationId === "updateContract")).toBe(true);
+    expect(result).toMatchObject({ kind: "error", stepId: "update-contract" });
   });
 
   it("skips list-products without pausing when product_id is preset", async () => {
@@ -648,18 +1140,23 @@ describe("runParcoursAuto", () => {
     }
   });
 
-  it("reuses the IBAN from a previous run's drafts on resume", async () => {
+  it("references the bank account captured by an earlier pass on resume", async () => {
     const { call, calls } = mockCall(happyHandlers);
     const { cb } = collectingCallbacks();
-    // Run 1 registered the bank account with this IBAN, then stopped before
-    // create-payment-method.
+    // Run 1 registered the bank account and captured its id, then stopped before
+    // create-payment-method. The resume must reference that account rather than
+    // re-register one, and must not resend the bank details.
     const doneIds = DEF.steps
       .slice(0, DEF.steps.findIndex((s) => s.id === "create-payment-method"))
       .map((s) => s.id);
     await runParcoursAuto(
       DEF,
       {
-        values: { person_id: "p-1", person_name: "Test Durand" },
+        values: {
+          person_id: "p-1",
+          person_name: "Test Durand",
+          bank_account_id: "ba-run-1",
+        },
         done: doneIds,
         drafts: {
           "person-bank-account": {
@@ -672,9 +1169,41 @@ describe("runParcoursAuto", () => {
       cb,
       call,
     );
+    expect(calls.some((c) => c.operationId === "createBankAccount")).toBe(false);
     const pm = calls.find((c) => c.operationId === "createPaymentMethod");
-    expect((pm?.body as Record<string, unknown>).iban).toBe(
-      "FR0012345678901234567890123",
+    expect(pm?.body).toMatchObject({ bank_account_id: "ba-run-1" });
+    expect(pm?.body).not.toHaveProperty("iban");
+  });
+
+  it("carries the run's IBAN into a bank account re-registered after a failure", async () => {
+    const { call, calls } = mockCall(happyHandlers);
+    const { cb } = collectingCallbacks();
+    // The bank-account step is NOT done (it failed last pass), so it runs again:
+    // `newAutoSeed` recovers the IBAN from its draft so the account registered
+    // now is the one the earlier attempt described.
+    const doneIds = DEF.steps
+      .slice(0, DEF.steps.findIndex((s) => s.id === "person-bank-account"))
+      .map((s) => s.id);
+    await runParcoursAuto(
+      DEF,
+      {
+        values: { person_id: "p-1", person_name: "Test Durand" },
+        done: doneIds,
+        drafts: {
+          "person-bank-account": {
+            params: { person_id: "p-1" },
+            body: { iban: "FR0012345678901234567890123", bic: "CMCIFR2A" },
+          },
+        },
+      },
+      noAbort,
+      cb,
+      call,
     );
+    const bank = calls.find((c) => c.operationId === "createBankAccount");
+    expect(bank?.body).toMatchObject({
+      iban: "FR0012345678901234567890123",
+      bic: "CMCIFR2A",
+    });
   });
 });

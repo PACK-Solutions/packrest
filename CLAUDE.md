@@ -61,7 +61,9 @@ http/dialog) are unavailable there — see the fallback note below.
     (UUIDs for form fields), `FieldGenerator` (checksum-valid sample values:
     IBAN/BIC/NIR/SIREN/SIRET) — all topbar tools.
   - Parcours (guided flow, behind `/parcours`): `ParcoursStepper` (collapsible
-    phase rail), `ParcoursContextPanel` (shared values chained between steps),
+    phase rail), `ParcoursModePanel` (manuel / semi-auto / auto + the auto run's
+    controls and the checklist of optional steps to execute),
+    `ParcoursContextPanel` (shared values chained between steps),
     `ParcoursSelect` (pick item(s) from a list response into the context),
     `ParcoursDocuments` (Phase C: requirements-driven upload+attach per SR),
     `ParcoursDecisions` (Phase D: quick APPROVED/REJECTED over the SRs of the
@@ -100,6 +102,15 @@ http/dialog) are unavailable there — see the fallback note below.
     context mapping, response capture, sessionStorage progress) behind
     `/parcours`; `fake-fields.ts` — checksum-valid sample values
     (IBAN/BIC/NIR/SIREN/SIRET) for `FieldGenerator`.
+    A step draft stores the seed it was filled from (`StepDraft.seeded`, written
+    by `seedSnapshot`), so `draftWithoutSeededFields` can refresh an untouched
+    pre-fill from the live context while keeping whatever the user typed over.
+  - `parcours-auto.ts` — the semi/auto runner: `AUTO_PLAN` (per-step random body,
+    plus `params` for a path id no step captures), `runParcoursAuto`
+    (frontier → documents step, pauses at the product picker) and the optional-step
+    opt-in (`optionalAutoSteps` + `ParcoursState.autoOptional`). It never replays a
+    done step: ticking one in the mode panel un-completes it, which is what lets a
+    relaunch reach it.
   - `parcours-documents.ts` / `parcours-decisions.ts` — pure (React-free)
     analysis behind the two custom parcours steps: a SR's `requirements[]` for
     the Phase C uploads, and the SR reading + `decisions` payload building for
