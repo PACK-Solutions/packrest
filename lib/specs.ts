@@ -5,7 +5,7 @@
 // now async and I/O-agnostic, while the parsing/deref and the pure endpoint
 // walkers are unchanged.
 
-import yaml from "js-yaml";
+import * as yaml from "js-yaml";
 import type {
   ApiSummary,
   OpenApiDocument,

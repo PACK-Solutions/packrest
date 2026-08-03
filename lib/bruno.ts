@@ -5,7 +5,7 @@
 // import). Serialization goes through js-yaml with a fixed style so the output
 // mirrors the reference collections in ../openapi/bruno.
 
-import yaml from "js-yaml";
+import * as yaml from "js-yaml";
 
 export interface BrunoParam {
   name: string;
@@ -103,7 +103,7 @@ const DEFAULT_REQUEST_SETTINGS = {
 // and never wrap long lines / block scalars.
 const DUMP_OPTS: yaml.DumpOptions = {
   lineWidth: -1,
-  quotingType: "'",
+  quoteStyle: "single",
   forceQuotes: false,
   noRefs: true,
 };

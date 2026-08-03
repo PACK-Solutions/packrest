@@ -1,4 +1,4 @@
-import yaml from "js-yaml";
+import * as yaml from "js-yaml";
 import { HTTP_METHODS } from "./types";
 
 // Structural diff between two versions of an OpenAPI bundle, computed at sync
