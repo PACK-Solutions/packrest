@@ -43,7 +43,11 @@ import type {
 } from "@/lib/types";
 import { buildManagedHeaders } from "@/lib/curl";
 import { formatUploadSize } from "@/lib/multipart";
-import { bodyHasEditableFields } from "@/lib/schema-normalize";
+import {
+  bodyHasEditableFields,
+  collapseNullableVariants,
+  mergeAllOf,
+} from "@/lib/schema-normalize";
 import { useToken } from "@/hooks/use-token";
 import { useRequestExecution } from "@/hooks/use-request-execution";
 import { useHalNavigation } from "@/hooks/use-hal-navigation";
@@ -782,6 +786,9 @@ export default function RequestBuilder(props: Props) {
   );
 }
 
+// Sentinel for the param dropdown's "clear" row — Radix throws on value="".
+const UNSET_PARAM = "__unset__";
+
 function ParamGroup({
   title,
   params,
@@ -799,45 +806,79 @@ function ParamGroup({
         {title}
       </div>
       <div className="space-y-2.5">
-        {params.map((p) => (
-          <Field
-            key={p.name}
-            label={p.name}
-            hint={p.description}
-            required={p.required}
-            meta={<ConstraintBadges schema={p.schema} />}
-          >
-            {p.schema?.enum?.length ? (
-              <Select
-                value={values[p.name] ?? ""}
-                onValueChange={(v) => onChange({ ...values, [p.name]: v })}
-              >
-                <SelectTrigger
-                  className="w-full"
-                  aria-required={p.required || undefined}
+        {params.map((p) => {
+          // Normalize like the body form does, so an enum reached through an
+          // `allOf` wrapper or a nullable union still renders as a dropdown
+          // (and gets its constraint badges). Both calls are identity when the
+          // schema is plain, which is every parameter in the specs today.
+          const s = p.schema
+            ? collapseNullableVariants(mergeAllOf(p.schema))
+            : undefined;
+          const current = values[p.name] ?? "";
+          // A seeded value (Parcours, Bruno import, a since-removed spec value)
+          // that is not a member would render as the blank placeholder while
+          // still being appended to the URL — keep it in the list so the user
+          // can see and change it.
+          const options = s?.enum?.length
+            ? Array.from(
+                new Set([
+                  ...s.enum.map((v) => String(v)),
+                  ...(current === "" ? [] : [current]),
+                ]),
+              )
+            : [];
+          return (
+            <Field
+              key={p.name}
+              label={p.name}
+              hint={p.description}
+              required={p.required}
+              meta={<ConstraintBadges schema={s} />}
+            >
+              {options.length ? (
+                <Select
+                  value={current}
+                  onValueChange={(v) =>
+                    onChange({ ...values, [p.name]: v === UNSET_PARAM ? "" : v })
+                  }
                 >
-                  <SelectValue placeholder="—" />
-                </SelectTrigger>
-                <SelectContent>
-                  {p.schema.enum.map((v) => (
-                    <SelectItem key={String(v)} value={String(v)}>
-                      {String(v)}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            ) : (
-              <Input
-                value={values[p.name] ?? ""}
-                aria-required={p.required || undefined}
-                onChange={(e) =>
-                  onChange({ ...values, [p.name]: e.target.value })
-                }
-                className="h-8 font-mono text-sm"
-              />
-            )}
-          </Field>
-        ))}
+                  <SelectTrigger
+                    className="w-full"
+                    aria-required={p.required || undefined}
+                  >
+                    <SelectValue placeholder="—" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {/* An optional param must stay unsettable: `""` is filtered
+                        out of the query string by composedUrl. */}
+                    {!p.required && current !== "" && (
+                      <SelectItem
+                        value={UNSET_PARAM}
+                        className="text-muted-foreground"
+                      >
+                        Effacer la sélection
+                      </SelectItem>
+                    )}
+                    {options.map((v) => (
+                      <SelectItem key={v} value={v}>
+                        {v}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              ) : (
+                <Input
+                  value={values[p.name] ?? ""}
+                  aria-required={p.required || undefined}
+                  onChange={(e) =>
+                    onChange({ ...values, [p.name]: e.target.value })
+                  }
+                  className="h-8 font-mono text-sm"
+                />
+              )}
+            </Field>
+          );
+        })}
       </div>
     </div>
   );

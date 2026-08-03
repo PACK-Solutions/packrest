@@ -3,6 +3,7 @@ import type {
   OpenApiOperation,
   OpenApiParameter,
 } from "./types";
+import { isReadOnly, mergeAllOf } from "./schema-normalize";
 
 export interface BodyExample {
   id: string;
@@ -64,18 +65,22 @@ export function defaultFromSchema(schema: JsonSchema | undefined): unknown {
     const pick = variants.find((v) => v.type !== "null") ?? variants[0];
     return defaultFromSchema(pick);
   }
-  if (schema.allOf?.length) {
-    return schema.allOf.reduce<Record<string, unknown>>(
-      (acc, part) => {
-        const v = defaultFromSchema(part);
-        return v && typeof v === "object" && !Array.isArray(v)
-          ? { ...acc, ...(v as Record<string, unknown>) }
-          : acc;
-      },
-      {},
-    );
-  }
+  // Flatten first, exactly like emptyValueFromSchema: the old per-branch reduce
+  // dropped a scalar branch's value and returned `{}`, so an `allOf`-wrapped
+  // enum was exported to Bruno as `"type": {}`.
+  if (schema.allOf?.length) return defaultFromSchema(mergeAllOf(schema));
   const type = Array.isArray(schema.type) ? schema.type[0] : schema.type;
+  // An object composed only via `properties` can lack an explicit `type` —
+  // the same inference collapseNullableVariants makes.
+  if (type === "object" || (!type && schema.properties)) {
+    const obj: Record<string, unknown> = {};
+    const props = schema.properties ?? {};
+    for (const [key, sub] of Object.entries(props)) {
+      if (isReadOnly(sub)) continue;
+      obj[key] = defaultFromSchema(sub);
+    }
+    return obj;
+  }
   switch (type) {
     case "string":
       return "";
@@ -86,15 +91,6 @@ export function defaultFromSchema(schema: JsonSchema | undefined): unknown {
       return false;
     case "array":
       return [];
-    case "object": {
-      const obj: Record<string, unknown> = {};
-      const props = schema.properties ?? {};
-      for (const [key, sub] of Object.entries(props)) {
-        if (sub.readOnly) continue;
-        obj[key] = defaultFromSchema(sub);
-      }
-      return obj;
-    }
     case "null":
       return null;
     default:
@@ -120,32 +116,28 @@ export function emptyValueFromSchema(schema: JsonSchema | undefined): unknown {
     const pick = variants.find((v) => v.type !== "null") ?? variants[0];
     return emptyValueFromSchema(pick);
   }
-  if (schema.allOf?.length) {
-    return schema.allOf.reduce<Record<string, unknown>>((acc, part) => {
-      const v = emptyValueFromSchema(part);
-      return v && typeof v === "object" && !Array.isArray(v)
-        ? { ...acc, ...(v as Record<string, unknown>) }
-        : acc;
-    }, {});
-  }
+  // Flatten first: an `allOf`-wrapped *scalar* (the `{description, allOf:
+  // [$ref SomeEnum]}` idiom) must stay blank, not become a stray `{}` in the
+  // seeded body. Objects are unaffected — the merged `properties` rebuild the
+  // same keys.
+  if (schema.allOf?.length) return emptyValueFromSchema(mergeAllOf(schema));
   const type = Array.isArray(schema.type) ? schema.type[0] : schema.type;
-  switch (type) {
-    case "array":
-      return [];
-    case "object": {
-      const obj: Record<string, unknown> = {};
-      const props = schema.properties ?? {};
-      for (const [key, sub] of Object.entries(props)) {
-        if (sub.readOnly) continue;
-        obj[key] = emptyValueFromSchema(sub);
-      }
-      return obj;
+  // An object composed only via `properties`/`allOf` can lack an explicit
+  // `type` — the same inference collapseNullableVariants makes. Without it a
+  // merged `allOf: [$ref Party, $ref ContactInfo]` would seed nothing at all.
+  if (type === "object" || (!type && schema.properties)) {
+    const obj: Record<string, unknown> = {};
+    const props = schema.properties ?? {};
+    for (const [key, sub] of Object.entries(props)) {
+      if (isReadOnly(sub)) continue;
+      obj[key] = emptyValueFromSchema(sub);
     }
-    // string / number / integer / boolean / null → leave blank (undefined),
-    // so JSON.stringify omits the key until the user fills it.
-    default:
-      return undefined;
+    return obj;
   }
+  if (type === "array") return [];
+  // string / number / integer / boolean / null → leave blank (undefined),
+  // so JSON.stringify omits the key until the user fills it.
+  return undefined;
 }
 
 // Value for a freshly-added array element. A scalar item gets a *typed* empty
@@ -157,10 +149,16 @@ export function emptyValueFromSchema(schema: JsonSchema | undefined): unknown {
 // leaves still start blank/omitted.
 export function blankArrayItem(schema: JsonSchema | undefined): unknown {
   if (!schema) return "";
-  if (schema.const !== undefined) return schema.const;
-  if (schema.oneOf || schema.anyOf || schema.allOf) return emptyValueFromSchema(schema);
-  const type = Array.isArray(schema.type) ? schema.type[0] : schema.type;
-  if (type === "object" || type === "array") return emptyValueFromSchema(schema);
+  // Flatten `allOf` first so a *wrapped* scalar (`items: {description: …,
+  // allOf: [$ref DocumentType]}`) still gets its typed empty. Deferring the
+  // whole wrapper to emptyValueFromSchema would hand back `undefined` → `null`.
+  const eff = schema.allOf?.length ? mergeAllOf(schema) : schema;
+  if (eff.const !== undefined) return eff.const;
+  if (eff.oneOf || eff.anyOf) return emptyValueFromSchema(eff);
+  const type = Array.isArray(eff.type) ? eff.type[0] : eff.type;
+  if (type === "object" || type === "array" || (!type && eff.properties)) {
+    return emptyValueFromSchema(eff);
+  }
   if (type === "integer" || type === "number") return 0;
   if (type === "boolean") return false;
   return ""; // string / untyped

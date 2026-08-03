@@ -7,7 +7,7 @@ import Field from "@/components/Field";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { cn, formatFileSize } from "@/lib/utils";
 import type { JsonSchema } from "@/lib/types";
-import { partitionRequiredFirst } from "@/lib/schema-normalize";
+import { isReadOnly, partitionRequiredFirst } from "@/lib/schema-normalize";
 
 interface Props {
   schema: JsonSchema;
@@ -58,7 +58,7 @@ export default function MultipartBodySection({
   const owners = anyOfRequiredNames(schema);
   // Required fields first, then optional — shared with the JSON body form.
   const entries = partitionRequiredFirst(
-    Object.entries(props).filter(([, sub]) => !sub.readOnly),
+    Object.entries(props).filter(([, sub]) => !isReadOnly(sub)),
     required,
   );
 

@@ -16,6 +16,7 @@ import Field, { FieldHint, ConstraintBadges } from "@/components/Field";
 import type { JsonSchema } from "@/lib/types";
 import {
   collapseNullableVariants,
+  isReadOnly,
   mergeAllOf,
   partitionRequiredFirst,
 } from "@/lib/schema-normalize";
@@ -24,6 +25,10 @@ import { humanizeKey } from "@/lib/humanize";
 import { cn } from "@/lib/utils";
 import { useFieldOptions } from "@/components/FieldOptionsContext";
 import FieldCombobox from "@/components/FieldCombobox";
+
+// Sentinel value for the enum <Select>'s "clear" row — Radix throws on an
+// empty <SelectItem value="">.
+const UNSET = "__unset__";
 
 interface Props {
   schema: JsonSchema;
@@ -37,6 +42,10 @@ interface Props {
    *  independent of ancestor optionality. Drives clear-to-"" vs omit-key so an
    *  optional ancestor never changes the payload shape. Defaults to `required`. */
   declaredRequired?: boolean;
+  /** Set by ArrayField: this field IS an array element, so there is no key to
+   *  omit — clearing must fall back to a typed blank, never `undefined`
+   *  (which `JSON.stringify` would emit as `null` inside the array). */
+  arrayItem?: boolean;
 }
 
 // Recursive renderer. Each subschema picks a control:
@@ -59,6 +68,7 @@ export default function SchemaField({
   name,
   required,
   declaredRequired,
+  arrayItem,
 }: Props) {
   const effective = useMemo(
     () => collapseNullableVariants(mergeAllOf(schema)),
@@ -112,12 +122,27 @@ export default function SchemaField({
       <Field label={label} hint={hint} required={required} meta={meta}>
         <Select
           value={current}
-          onValueChange={(v) => onChange(coerceString(v, effective))}
+          onValueChange={(v) =>
+            v === UNSET
+              ? // `""` is never a valid enum member — unlike the free-text
+                // branch below, a cleared enum must leave NO value behind. An
+                // object property is omitted from the payload; an array element
+                // reverts to the typed blank a fresh row would carry.
+                onChange(arrayItem ? blankArrayItem(effective) : undefined)
+              : onChange(coerceString(v, effective))
+          }
         >
           <SelectTrigger className="w-full" aria-required={required || undefined}>
             <SelectValue placeholder="—" />
           </SelectTrigger>
           <SelectContent>
+            {/* Radix rejects an empty item value, so clearing goes through a
+                sentinel — without it a picked enum can never be unset. */}
+            {!required && current !== "" && (
+              <SelectItem value={UNSET} className="text-muted-foreground">
+                Effacer la sélection
+              </SelectItem>
+            )}
             {stringEnum.map((opt) => (
               <SelectItem key={opt} value={opt}>
                 {opt}
@@ -324,7 +349,7 @@ function ObjectField({
   // non-developers can spot what they must fill when the spec's generated
   // `properties` are alphabetised. Shared with the multipart form.
   const visible = partitionRequiredFirst(
-    Object.entries(props).filter(([, sub]) => !sub.readOnly),
+    Object.entries(props).filter(([, sub]) => !isReadOnly(sub)),
     requiredSet,
   );
   return (
@@ -389,6 +414,7 @@ function ArrayField({
                   onChange(copy);
                 }}
                 name={`#${idx}`}
+                arrayItem
               />
             </div>
             <Button
@@ -762,7 +788,10 @@ function toDatetimeLocal(value: string): string {
 
 function coerceString(raw: string, schema: JsonSchema): unknown {
   if (raw === "") return null;
-  if (schema.enum?.includes(raw)) return raw;
+  // The <Select> hands back String(option); give the payload the value as the
+  // schema declares it, so a numeric/boolean enum stays typed.
+  const member = schema.enum?.find((e) => String(e) === raw);
+  if (member !== undefined) return member;
   if (schema.type === "integer" || schema.type === "number") {
     const n = Number(raw);
     return Number.isNaN(n) ? raw : n;
