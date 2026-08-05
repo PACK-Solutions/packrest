@@ -43,6 +43,7 @@ import type {
 } from "@/lib/types";
 import { buildManagedHeaders } from "@/lib/curl";
 import { formatUploadSize } from "@/lib/multipart";
+import { flattenLeaves, getAtPath, setAtPath } from "@/lib/json-path";
 import {
   bodyHasEditableFields,
   collapseNullableVariants,
@@ -58,11 +59,16 @@ const isMac =
   typeof navigator !== "undefined" && /Mac/.test(navigator.platform);
 
 // Narrow an unknown JSON value to a plain object, so a partial seed body can be
-// shallow-merged into the current body without wiping fields the user filled.
+// merged into the current body without wiping fields the user filled.
 function asObjectRecord(v: unknown): Record<string, unknown> | null {
   return typeof v === "object" && v !== null && !Array.isArray(v)
     ? (v as Record<string, unknown>)
     : null;
+}
+
+// A value the seed may overwrite: nothing has been entered there yet.
+function isBlank(v: unknown): boolean {
+  return v === undefined || v === "" || v === null;
 }
 
 interface Props {
@@ -306,12 +312,16 @@ export default function RequestBuilder(props: Props) {
   // reach the already-open form — the component is keyed only by step id, so it
   // does not remount on an edit); the /collections importer instead writes to
   // sessionStorage and is applied once on mount. Keyed on the seed's content so
-  // a correction re-seeds, and the body is shallow-merged so fields the user
-  // has since filled are never wiped.
+  // a correction re-seeds, and the body is merged leaf by leaf so fields the
+  // user has since filled are never wiped.
   const seedSignature = seed ? JSON.stringify(seed) : "";
   // Values we last wrote from the seed, per field — so a re-seed (triggered by a
   // context edit) only overwrites a field the user hasn't since changed (still
   // blank, or still equal to what we seeded), never a value they retyped.
+  // The body map is keyed by LEAF PATH (lib/json-path), so a nested contract
+  // property is reachable: the beneficiary clause is an object, and seeding it
+  // means writing `beneficiary_clause.content` and
+  // `beneficiary_clause.date_of_effect` independently.
   const seededRef = useRef<{
     params: Record<string, string>;
     body: Record<string, unknown>;
@@ -357,18 +367,23 @@ export default function RequestBuilder(props: Props) {
         if (!p || !b) {
           // Non-object seed/body: adopt the seed only when nothing is entered.
           if (p == null) {
-            seededRef.current.body = {};
+            // Record the adopted leaves, so a later context correction can still
+            // refresh the ones the user hasn't touched (an empty record here
+            // would pin every field for good).
+            seededRef.current.body = flattenLeaves(seedBody);
             return seedBody;
           }
           return prev;
         }
-        const next = { ...p };
-        for (const [k, v] of Object.entries(b)) {
-          const cur = p[k];
-          const lastSeeded = seededRef.current.body[k];
-          if (cur === undefined || cur === "" || cur === null || cur === lastSeeded)
-            next[k] = v;
-          seededRef.current.body[k] = v;
+        // Leaf by leaf, so a seed that only fills `beneficiary_clause.content`
+        // leaves a `date_of_effect` the user retyped alone — and so a whole
+        // object arriving from the seed no longer clobbers its siblings.
+        let next: unknown = p;
+        for (const [path, v] of Object.entries(flattenLeaves(b))) {
+          const cur = getAtPath(next, path);
+          const lastSeeded = seededRef.current.body[path];
+          if (isBlank(cur) || cur === lastSeeded) next = setAtPath(next, path, v);
+          seededRef.current.body[path] = v;
         }
         return next;
       });

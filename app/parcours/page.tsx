@@ -55,7 +55,7 @@ import {
   srTypeLabel,
   type ContextSrKey,
 } from "@/lib/parcours-decisions";
-import type { OpenApiDocument } from "@/lib/types";
+import type { JsonSchema, OpenApiDocument } from "@/lib/types";
 import type { ProxyResponse } from "@/lib/http";
 import type { ImportSeed } from "@/lib/bruno";
 import {
@@ -90,6 +90,7 @@ import {
   runParcoursAuto,
   stepNeedsFund,
 } from "@/lib/parcours-auto";
+import type { SchemaIssue } from "@/lib/schema-sample";
 
 interface LoadedEntry {
   /** The step this entry was resolved for — guards against a stale async
@@ -249,12 +250,16 @@ function dropOptionDependentDrafts(
 function semiPrefillDraft(
   step: ParcoursStep,
   state: Pick<ParcoursState, "done" | "semiPrefilled" | "values" | "autoSeed">,
+  bodySchema: JsonSchema | undefined,
 ): StepDraft | null {
   if (step.selects || step.custom || stepNeedsFund(step)) return null;
   if (state.done.includes(step.id)) return null;
   if ((state.semiPrefilled ?? []).includes(step.id)) return null;
   if (!state.autoSeed) return null;
-  return buildAutoDraftForStep(step, state.autoSeed, state.values);
+  // `bodySchema` is what makes the pre-fill contract-derived rather than
+  // hand-written; without it (an unsynced API) only the seed and the step's
+  // overrides are filled, as before.
+  return buildAutoDraftForStep(step, state.autoSeed, state.values, { bodySchema });
 }
 
 function Parcours() {
@@ -372,6 +377,21 @@ function Parcours() {
       cancelled = true;
     };
   }, [activeStep]);
+
+  // The active step's dereferenced JSON request schema — the contract its body is
+  // built from. The endpoint resolution above already holds it, so the
+  // semi-automatic pre-fill reads it from there instead of re-loading the spec.
+  const activeBodySchema = useMemo(
+    () =>
+      loaded && activeStep && loaded.stepId === activeStep.id
+        ? loaded.entry.operation.requestBody?.content?.["application/json"]?.schema
+        : undefined,
+    [loaded, activeStep],
+  );
+  // `setMode` pre-fills the active step synchronously and must not be re-created
+  // on every schema change, so it reads the schema through a ref.
+  const activeBodySchemaRef = useRef<JsonSchema | undefined>(undefined);
+  activeBodySchemaRef.current = activeBodySchema;
 
   // Fetch dropdown options for the active step's `fieldOptions` (e.g. the chosen
   // product's funds) so matching leaf inputs in the body form become searchable
@@ -677,7 +697,9 @@ function Parcours() {
       // steps (async fund list) and steps with nothing to fill are left to it.
       if (mode === "semi" && def) {
         const step = def.steps.find((s) => s.id === prev.currentStepId);
-        const draft = step ? semiPrefillDraft(step, next) : null;
+        const draft = step
+          ? semiPrefillDraft(step, next, activeBodySchemaRef.current)
+          : null;
         if (step && draft) {
           next.drafts = { ...next.drafts, [step.id]: draft };
           next.semiPrefilled = [...(next.semiPrefilled ?? []), step.id];
@@ -700,6 +722,11 @@ function Parcours() {
     if (state.done.includes(step.id)) return;
     if ((state.semiPrefilled ?? []).includes(step.id)) return; // filled once
     if (!state.autoSeed) return;
+    // Wait for the endpoint resolution: the pre-fill happens ONCE per step, so
+    // running it before the contract is available would permanently leave the
+    // form with only the seeded fields. A spec that fails to load resolves too
+    // (`loaded` stays null), and the pre-fill then proceeds without a schema.
+    if (loadingEntry) return;
     if (stepNeedsFund(step)) {
       // The fund catalogue is fetched into `fieldOpts` on step entry; wait only
       // while it is still resolving for THIS step. Once resolved with no fund
@@ -711,12 +738,23 @@ function Parcours() {
       const fundId = funds[Math.floor(Math.random() * funds.length)].value;
       recordPrefill(
         step.id,
-        buildAutoDraftForStep(step, state.autoSeed, state.values, { fundId }),
+        buildAutoDraftForStep(step, state.autoSeed, state.values, {
+          fundId,
+          bodySchema: activeBodySchema,
+        }),
       );
       return;
     }
-    recordPrefill(step.id, semiPrefillDraft(step, state));
-  }, [def, activeStep, state, fieldOpts, recordPrefill]);
+    recordPrefill(step.id, semiPrefillDraft(step, state, activeBodySchema));
+  }, [
+    def,
+    activeStep,
+    state,
+    fieldOpts,
+    recordPrefill,
+    loadingEntry,
+    activeBodySchema,
+  ]);
 
   // --- mode automatique ------------------------------------------------------
   // Runs every remaining step end to end with random data (lib/parcours-auto).
@@ -731,6 +769,13 @@ function Parcours() {
     res: ProxyResponse | null;
     message: string;
   } | null>(null);
+  // Where a step's built body disagreed with the synced contract. Collected over
+  // the whole run and shown in the mode panel: it is a diagnostic, not a failure,
+  // and it is what turns "the API answered 422" into "the contract renamed this
+  // field / made it an object".
+  const [autoDrift, setAutoDrift] = useState<
+    { stepTitle: string; issues: SchemaIssue[] }[]
+  >([]);
   const autoAbortRef = useRef<AbortController | null>(null);
   // Abort a run left in flight if the page unmounts.
   useEffect(() => () => autoAbortRef.current?.abort(), []);
@@ -744,6 +789,7 @@ function Parcours() {
     const controller = new AbortController();
     autoAbortRef.current = controller;
     setAutoError(null);
+    setAutoDrift([]);
     setAutoStatus({ phase: "running" });
     void runParcoursAuto(
       def,
@@ -771,6 +817,8 @@ function Parcours() {
             return next;
           });
         },
+        onDrift: (step, issues) =>
+          setAutoDrift((prev) => [...prev, { stepTitle: step.title, issues }]),
       },
     ).then((result) => {
       autoAbortRef.current = null;
@@ -965,6 +1013,7 @@ function Parcours() {
                 optionalSteps={autoOptionalChoices}
                 selectedOptional={state.autoOptional ?? []}
                 onToggleOptional={toggleAutoOptional}
+                drift={autoDrift}
               />
               <ParcoursStepper
                 def={def}

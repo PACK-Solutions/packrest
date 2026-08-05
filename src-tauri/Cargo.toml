@@ -1,6 +1,6 @@
 [package]
 name = "packrest"
-version = "1.4.1"
+version = "1.5.0"
 description = "PackRest — client REST guidé pour les APIs Pack Solutions"
 authors = ["Pack Solutions"]
 edition = "2021"

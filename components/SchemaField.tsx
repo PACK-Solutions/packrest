@@ -217,6 +217,7 @@ export default function SchemaField({
           hint={hint}
           required={required}
           meta={meta}
+          readOnly={isReadOnly(effective)}
         />
       );
     case "object":
@@ -385,6 +386,7 @@ function ArrayField({
   hint,
   required,
   meta,
+  readOnly,
 }: {
   schema: JsonSchema;
   value: unknown;
@@ -393,9 +395,34 @@ function ArrayField({
   hint?: string;
   required?: boolean;
   meta?: ReactNode;
+  readOnly?: boolean;
 }) {
   const items = Array.isArray(value) ? value : [];
   const itemSchema = schema.items ?? {};
+  const minItems = schema.minItems ?? 0;
+  const maxItems = schema.maxItems;
+  const atMax = maxItems !== undefined && items.length >= maxItems;
+
+  // Open at the cardinality the contract declares. An array with `minItems >= 1`
+  // used to start with zero rows, so the key serialised as absent and the user
+  // had to notice the badge and press « Ajouter » to satisfy a constraint the
+  // contract states — the same class of silent divergence as a field whose shape
+  // changed. Rows are blank, so "forms start empty" still holds. Self-emitting
+  // like ConstField, and skipped when read-only (nothing to send).
+  const emittedRef = useRef(false);
+  useEffect(() => {
+    if (readOnly || emittedRef.current) return;
+    if (minItems < 1 || items.length >= minItems) return;
+    emittedRef.current = true;
+    onChange([
+      ...items,
+      ...Array.from({ length: minItems - items.length }, () =>
+        blankArrayItem(itemSchema),
+      ),
+    ]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [readOnly, minItems]);
+
   return (
     <Field label={label ?? ""} hint={hint} required={required} meta={meta}>
       <div className="space-y-2">
@@ -433,6 +460,10 @@ function ArrayField({
           type="button"
           variant="outline"
           size="sm"
+          // Locked at maxItems, like MapField at maxProperties — the constraint
+          // badge alone let the user build a body the server would reject.
+          disabled={atMax}
+          title={atMax ? `Maximum ${maxItems} élément(s)` : undefined}
           onClick={() => onChange([...items, blankArrayItem(itemSchema)])}
           className="border-dashed text-xs"
         >

@@ -4,12 +4,15 @@ import {
   bodyHasContent,
   buildSeedForStep,
   DEFAULT_BENEFICIARY_CLAUSE,
+  defaultClauseDateOfEffect,
   defaultContextValues,
   defaultDateOfEffect,
   draftWithoutSeededFields,
   extractProduced,
   initialState,
+  isFutureDate,
   mergeContextValues,
+  migrateContextValues,
   SOUSCRIPTION_PARCOURS,
   type ContextValues,
   type ParcoursDef,
@@ -36,24 +39,39 @@ const res = (body: unknown, status = 200): ProxyResponse => ({
 // context values, seeded with a default and captured back from each contract
 // response — so an edited value is what the next contract step sends.
 describe("contract submission fields", () => {
-  it("starts a run with a usable date_of_effect + beneficiary_clause", () => {
+  it("starts a run with a usable date_of_effect + beneficiary clause", () => {
     const values = initialState(SOUSCRIPTION_PARCOURS).values;
     expect(values.date_of_effect).toMatch(/^\d{4}-\d{2}-\d{2}$/);
     expect(values.date_of_effect).toBe(defaultDateOfEffect());
-    expect(values.beneficiary_clause).toBe(DEFAULT_BENEFICIARY_CLAUSE);
+    expect(values.beneficiary_clause_content).toBe(DEFAULT_BENEFICIARY_CLAUSE);
+    // The clause's own date must be STRICTLY later than the request date, or the
+    // contract API answers 422 OUT_OF_RANGE — unlike the contract's own, which is
+    // today.
+    expect(values.beneficiary_clause_date_of_effect).toBe(
+      defaultClauseDateOfEffect(),
+    );
+    expect(isFutureDate(values.beneficiary_clause_date_of_effect)).toBe(true);
+    expect(values.beneficiary_clause_date_of_effect).not.toBe(
+      values.date_of_effect,
+    );
   });
 
-  it("create-contract seeds the context ids plus both submission fields", () => {
+  it("create-contract seeds the context ids plus the submission fields, the clause as an OBJECT", () => {
     const seed = buildSeedForStep(stepById("create-contract"), {
       ...defaultContextValues(),
       product_id: "prod-1",
       person_id: "p-1",
     });
+    // The contract requires `content` AND `date_of_effect` whenever the key is
+    // present: two path mappings build one whole clause.
     expect(seed?.body).toEqual({
       product_id: "prod-1",
       subscriber_id: "p-1",
       date_of_effect: defaultDateOfEffect(),
-      beneficiary_clause: DEFAULT_BENEFICIARY_CLAUSE,
+      beneficiary_clause: {
+        content: DEFAULT_BENEFICIARY_CLAUSE,
+        date_of_effect: defaultClauseDateOfEffect(),
+      },
     });
   });
 
@@ -62,31 +80,42 @@ describe("contract submission fields", () => {
     const seed = buildSeedForStep(stepById("update-contract"), {
       ...defaultContextValues(),
       contract_id: "c-1",
-      beneficiary_clause: edited,
+      beneficiary_clause_content: edited,
+      beneficiary_clause_date_of_effect: "2027-02-01",
       date_of_effect: "2027-01-01",
     });
     expect(seed?.params).toEqual({ contract_id: "c-1" });
     expect(seed?.body).toEqual({
       date_of_effect: "2027-01-01",
-      beneficiary_clause: edited,
+      beneficiary_clause: { content: edited, date_of_effect: "2027-02-01" },
     });
   });
 
-  it("captures back what the contract responses echo, so the update step reuses it", () => {
+  it("captures the clause in force from the beneficiary_clauses HISTORY (last entry)", () => {
+    // The clause is written through the singular `beneficiary_clause` but read
+    // back only from the array, ordered by date_of_effect ascending.
     const created = extractProduced(
       stepById("create-contract"),
       res({
         id: "c-1",
         date_of_effect: "2027-03-01",
-        beneficiary_clause: "Mes enfants, par parts égales.",
+        beneficiary_clauses: [
+          { content: "Ancienne clause", date_of_effect: "2026-01-01" },
+          { content: "Mes enfants, par parts égales.", date_of_effect: "2027-03-02" },
+        ],
       }),
     );
     expect(created).toMatchObject({
       contract_id: "c-1",
       date_of_effect: "2027-03-01",
-      beneficiary_clause: "Mes enfants, par parts égales.",
+      beneficiary_clause_content: "Mes enfants, par parts égales.",
     });
-    // A response that echoes neither leaves the context value untouched.
+    // The clause's own date is deliberately NOT captured: an applied clause's
+    // date_of_effect is today or earlier, so re-sending it would 422.
+    expect(created.beneficiary_clause_date_of_effect).toBeUndefined();
+    // A response that echoes nothing leaves the context values untouched — the
+    // 202 path (ACCEPTED contract) carries the pending clause in the embedded SR
+    // and leaves the history alone.
     expect(
       extractProduced(stepById("create-contract"), res({ id: "c-2" })),
     ).toEqual({ contract_id: "c-2" });
@@ -96,10 +125,60 @@ describe("contract submission fields", () => {
     const seed = buildSeedForStep(stepById("update-contract"), {
       contract_id: "c-1",
       date_of_effect: "",
-      beneficiary_clause: "",
+      beneficiary_clause_content: "",
+      beneficiary_clause_date_of_effect: "",
     });
     expect(seed?.params).toEqual({ contract_id: "c-1" });
     expect(seed?.body).toBeUndefined();
+  });
+
+  it("omits the clause key entirely when only one of its two leaves is set", () => {
+    // A partial clause would be rejected (both are mandatory once the key is
+    // present) — but a path seed only writes the leaves it has, so the caller
+    // sees exactly what the context holds rather than a silently invalid pair.
+    const seed = buildSeedForStep(stepById("update-contract"), {
+      contract_id: "c-1",
+      beneficiary_clause_content: "Mes héritiers",
+    });
+    expect(seed?.body).toEqual({
+      beneficiary_clause: { content: "Mes héritiers" },
+    });
+  });
+
+  it("migrates a session persisted when the clause was still a plain string", () => {
+    const legacy = { beneficiary_clause: "Mon conjoint" } as ContextValues;
+    const migrated = migrateContextValues(legacy);
+    expect(migrated.beneficiary_clause_content).toBe("Mon conjoint");
+    expect((migrated as Record<string, unknown>).beneficiary_clause).toBeUndefined();
+    // A missing (or stale) clause date is refreshed to a future one.
+    expect(isFutureDate(migrated.beneficiary_clause_date_of_effect)).toBe(true);
+  });
+
+  it("refreshes a clause date left behind by a long session, keeping a valid one", () => {
+    const stale = migrateContextValues({
+      beneficiary_clause_date_of_effect: "2020-01-01",
+    });
+    expect(stale.beneficiary_clause_date_of_effect).toBe(
+      defaultClauseDateOfEffect(),
+    );
+    const kept = migrateContextValues({
+      beneficiary_clause_date_of_effect: "2099-01-01",
+    });
+    expect(kept.beneficiary_clause_date_of_effect).toBe("2099-01-01");
+  });
+
+  it("never resurrects a clause date the user emptied on purpose", () => {
+    // `""` means « don't send this » (buildSeedForStep omits the leaf), and every
+    // other context value honours that. Refreshing it on each load would undo the
+    // user's edit on every navigation.
+    expect(
+      migrateContextValues({ beneficiary_clause_date_of_effect: "" })
+        .beneficiary_clause_date_of_effect,
+    ).toBe("");
+    // An ABSENT key still gets a usable default.
+    expect(
+      migrateContextValues({}).beneficiary_clause_date_of_effect,
+    ).toBe(defaultClauseDateOfEffect());
   });
 
   it("keeps the seed stable across calls (the RequestBuilder keys its effect on it)", () => {
@@ -332,6 +411,29 @@ describe("draftWithoutSeededFields", () => {
     ).toEqual({ body: "raw" });
   });
 
+  it("keeps a map with numeric keys as an object", () => {
+    // The regression: staleness pruning used to flatten the body to path strings
+    // and rebuild it, so `{"1": "a"}` came back as the array `[{}, "a"]` — the
+    // body form's MapField accepts any key, including numeric ones.
+    const draft = { body: { extra: { "1": "a", "2": "b" } }, seeded: {} };
+    expect(
+      draftWithoutSeededFields(stepById("create-individual"), {}, draft)?.body,
+    ).toEqual({ extra: { "1": "a", "2": "b" } });
+  });
+
+  it("keeps array element positions while pruning a stale leaf inside one", () => {
+    const step = stepById("create-periodic-premium");
+    const draft = {
+      body: { allocations: { funds: [{ fund_id: "f-1" }, { fund_id: "f-2" }] } },
+      seeded: {},
+    };
+    expect(
+      draftWithoutSeededFields(step, { contract_id: "c-1" }, draft)?.body,
+    ).toEqual({
+      allocations: { funds: [{ fund_id: "f-1" }, { fund_id: "f-2" }] },
+    });
+  });
+
   it("leaves a step with no seed mapping untouched", () => {
     const draft = { body: { first_name: "Alice" } };
     expect(
@@ -341,22 +443,29 @@ describe("draftWithoutSeededFields", () => {
 
   it("keeps a value the user typed over, drops the pre-fill left untouched", () => {
     // The snapshot was seeded with the context defaults; the user then replaced
-    // the clause. On return, the edited clause must survive while the untouched
-    // date and the stale ids are refreshed from the live context.
+    // the clause's CONTENT. On return, that edit must survive while its untouched
+    // sibling date, the untouched contract date and the stale ids are refreshed
+    // from the live context — which only works because staleness is compared per
+    // leaf path, not per top-level key (the clause is one object carrying both).
     const seededDefault = defaultDateOfEffect();
+    const clauseDate = defaultClauseDateOfEffect();
     const draft = {
       body: {
         product_id: "prod-OLD",
         subscriber_id: "person-OLD",
         date_of_effect: seededDefault,
-        beneficiary_clause: "Mon conjoint survivant",
+        beneficiary_clause: {
+          content: "Mon conjoint survivant",
+          date_of_effect: clauseDate,
+        },
       },
       seeded: {
         body: {
           product_id: "prod-OLD",
           subscriber_id: "person-OLD",
           date_of_effect: seededDefault,
-          beneficiary_clause: DEFAULT_BENEFICIARY_CLAUSE,
+          "beneficiary_clause.content": DEFAULT_BENEFICIARY_CLAUSE,
+          "beneficiary_clause.date_of_effect": clauseDate,
         },
       },
     };
@@ -366,12 +475,13 @@ describe("draftWithoutSeededFields", () => {
         product_id: "prod-NEW",
         person_id: "person-NEW",
         date_of_effect: seededDefault,
-        beneficiary_clause: DEFAULT_BENEFICIARY_CLAUSE,
+        beneficiary_clause_content: DEFAULT_BENEFICIARY_CLAUSE,
+        beneficiary_clause_date_of_effect: clauseDate,
       },
       draft,
     );
     expect(kept?.body).toEqual({
-      beneficiary_clause: "Mon conjoint survivant",
+      beneficiary_clause: { content: "Mon conjoint survivant" },
     });
   });
 

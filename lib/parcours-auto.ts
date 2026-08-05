@@ -36,10 +36,18 @@ import {
   frIban,
   frLastName,
   frStreetLine,
-  randomAmountCents,
   tinNumber,
   toLocalIsoDate,
 } from "@/lib/fake-fields";
+import { deepMerge } from "@/lib/json-path";
+import {
+  sampleFromSchema,
+  validateAgainstSchema,
+  type SchemaIssue,
+} from "@/lib/schema-sample";
+import { money, parcoursHints } from "@/lib/parcours-hints";
+import { findEndpoint, loadSpec } from "@/lib/specs";
+import type { JsonSchema } from "@/lib/types";
 
 // --- identity ---------------------------------------------------------------
 
@@ -151,12 +159,8 @@ function newRunCtx(
   return { ...newAutoSeed(drafts), values: { ...values } };
 }
 
-// The holder name must match the person: prefer the context's person_name
-// (set when the person was created — possibly in an earlier run or by hand),
-// falling back to this run's generated identity.
-function holderName(ctx: AutoRunCtx): string {
-  return ctx.values.person_name || ctx.identity.fullName;
-}
+// (`holderName` moved to lib/parcours-hints.ts, which now owns every value the
+//  generated bodies draw on — including the bank account's holder name.)
 
 // --- declarative per-step plan ------------------------------------------------
 
@@ -167,30 +171,29 @@ interface AutoStepPlan {
   /** Path params the step's `seedFrom` cannot supply, merged OVER the seed ones
    *  — the CRS record is keyed by a `country_code` no earlier step captures. */
   params?: (ctx: AutoRunCtx) => Record<string, string>;
-  /** Random fields for the step's JSON body; merged OVER the seed body
-   *  (buildSeedForStep supplies product_id / subscriber_id / payment_method_id). */
+  /** BUSINESS-RULE overrides for the step's JSON body, merged over the
+   *  schema-derived body and the seed. Only what the contract cannot express
+   *  belongs here (which enum member this parcours files, rates that must total
+   *  100%); everything structural comes from the schema. */
   body?: (ctx: AutoRunCtx, extras: AutoExtras) => Record<string, unknown>;
+  /** Paths the step must NOT send even though the contract allows them — a
+   *  field whose server-side default is deliberately preferred. */
+  omit?: string[];
 }
 
 export interface AutoExtras {
   /** Randomly-picked fund for the premium steps (prefetched from the product). */
   fundId?: string;
+  /** The operation's `application/json` request schema, dereferenced. Supplied by
+   *  the caller (`loadStepBodySchema`) rather than fetched here so
+   *  `buildAutoRequest` stays synchronous and unit-testable. Absent → no
+   *  schema-derived body, and the step falls back to seed + overrides alone. */
+  bodySchema?: JsonSchema;
 }
 
 /** The country of fiscal residency the automatic CRS declaration is filed for
  *  (a plausible non-French residency — the point of a CRS record). */
 export const AUTO_CRS_COUNTRY = "BE";
-
-// The run's single address, shared by the principal / correspondence / fiscal
-// address steps (all three POST the same schema).
-function addressBody(ctx: AutoRunCtx): Record<string, unknown> {
-  return {
-    line1: ctx.address.line1,
-    postal_code: ctx.address.postalCode,
-    city: ctx.address.city,
-    country_code: "FR",
-  };
-}
 
 // A FATCA/CRS `tax_identification_number`, NUMBER variant of the oneOf.
 function tin(prefix = ""): Record<string, unknown> {
@@ -205,31 +208,37 @@ function fullAllocation(fundId?: string): Record<string, unknown> {
   };
 }
 
-// A monthly-instalment amount, in cents like every other amount.
-function periodicAmount(): Record<string, unknown> {
-  return { value: randomAmountCents(50, 500), scale: 2, currency: "EUR" };
-}
-
-// Bodies mirror the synced OpenAPI contracts (see the step descriptions in
-// lib/parcours.ts). Steps absent from this table run with the seed alone —
-// person-submit / submit-contract (no body) and the contract steps, whose
-// date_of_effect + beneficiary_clause come from `seedFrom`.
+// What the CONTRACT cannot tell us.
+//
+// A step's body is built by walking its dereferenced request schema
+// (lib/schema-sample) and filling the leaves from the hint registry
+// (lib/parcours-hints) — so field names, nesting, required-ness, enums and
+// formats all come from the synced spec and follow it when it changes. This
+// table only carries the rest:
+//
+//   • which member of an enum this parcours files (FRENCH_RESIDENCY vs FATCA vs
+//     CRS, RECURRENT, MONTHLY, OWN_FUNDS) — a schema lists the options, it
+//     cannot say which one the flow means;
+//   • cross-field rules (allocation rates that must total 100%);
+//   • fields deliberately left to the server's default (`omit`);
+//   • an optional field a step nonetheless chooses to send (the premium updates);
+//   • a path param no earlier step captures (the CRS country).
+//
+// Steps absent from the table run on the generated body plus their `seedFrom`
+// alone: the three address steps, « Créer la personne », « Compte bancaire »,
+// and both contract steps (whose date_of_effect and beneficiary clause are
+// seeded from the context — see CONTRACT_SUBMISSION_SEEDS).
 export const AUTO_PLAN: Record<string, AutoStepPlan> = {
-  "create-individual": {
-    skipIfPresent: "person_id",
-    body: (ctx) => ({
-      first_name: ctx.identity.firstName,
-      last_name: ctx.identity.lastName,
-      birth: { date_of_birth: ctx.identity.birthDate },
-    }),
-  },
-  "person-address": { body: addressBody },
-  // Optional address variants: same address as the principal one — the parcours
-  // exists to exercise the endpoints, and a coherent person beats three
-  // unrelated streets. `address_type` comes from each step's `seedFrom` const.
-  "person-address-correspondence": { body: addressBody },
-  "person-address-fiscal": { body: addressBody },
+  "create-individual": { skipIfPresent: "person_id" },
+  // The three address steps need nothing: AddressCreate requires line1 /
+  // postal_code / city / country_code, all supplied by the hints from the run's
+  // single address, and `address_type` comes from each step's `seedFrom` const.
+  // (Reusing one address across the principal / correspondence / fiscal variants
+  // is deliberate: a coherent person beats three unrelated streets.)
   "person-fiscal": {
+    // `fiscal_type` is a readOnly const discriminator, so the generator omits it;
+    // this record carries no other data, and the API has always been given the
+    // discriminator explicitly.
     body: () => ({ fiscal_type: "FRENCH_RESIDENCY" }),
   },
   // Optional fiscal declarations, filed only when the auto run opts into them:
@@ -238,7 +247,8 @@ export const AUTO_PLAN: Record<string, AutoStepPlan> = {
   "person-fatca": {
     body: () => ({
       fiscal_type: "FATCA",
-      tax_identification_number: tin(),
+      // Optional in the contract; declaring an indicium is the point of a FATCA
+      // record, so this parcours sends one.
       is_pre_existing_contract: false,
       us_indicia: ["US_CITIZENSHIP_OR_GREEN_CARD"],
     }),
@@ -248,45 +258,27 @@ export const AUTO_PLAN: Record<string, AutoStepPlan> = {
     params: () => ({ country_code: AUTO_CRS_COUNTRY }),
     body: () => ({
       fiscal_type: "CRS",
+      // Prefixed so a CRS TIN is distinguishable from the FATCA one in a run.
       tax_identification_number: tin("CRS-"),
+      // Both optional in the contract: a self-certified record is what makes the
+      // declaration meaningful.
       is_self_certification_present: true,
       date_of_self_certification: todayIso(),
     }),
   },
-  "person-bank-account": {
-    body: (ctx) => ({
-      account_holder_name: holderName(ctx),
-      iban: ctx.iban,
-      // The IBAN/BIC live here, on the account: the SEPA payment method carries
-      // neither and only references this account by id. The person API requires
-      // the BIC on creation (the synced contract lists it as a plain property —
-      // the requirement is enforced server-side).
-      bic: ctx.bic,
-      currency: "EUR",
-      date_of_validity_start: todayIso(),
-    }),
-  },
   "create-payment-method": {
     skipIfPresent: "payment_method_id",
-    // No iban/bic: PaymentMethodCreate doesn't define them — the bank details
-    // belong to the bank account, which this references through the
-    // `bank_account_id` its `seedFrom` takes from the context (required).
-    body: () => ({
-      type: "SEPA_DEBIT",
-      mandate_type: "RECURRENT",
-      date_of_validity_start: todayIso(),
-    }),
+    // `type` is a const the generator emits, `bank_account_id` comes from the
+    // step's `seedFrom`, `date_of_validity_start` from the date format. Only the
+    // mandate flavour is a choice.
+    body: () => ({ mandate_type: "RECURRENT" }),
   },
   "list-products": {
     skipIfPresent: "product_id",
     // No body: handled specially by the runner (pause for the user's pick).
   },
-  "create-contract": {
-    skipIfPresent: "contract_id",
-    // No body: product_id / subscriber_id and the submission-required
-    // date_of_effect + beneficiary_clause all come from the step's `seedFrom`.
-  },
-  // (« Mettre à jour le contrat » needs no entry here: its whole body comes from
+  "create-contract": { skipIfPresent: "contract_id" },
+  // (« Mettre à jour le contrat » needs no entry: its whole body comes from
   // `seedFrom`. A freshly created DRAFT contract doesn't reliably carry
   // date_of_effect / beneficiary_clause — creation drops them — so submission
   // fails 422; that normally-optional step sets them explicitly on the DRAFT,
@@ -296,36 +288,31 @@ export const AUTO_PLAN: Record<string, AutoStepPlan> = {
     body: (_ctx, extras) => ({
       // Required at contract submission (« funds source is required »).
       type_of_fund_source: "OWN_FUNDS",
-      amount: {
-        value: randomAmountCents(1000, 10000),
-        scale: 2,
-        currency: "EUR",
-      },
       allocations: fullAllocation(extras.fundId),
     }),
   },
   // The two edit steps of Phase B: partial updates the API accepts only while
   // the contract is still DRAFT. Both sit before « Soumettre le contrat », so an
   // auto run that opts into them edits before submitting (a 409 afterwards).
+  // Their schemas make everything optional, so the generated body is empty and
+  // what to change is entirely this table's call.
   "update-premium": {
     // A new amount only: the allocations (which must keep summing to 100%) stay
     // exactly as created.
-    body: () => ({
-      amount: { value: randomAmountCents(1000, 10000), scale: 2, currency: "EUR" },
-    }),
+    body: () => ({ amount: money(1000, 10000) }),
   },
   "create-periodic-premium": {
     skipIfPresent: "periodic_premium_id",
+    // `date_of_start` is deliberately absent: the contract API then defaults it,
+    // at acceptance, to max(date_of_effect, date_of_acceptance) + 30 days — i.e.
+    // just outside the renunciation window. Any date computed here would instead
+    // be validated against that window whenever the back-office decision lands,
+    // so a decision taken later than the margin we guessed would fail the
+    // acceptance and leave the parcours unfinishable.
+    omit: ["dates.date_of_start"],
     body: (_ctx, extras) => ({
       type_of_fund_source: "OWN_FUNDS",
-      // `date_of_start` is deliberately absent: the contract API then defaults it,
-      // at acceptance, to max(date_of_effect, date_of_acceptance) + 30 days — i.e.
-      // just outside the renunciation window. Any date computed here would instead
-      // be validated against that window whenever the back-office decision lands,
-      // so a decision taken later than the margin we guessed would fail the
-      // acceptance and leave the parcours unfinishable.
       dates: { date_of_end: isoInDays(365 * 5) },
-      periodic_amount: periodicAmount(),
       periodicity: "MONTHLY",
       allocations: fullAllocation(extras.fundId),
     }),
@@ -333,7 +320,7 @@ export const AUTO_PLAN: Record<string, AutoStepPlan> = {
   "update-periodic-premium": {
     // Amount + periodicity only: re-sending `dates` would re-run the
     // renunciation-window validation for no benefit.
-    body: () => ({ periodic_amount: periodicAmount(), periodicity: "QUARTERLY" }),
+    body: () => ({ periodic_amount: money(50, 500), periodicity: "QUARTERLY" }),
   },
 };
 
@@ -378,29 +365,77 @@ export function missingSeedParams(
 
 // --- request building ----------------------------------------------------------
 
+/** The request schema a step's body must fit: the operation's
+ *  `application/json` request body, already dereferenced by `loadSpec`. Returns
+ *  undefined for a body-less operation (or an unsynced API), which callers pass
+ *  straight through — `buildAutoRequest` then falls back to seed + overrides.
+ *
+ *  Async, hence separate from `buildAutoRequest`: keeping the request builder
+ *  synchronous is what lets it stay a pure, unit-testable function. `loadSpec`
+ *  caches per API, so this is one map lookup after the first call. */
+export async function loadStepBodySchema(
+  step: ParcoursStep,
+): Promise<JsonSchema | undefined> {
+  const doc = await loadSpec(step.apiId);
+  if (!doc) return undefined;
+  const entry = findEndpoint(doc, step.apiId, step.operationId);
+  return entry?.operation.requestBody?.content?.["application/json"]?.schema;
+}
+
 // Exported for tests: the exact {pathParams, body} an auto-run sends for a step.
+//
+// Three layers, lowest precedence first:
+//   1. the CONTRACT — every required leaf of `extras.bodySchema`, valued from the
+//      hint registry. This is what makes a spec change land automatically.
+//   2. the SEED — ids and user-settled values from the parcours context, by path
+//      (`beneficiary_clause.content`), so a real id always beats a generated one.
+//   3. the OVERRIDES — AUTO_PLAN's business rules, which must win outright.
+//
+// Merging is deep for objects and wholesale for arrays (see `deepMerge`): a
+// generated `allocations` skeleton is refined by the override's fund list rather
+// than blended with it.
 export function buildAutoRequest(
   step: ParcoursStep,
   ctx: AutoRunCtx,
   extras: AutoExtras = {},
 ): { pathParams: Record<string, string>; body: Record<string, unknown> | null } {
   const plan = AUTO_PLAN[step.id];
-  const seed = buildSeedForStep(step, ctx.values);
+  const seed = buildSeedForStep(step, ctx.values, extras.bodySchema);
   const pathParams = { ...(seed?.params ?? {}), ...(plan?.params?.(ctx) ?? {}) };
-  const seedBody = (seed?.body ?? {}) as Record<string, unknown>;
-  const planBody = plan?.body?.(ctx, extras);
-  const merged = { ...seedBody, ...(planBody ?? {}) };
+  const generated = sampleFromSchema(extras.bodySchema, {
+    hints: parcoursHints(ctx, extras),
+    ...(plan?.omit ? { omit: plan.omit } : {}),
+  });
+  const merged = deepMerge(
+    generated,
+    seed?.body,
+    plan?.body?.(ctx, extras),
+  ) as Record<string, unknown> | undefined;
   return {
     pathParams,
-    body: Object.keys(merged).length ? merged : null,
+    body: merged && Object.keys(merged).length ? merged : null,
   };
+}
+
+/** Where the built body disagrees with the contract. Non-fatal: the runner logs
+ *  it and sends anyway, so a spec change shows up as a readable warning instead
+ *  of an opaque 422. This is the check that would have caught `beneficiary_clause`
+ *  becoming an object. */
+export function autoRequestIssues(
+  body: Record<string, unknown> | null,
+  bodySchema: JsonSchema | undefined,
+): SchemaIssue[] {
+  if (!bodySchema) return [];
+  return validateAgainstSchema(body ?? {}, bodySchema);
 }
 
 // The {params, body} draft the semi-automatic mode pre-fills into a step's
 // form: the same request the runner would send (buildAutoRequest), shaped as a
 // StepDraft the RequestBuilder restores via `initialDraft`. Returns null when
-// the step has nothing to pre-fill (no seed params, no plan body — e.g. an
-// optional step the user fills or skips by hand).
+// the step has nothing to pre-fill (no seed params, no generated body and no
+// overrides — e.g. an optional step the user fills or skips by hand). Pass the
+// step's request schema in `extras.bodySchema` to get the contract-derived
+// fields; without it only the seed and the overrides are pre-filled.
 export function buildAutoDraftForStep(
   step: ParcoursStep,
   seed: AutoSeed,
@@ -421,6 +456,11 @@ export function buildAutoDraftForStep(
 // --- runner ---------------------------------------------------------------------
 
 export type CallOperationFn = typeof callOperation;
+/** Injected like `call` so the runner can be unit-tested without a spec store
+ *  (`loadSpec` reads $APPDATA through tauri-plugin-fs). */
+export type LoadBodySchemaFn = (
+  step: ParcoursStep,
+) => Promise<JsonSchema | undefined>;
 
 export interface AutoRunCallbacks {
   onStepStart: (step: ParcoursStep) => void;
@@ -432,6 +472,10 @@ export interface AutoRunCallbacks {
     produced: ContextValues,
     draft?: StepDraft,
   ) => void;
+  /** The built body doesn't fit the synced contract. Reported before the call is
+   *  made and never fatal — the point is to name the drift (a renamed field, a
+   *  scalar that became an object) instead of leaving a bare 422. */
+  onDrift?: (step: ParcoursStep, issues: SchemaIssue[]) => void;
 }
 
 export type AutoRunResult =
@@ -521,6 +565,7 @@ export async function runParcoursAuto(
   signal: AbortSignal,
   cb: AutoRunCallbacks,
   call: CallOperationFn = callOperation,
+  loadBodySchema: LoadBodySchemaFn = loadStepBodySchema,
 ): Promise<AutoRunResult> {
   const ctx = newRunCtx(snapshot.values, snapshot.drafts);
   const done = new Set(snapshot.done);
@@ -632,6 +677,12 @@ export async function runParcoursAuto(
         extras.fundId = ctx.fundId;
       }
 
+      // The contract this step's body is built from. A missing schema is not an
+      // error (body-less operations have none); the request then falls back to
+      // the seed and the step's overrides, as it did before bodies were derived.
+      extras.bodySchema = await loadBodySchema(step);
+      if (signal.aborted) return { kind: "cancelled", stepId: step.id };
+
       // Execute — with a regenerate-identity retry on create-individual's 409
       // (duplicate first_name + last_name + date_of_birth).
       const attempts =
@@ -644,6 +695,10 @@ export async function runParcoursAuto(
       for (let attempt = 0; attempt < attempts; attempt++) {
         if (attempt > 0) ctx.identity = randomIdentity();
         sent = buildAutoRequest(step, ctx, extras);
+        if (cb.onDrift && attempt === 0) {
+          const issues = autoRequestIssues(sent.body, extras.bodySchema);
+          if (issues.length) cb.onDrift(step, issues);
+        }
         res = await call({
           apiId: step.apiId,
           operationId: step.operationId,

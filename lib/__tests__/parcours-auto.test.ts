@@ -4,13 +4,16 @@ import {
   DEFAULT_BENEFICIARY_CLAUSE,
   defaultContextValues,
   extractProduced,
+  defaultClauseDateOfEffect,
   SOUSCRIPTION_PARCOURS,
   type ContextValues,
+  type ParcoursStep,
 } from "@/lib/parcours";
 import {
   AUTO_CRS_COUNTRY,
   AUTO_PLAN,
   AUTO_STOP_STEP_ID,
+  autoRequestIssues,
   buildAutoDraftForStep,
   buildAutoRequest,
   isoInDays,
@@ -20,9 +23,12 @@ import {
   randomIdentity,
   runParcoursAuto,
   todayIso,
+  type AutoExtras,
   type AutoRunCallbacks,
   type CallOperationFn,
+  type LoadBodySchemaFn,
 } from "@/lib/parcours-auto";
+import type { JsonSchema } from "@/lib/types";
 import {
   adultBirthDate,
   frCityPostal,
@@ -106,6 +112,203 @@ function collectingCallbacks() {
 
 const noAbort = new AbortController().signal;
 
+// --- stub contracts -----------------------------------------------------------
+//
+// Bodies are now DERIVED from the operation's request schema (lib/schema-sample)
+// and valued from the hint registry (lib/parcours-hints); AUTO_PLAN only carries
+// what a schema cannot express. So a test that asserts a body must supply the
+// contract that body is built from — these mirror the shape of the synced specs
+// for the operations under test (required fields only, which is all the generator
+// reads by default).
+const AMOUNT: JsonSchema = {
+  type: "object",
+  required: ["value", "scale", "currency"],
+  properties: {
+    value: { type: "integer" },
+    scale: { type: "integer" },
+    currency: { type: "string" },
+  },
+};
+// A percentage, not an amount: value + scale and NO currency (10000000 at scale 5
+// = 100.00000%). Getting this wrong in the stub is what `autoRequestIssues`
+// flagged first — the same check that guards the real contracts at runtime.
+const RATE: JsonSchema = {
+  type: "object",
+  required: ["value", "scale"],
+  properties: { value: { type: "integer" }, scale: { type: "integer" } },
+};
+const ALLOCATIONS: JsonSchema = {
+  type: "object",
+  required: ["funds"],
+  properties: {
+    funds: {
+      type: "array",
+      minItems: 1,
+      items: {
+        type: "object",
+        required: ["fund_id", "allocation_rate"],
+        properties: {
+          fund_id: { type: "string" },
+          allocation_rate: RATE,
+        },
+      },
+    },
+  },
+};
+const TIN: JsonSchema = {
+  type: "object",
+  required: ["tin_type", "number"],
+  properties: {
+    tin_type: { type: "string", enum: ["NUMBER", "REASON"] },
+    number: { type: "string" },
+  },
+};
+
+const STUB_SCHEMAS: Record<string, JsonSchema> = {
+  createIndividual: {
+    type: "object",
+    required: ["first_name", "last_name", "birth"],
+    properties: {
+      first_name: { type: "string" },
+      last_name: { type: "string" },
+      birth: {
+        type: "object",
+        required: ["date_of_birth"],
+        properties: { date_of_birth: { type: "string", format: "date" } },
+      },
+    },
+  },
+  upsertPersonAddressByType: {
+    type: "object",
+    required: ["line1", "postal_code", "city", "country_code"],
+    properties: {
+      line1: { type: "string" },
+      postal_code: { type: "string" },
+      city: { type: "string" },
+      country_code: { type: "string" },
+    },
+  },
+  upsertPersonFrenchResidency: {
+    type: "object",
+    required: ["fiscal_type"],
+    properties: {
+      // readOnly + const, exactly as the synced spec declares it: the generator
+      // omits it and AUTO_PLAN supplies the discriminator explicitly.
+      fiscal_type: { type: "string", const: "FRENCH_RESIDENCY", readOnly: true },
+    },
+  },
+  upsertPersonFatca: {
+    type: "object",
+    required: ["tax_identification_number"],
+    properties: {
+      fiscal_type: { type: "string", const: "FATCA" },
+      tax_identification_number: TIN,
+      is_pre_existing_contract: { type: "boolean" },
+      us_indicia: { type: "array", items: { type: "string" } },
+    },
+  },
+  upsertPersonCrsByCountry: {
+    type: "object",
+    required: ["tax_identification_number"],
+    properties: {
+      fiscal_type: { type: "string", const: "CRS" },
+      tax_identification_number: TIN,
+      is_self_certification_present: { type: "boolean" },
+      date_of_self_certification: { type: "string", format: "date" },
+    },
+  },
+  createBankAccount: {
+    type: "object",
+    required: ["account_holder_name", "iban", "bic", "currency", "date_of_validity_start"],
+    properties: {
+      account_holder_name: { type: "string" },
+      iban: { type: "string" },
+      bic: { type: "string" },
+      currency: { type: "string" },
+      date_of_validity_start: { type: "string", format: "date" },
+    },
+  },
+  createPaymentMethod: {
+    type: "object",
+    required: ["type", "bank_account_id", "mandate_type", "date_of_validity_start"],
+    properties: {
+      type: { type: "string", const: "SEPA_DEBIT" },
+      bank_account_id: { type: "string" },
+      mandate_type: { type: "string", enum: ["RECURRENT", "ONE_OFF"] },
+      date_of_validity_start: { type: "string", format: "date" },
+    },
+  },
+  createContract: {
+    type: "object",
+    required: ["product_id"],
+    properties: {
+      product_id: { type: "string" },
+      subscriber_id: { type: "string" },
+      date_of_effect: { type: "string", format: "date" },
+      beneficiary_clause: {
+        type: "object",
+        required: ["content", "date_of_effect"],
+        properties: {
+          content: { type: "string" },
+          date_of_effect: { type: "string", format: "date" },
+          date_of_end: { type: "string", format: "date", readOnly: true },
+        },
+      },
+    },
+  },
+  createPremium: {
+    type: "object",
+    required: ["amount", "payment_method_id", "type_of_fund_source", "allocations"],
+    properties: {
+      amount: AMOUNT,
+      payment_method_id: { type: "string" },
+      type_of_fund_source: { type: "string", enum: ["OWN_FUNDS", "TRANSFER"] },
+      allocations: ALLOCATIONS,
+    },
+  },
+  createPeriodicPremium: {
+    type: "object",
+    required: [
+      "periodic_amount",
+      "periodicity",
+      "payment_method_id",
+      "type_of_fund_source",
+      "allocations",
+      "dates",
+    ],
+    properties: {
+      periodic_amount: AMOUNT,
+      periodicity: { type: "string", enum: ["MONTHLY", "QUARTERLY"] },
+      payment_method_id: { type: "string" },
+      type_of_fund_source: { type: "string", enum: ["OWN_FUNDS", "TRANSFER"] },
+      allocations: ALLOCATIONS,
+      dates: {
+        type: "object",
+        properties: {
+          date_of_start: { type: "string", format: "date" },
+          date_of_end: { type: "string", format: "date" },
+        },
+      },
+    },
+  },
+};
+
+/** The request schema for a step, as `loadStepBodySchema` would resolve it. */
+function stubSchema(s: ParcoursStep): JsonSchema | undefined {
+  return STUB_SCHEMAS[s.operationId];
+}
+
+const stubLoader: LoadBodySchemaFn = async (s) => stubSchema(s);
+
+/** `buildAutoRequest` with the step's stub contract wired in. */
+function buildWithSchema(
+  s: ParcoursStep,
+  ctx: ReturnType<typeof makeCtx>,
+  extras: AutoExtras = {},
+) {
+  return buildAutoRequest(s, ctx, { ...extras, bodySchema: stubSchema(s) });
+}
+
 // --- generators ---------------------------------------------------------------
 
 describe("fake-fields generators", () => {
@@ -151,20 +354,24 @@ describe("fake-fields generators", () => {
 // --- buildAutoRequest -----------------------------------------------------------
 
 describe("buildAutoRequest", () => {
-  it("create-individual carries the identity", () => {
+  it("create-individual carries the identity, derived from the contract", () => {
+    // No AUTO_PLAN body at all: every field here comes from IndividualCreate's
+    // required set, valued by the hint registry — including the nested
+    // `birth.date_of_birth` the contract nests one level down.
     const ctx = makeCtx();
-    const { pathParams, body } = buildAutoRequest(step("create-individual"), ctx);
+    const { pathParams, body } = buildWithSchema(step("create-individual"), ctx);
     expect(pathParams).toEqual({});
     expect(body).toEqual({
       first_name: "Test",
       last_name: "Durand",
       birth: { date_of_birth: "1980-01-15" },
     });
+    expect(AUTO_PLAN["create-individual"].body).toBeUndefined();
   });
 
   it("person-address merges seed path params with the random address", () => {
     const ctx = makeCtx({ person_id: "p-1" });
-    const { pathParams, body } = buildAutoRequest(step("person-address"), ctx);
+    const { pathParams, body } = buildWithSchema(step("person-address"), ctx);
     expect(pathParams).toEqual({ person_id: "p-1", address_type: "PRINCIPAL" });
     expect(body).toEqual({
       line1: "1 rue de la Paix",
@@ -174,14 +381,21 @@ describe("buildAutoRequest", () => {
     });
   });
 
+  it("sends nothing derived when the step has no contract to derive from", () => {
+    // An unsynced API (or a body-less operation) leaves the seed and the
+    // overrides in charge, exactly as before bodies were generated.
+    const ctx = makeCtx();
+    expect(buildAutoRequest(step("create-individual"), ctx).body).toBeNull();
+  });
+
   it("the bank account carries the IBAN/BIC, the payment method only its id", () => {
     const ctx = makeCtx({
       person_id: "p-1",
       person_name: "Test Durand",
       bank_account_id: "ba-1",
     });
-    const bank = buildAutoRequest(step("person-bank-account"), ctx);
-    const pm = buildAutoRequest(step("create-payment-method"), ctx);
+    const bank = buildWithSchema(step("person-bank-account"), ctx);
+    const pm = buildWithSchema(step("create-payment-method"), ctx);
     expect(bank.body).toMatchObject({
       account_holder_name: "Test Durand",
       iban: ctx.iban,
@@ -209,7 +423,7 @@ describe("buildAutoRequest", () => {
       ),
     ).toEqual({ bank_account_id: "ba-created" });
     // Without it in the context the seed omits it rather than sending "".
-    const { body } = buildAutoRequest(
+    const { body } = buildWithSchema(
       step("create-payment-method"),
       makeCtx({ person_id: "p-1" }),
     );
@@ -223,20 +437,49 @@ describe("buildAutoRequest", () => {
     expect(body).toBeNull();
   });
 
-  it("create-contract seeds product/subscriber and adds submit-required fields", () => {
+  it("create-contract seeds product/subscriber and the submit-required fields, the clause as an OBJECT", () => {
+    // The regression this guards: v0.0.79 turned `beneficiary_clause` from a
+    // string into `{content, date_of_effect}`. Both leaves are seeded by path, the
+    // clause's own date is strictly in the future (a same-day one is 422
+    // OUT_OF_RANGE), and the readOnly `date_of_end` is never sent.
     const ctx = makeCtx({ product_id: "prod-1", person_id: "p-1" });
-    const { body } = buildAutoRequest(step("create-contract"), ctx);
+    const { body } = buildWithSchema(step("create-contract"), ctx);
     expect(body).toMatchObject({
       product_id: "prod-1",
       subscriber_id: "p-1",
       date_of_effect: todayIso(),
-      beneficiary_clause: DEFAULT_BENEFICIARY_CLAUSE,
+      beneficiary_clause: {
+        content: DEFAULT_BENEFICIARY_CLAUSE,
+        date_of_effect: defaultClauseDateOfEffect(),
+      },
     });
+    expect(defaultClauseDateOfEffect() > todayIso()).toBe(true);
+    expect(body?.beneficiary_clause).not.toHaveProperty("date_of_end");
+    // And it fits the contract — the check that would have caught the drift.
+    expect(
+      autoRequestIssues(body, stubSchema(step("create-contract"))),
+    ).toEqual([]);
+  });
+
+  it("reports drift instead of silently sending a body the contract rejects", () => {
+    // Simulate the v0.0.79 change landing while the code still sent a string:
+    // the contract says object, the body says string.
+    const stringClause = { product_id: "p", beneficiary_clause: "Mes héritiers" };
+    const issues = autoRequestIssues(
+      stringClause,
+      stubSchema(step("create-contract")),
+    );
+    expect(issues).toHaveLength(1);
+    expect(issues[0]).toMatchObject({
+      kind: "type-mismatch",
+      path: "beneficiary_clause",
+    });
+    expect(issues[0].message).toContain("object");
   });
 
   it("create-premium: 100% on the picked fund, cents amount, seeded payment method", () => {
     const ctx = makeCtx({ contract_id: "c-1", payment_method_id: "pm-1" });
-    const { pathParams, body } = buildAutoRequest(step("create-premium"), ctx, {
+    const { pathParams, body } = buildWithSchema(step("create-premium"), ctx, {
       fundId: "fund-42",
     });
     expect(pathParams).toEqual({ contract_id: "c-1" });
@@ -257,7 +500,7 @@ describe("buildAutoRequest", () => {
 
   it("person-fatca declares the TIN the FATCA record requires", () => {
     const ctx = makeCtx({ person_id: "p-1" });
-    const { pathParams, body } = buildAutoRequest(step("person-fatca"), ctx);
+    const { pathParams, body } = buildWithSchema(step("person-fatca"), ctx);
     expect(pathParams).toEqual({ person_id: "p-1" });
     expect(body).toMatchObject({
       fiscal_type: "FATCA",
@@ -270,7 +513,7 @@ describe("buildAutoRequest", () => {
 
   it("person-crs carries the country_code path param no context key feeds", () => {
     const ctx = makeCtx({ person_id: "p-1" });
-    const { pathParams, body } = buildAutoRequest(step("person-crs"), ctx);
+    const { pathParams, body } = buildWithSchema(step("person-crs"), ctx);
     // The CRS record is keyed by country: supplied by the plan, not by `seedFrom`.
     expect(pathParams).toEqual({
       person_id: "p-1",
@@ -287,7 +530,7 @@ describe("buildAutoRequest", () => {
 
   it("create-periodic-premium: monthly instalment, one fund, server-defaulted start", () => {
     const ctx = makeCtx({ contract_id: "c-1", payment_method_id: "pm-1" });
-    const { pathParams, body } = buildAutoRequest(
+    const { pathParams, body } = buildWithSchema(
       step("create-periodic-premium"),
       ctx,
       { fundId: "fund-7" },
@@ -325,7 +568,7 @@ describe("buildAutoRequest", () => {
       payment_method_id: "pm-1",
       date_of_effect: isoInDays(180),
     });
-    const { body } = buildAutoRequest(step("create-periodic-premium"), ctx, {
+    const { body } = buildWithSchema(step("create-periodic-premium"), ctx, {
       fundId: "fund-7",
     });
     expect((body as { dates: Record<string, unknown> }).dates).not.toHaveProperty(
@@ -358,11 +601,44 @@ describe("optionalAutoSteps", () => {
       expect(DEF.steps.findIndex((x) => x.id === s.id)).toBeLessThan(stopIdx);
   });
 
-  it("every selectable optional step can build a request", () => {
-    // A ticked step must never fire an empty body the API would 422 on: the plan
-    // is what makes it a valid request, so the two lists can't drift apart.
-    for (const s of optionalAutoSteps(DEF))
-      expect(AUTO_PLAN[s.id]?.body).toBeTypeOf("function");
+  it("every selectable optional step builds a non-empty request", () => {
+    // A ticked step must never fire an empty body the API would 422 on. What
+    // guarantees that is now the CONTRACT plus the step's overrides, not an
+    // AUTO_PLAN entry — several optional steps legitimately have no override left
+    // (the two extra address variants derive entirely from AddressCreate).
+    const ctx = makeCtx({
+      person_id: "p-1",
+      payment_method_id: "pm-1",
+      contract_id: "c-1",
+      premium_id: "prem-1",
+      periodic_premium_id: "pp-1",
+    });
+    for (const s of optionalAutoSteps(DEF)) {
+      const { body } = buildWithSchema(s, ctx, { fundId: "fund-1" });
+      expect(body, `${s.id} builds an empty body`).not.toBeNull();
+      expect(Object.keys(body ?? {}).length, s.id).toBeGreaterThan(0);
+    }
+  });
+
+  it("keeps every override in AUTO_PLAN consistent with its contract", () => {
+    // The overrides are the only hand-written part left, so they are the only
+    // part that can silently fall behind. Each stub schema here mirrors the
+    // synced spec, and the validator must find nothing to report.
+    const ctx = makeCtx({
+      person_id: "p-1",
+      product_id: "prod-1",
+      payment_method_id: "pm-1",
+      bank_account_id: "ba-1",
+      contract_id: "c-1",
+      premium_id: "prem-1",
+      periodic_premium_id: "pp-1",
+    });
+    for (const s of DEF.steps) {
+      const schema = stubSchema(s);
+      if (!schema) continue; // no stub contract for this operation
+      const { body } = buildWithSchema(s, ctx, { fundId: "fund-1" });
+      expect(autoRequestIssues(body, schema), s.id).toEqual([]);
+    }
   });
 });
 
@@ -407,7 +683,9 @@ describe("buildAutoDraftForStep", () => {
   };
 
   it("shapes a create-individual draft as {body} only (no params)", () => {
-    const draft = buildAutoDraftForStep(step("create-individual"), seed, {});
+    const draft = buildAutoDraftForStep(step("create-individual"), seed, {}, {
+      bodySchema: stubSchema(step("create-individual")),
+    });
     expect(draft).toEqual({
       body: {
         first_name: "Test",
@@ -419,9 +697,12 @@ describe("buildAutoDraftForStep", () => {
   });
 
   it("carries both params and body for person-address", () => {
-    const draft = buildAutoDraftForStep(step("person-address"), seed, {
-      person_id: "p-1",
-    });
+    const draft = buildAutoDraftForStep(
+      step("person-address"),
+      seed,
+      { person_id: "p-1" },
+      { bodySchema: stubSchema(step("person-address")) },
+    );
     expect(draft?.params).toEqual({
       person_id: "p-1",
       address_type: "PRINCIPAL",
@@ -438,9 +719,12 @@ describe("buildAutoDraftForStep", () => {
   it("pre-fills an optional step that has an auto plan (FATCA)", () => {
     // Optional steps now carry a plan body too, so semi mode pre-fills them —
     // the user still reviews, then executes or presses « Passer ».
-    const draft = buildAutoDraftForStep(step("person-fatca"), seed, {
-      person_id: "p-1",
-    });
+    const draft = buildAutoDraftForStep(
+      step("person-fatca"),
+      seed,
+      { person_id: "p-1" },
+      { bodySchema: stubSchema(step("person-fatca")) },
+    );
     expect(draft?.params).toEqual({ person_id: "p-1" });
     expect(draft?.body).toMatchObject({ fiscal_type: "FATCA" });
   });
@@ -570,7 +854,12 @@ describe("runParcoursAuto", () => {
     expect(update?.pathParams).toEqual({ contract_id: "c-1" });
     expect(update?.body).toMatchObject({
       date_of_effect: todayIso(),
-      beneficiary_clause: DEFAULT_BENEFICIARY_CLAUSE,
+      // End to end through the runner: the clause goes out as the object the
+      // contract requires, with its own strictly-future date_of_effect.
+      beneficiary_clause: {
+        content: DEFAULT_BENEFICIARY_CLAUSE,
+        date_of_effect: defaultClauseDateOfEffect(),
+      },
     });
     // The premium carries the fund source required at submission.
     const premium = calls.find((c) => c.operationId === "createPremium");
@@ -916,7 +1205,14 @@ describe("runParcoursAuto", () => {
       createIndividual: (n) => (n < 2 ? res(409, {}) : res(201, { id: "p-1" })),
     });
     const { cb, done } = collectingCallbacks();
-    const result = await runParcoursAuto(DEF, { values: defaultContextValues(), done: [] }, noAbort, cb, call);
+    const result = await runParcoursAuto(
+      DEF,
+      { values: defaultContextValues(), done: [] },
+      noAbort,
+      cb,
+      call,
+      stubLoader,
+    );
     expect(result.kind).toBe("paused-picker");
 
     const attempts = calls.filter((c) => c.operationId === "createIndividual");
@@ -1132,7 +1428,14 @@ describe("runParcoursAuto", () => {
       upsertPersonAddressByType: () => res(422, { detail: "bad address" }),
     });
     const { cb } = collectingCallbacks();
-    const result = await runParcoursAuto(DEF, { values: defaultContextValues(), done: [] }, noAbort, cb, call);
+    const result = await runParcoursAuto(
+      DEF,
+      { values: defaultContextValues(), done: [] },
+      noAbort,
+      cb,
+      call,
+      stubLoader,
+    );
     expect(result.kind).toBe("error");
     if (result.kind === "error") {
       expect(result.draft?.params).toMatchObject({ person_id: "p-1" });
@@ -1199,6 +1502,7 @@ describe("runParcoursAuto", () => {
       noAbort,
       cb,
       call,
+      stubLoader,
     );
     const bank = calls.find((c) => c.operationId === "createBankAccount");
     expect(bank?.body).toMatchObject({

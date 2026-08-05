@@ -98,19 +98,53 @@ http/dialog) are unavailable there — see the fallback note below.
     status explanations for ResponsePanel + `/help`).
   - `xlsx.ts` — dependency-free client-side `.xlsx` workbook builder (flattens
     a JSON response to rows) behind `ResponseExportButton`.
+  - `json-path.ts` — leaf-path addressing (`parsePath`/`getAtPath`/`setAtPath`/
+    `flattenLeaves`/`deepMerge`). An array index is **only ever bracket
+    notation** (`funds[0]`, `[-1]` = last); a dotted segment is always an object
+    key, even a numeric one — otherwise `formatPath` wouldn't be invertible and a
+    map keyed `"1"` would rebuild as a list. Because a key containing a `.` still
+    can't survive a string path, do NOT flatten-then-rebuild arbitrary user input:
+    walk it structurally (`pruneSeededLeaves` in `parcours.ts`). Shared by seed
+    mappings, the RequestBuilder's seed merge and response capture.
+  - `schema-sample.ts` — **synthesizes a request body FROM the contract**:
+    `sampleFromSchema` walks a dereferenced request schema (required-only by
+    default, `readOnly` skipped, enums/consts/formats/bounds/`minItems` honoured),
+    normalising with the same `schema-normalize` helpers `SchemaField` uses, so the
+    form and the generator can't drift apart. Plus `schemaAtPath`,
+    `coerceToSchema`, and `validateAgainstSchema` (the drift detector — type,
+    enum, required, unknown/readOnly property, plus `pattern` and length bounds so
+    a value the generator itself couldn't satisfy is reported instead of 422-ing
+    silently). Domain-free and unit-tested without a spec.
+  - `parcours-hints.ts` — the domain values that fill the generated bodies
+    (identity, address, IBAN/BIC, TIN, amounts, `fund_id`, context ids), matched by
+    path > name > format. A hint returning `SAMPLE_SKIP` leaves the property out —
+    a required id the context can't supply must stay ABSENT, never a placeholder
+    pointing at nothing.
   - `parcours.ts` — declarative « souscription » parcours (ordered steps, seed↔
     context mapping, response capture, sessionStorage progress) behind
     `/parcours`; `fake-fields.ts` — checksum-valid sample values
     (IBAN/BIC/NIR/SIREN/SIRET) for `FieldGenerator`.
+    A `SeedMapping.name` and a `ProducerSpec.bodyField` entry are **paths**, so a
+    nested contract property is reachable both ways: the beneficiary clause is an
+    object, seeded as `beneficiary_clause.content` +
+    `beneficiary_clause.date_of_effect` (two context keys, its date strictly
+    future) and read back from `beneficiary_clauses[-1].content`.
     A step draft stores the seed it was filled from (`StepDraft.seeded`, written
-    by `seedSnapshot`), so `draftWithoutSeededFields` can refresh an untouched
-    pre-fill from the live context while keeping whatever the user typed over.
-  - `parcours-auto.ts` — the semi/auto runner: `AUTO_PLAN` (per-step random body,
-    plus `params` for a path id no step captures), `runParcoursAuto`
-    (frontier → documents step, pauses at the product picker) and the optional-step
-    opt-in (`optionalAutoSteps` + `ParcoursState.autoOptional`). It never replays a
-    done step: ticking one in the mode panel un-completes it, which is what lets a
-    relaunch reach it.
+    by `seedSnapshot`, keyed by path), so `draftWithoutSeededFields` can refresh an
+    untouched pre-fill from the live context while keeping whatever the user typed
+    over — per leaf, so one edited leaf of an object doesn't pin its siblings.
+  - `parcours-auto.ts` — the semi/auto runner. A step's body is
+    `deepMerge(sampleFromSchema(…), seed, AUTO_PLAN override)`: the CONTRACT first,
+    then the context ids, then the overrides. `AUTO_PLAN` therefore holds only what
+    a schema cannot express — which enum member this flow files, rates that must
+    total 100%, `omit` for a field left to the server's default, a path param no
+    step captures. `loadStepBodySchema` resolves the schema (injectable, so
+    `buildAutoRequest` stays synchronous and testable) and `autoRequestIssues`
+    reports anything that no longer fits, surfaced in the mode panel.
+    Also `runParcoursAuto` (frontier → documents step, pauses at the product
+    picker) and the optional-step opt-in (`optionalAutoSteps` +
+    `ParcoursState.autoOptional`). It never replays a done step: ticking one in the
+    mode panel un-completes it, which is what lets a relaunch reach it.
   - `parcours-documents.ts` / `parcours-decisions.ts` — pure (React-free)
     analysis behind the two custom parcours steps: a SR's `requirements[]` for
     the Phase C uploads, and the SR reading + `decisions` payload building for
@@ -142,6 +176,17 @@ http/dialog) are unavailable there — see the fallback note below.
 5. **Storage stays synchronous.** `loadSettings/saveSettings/loadToken/saveToken`
    are sync (backed by the cache). Do not make them async — the cache is
    hydrated by `TauriProvider` before any page renders.
+6. **Never hard-code a request body.** Both body generators read the synced
+   contract: the request tester's form from `components/SchemaField.tsx`, the
+   parcours' auto/semi bodies from `lib/schema-sample.ts` + `lib/parcours-hints.ts`.
+   A field a spec renamed or reshaped must be followed automatically — v0.0.79 made
+   `beneficiary_clause` an object and the old hand-typed `AUTO_PLAN` literals kept
+   posting a string, 422-ing every contract step. So: a new value goes in the hint
+   registry (or a seed mapping for a context value), and `AUTO_PLAN` gets an entry
+   ONLY for what a schema genuinely cannot state. Any drift left over is reported
+   by `validateAgainstSchema` in the auto-run log rather than staying silent.
+   Specs live outside the repo, so no CI check can see them — that runtime report
+   is the guardrail.
 
 ## Commands
 
@@ -155,7 +200,9 @@ npm run test:unit    # vitest run (unit tests)
 ```
 
 No ESLint/Prettier. Unit tests run under Vitest (`npm run test:unit`) — the
-spec-normalization logic in `lib/schema-normalize.ts` is covered there.
+spec-normalization logic in `lib/schema-normalize.ts`, the body generator
+(`lib/schema-sample.ts`) and the path utilities (`lib/json-path.ts`) are covered
+there.
 `typecheck` + `next build` (static export) + `cargo check` (in `src-tauri/`) +
 `npm run test:unit` are the automated checks — run before shipping.
 

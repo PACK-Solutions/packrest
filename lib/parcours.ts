@@ -17,8 +17,17 @@
 
 import type { ImportSeed } from "@/lib/bruno";
 import type { ProxyResponse } from "@/lib/http";
-// Pure module (no React/Tauri) — safe to import here.
+import type { JsonSchema } from "@/lib/types";
+// Pure modules (no React/Tauri) — safe to import here.
 import { toLocalIsoDate } from "@/lib/fake-fields";
+import {
+  formatPath,
+  getAtPath,
+  isLeafValue,
+  setAtPath,
+  type PathSeg,
+} from "@/lib/json-path";
+import { coerceToSchema, schemaAtPath } from "@/lib/schema-sample";
 // Type-only (erased at build) — no runtime cycle with lib/parcours-auto, which
 // imports this module at runtime.
 import type { AutoSeed } from "@/lib/parcours-auto";
@@ -48,7 +57,13 @@ export type ContextKey =
   // creation with a default. Seeded with a default by `initialState`, captured
   // back from each contract response, editable in the context panel.
   | "date_of_effect"
-  | "beneficiary_clause";
+  // The beneficiary clause is an OBJECT in the contract
+  // (`{content, date_of_effect}`), so it takes two context keys: a context value
+  // is always a flat string, and the seed mappings address the two leaves by
+  // path (see CONTRACT_SUBMISSION_SEEDS). The clause's own date_of_effect is
+  // distinct from the contract's and must be strictly in the future.
+  | "beneficiary_clause_content"
+  | "beneficiary_clause_date_of_effect";
 
 export interface ContextField {
   key: ContextKey;
@@ -77,8 +92,13 @@ export const CONTEXT_FIELDS: ContextField[] = [
   { key: "sr_beneficiary_id", label: "SR clause bénéficiaire (id)" },
   { key: "date_of_effect", label: "date_of_effect (contrat)", manual: true },
   {
-    key: "beneficiary_clause",
-    label: "beneficiary_clause (contrat)",
+    key: "beneficiary_clause_content",
+    label: "beneficiary_clause.content (clause bénéficiaire)",
+    manual: true,
+  },
+  {
+    key: "beneficiary_clause_date_of_effect",
+    label: "beneficiary_clause.date_of_effect (postérieure à ce jour)",
     manual: true,
   },
 ];
@@ -90,18 +110,24 @@ export type ContextValues = Partial<Record<ContextKey, string>>;
 // One entry of `seedFrom`: put a value into the request before the user sees
 // it. The value comes either from the parcours context (`from`) or is a fixed
 // literal (`const`, e.g. address_type = PRINCIPAL, status = UNDER_REVIEW).
+//
+// `name` is a PATH (lib/json-path), not just a top-level field name, so a
+// nested contract property can be seeded: `beneficiary_clause.content` reaches
+// the leaf of an object, `allocations.funds[0].fund_id` a leaf inside a list.
+// Flat names keep working — a path without separators is one segment.
 export type SeedMapping =
   | ({ target: "param" | "body"; name: string } & (
       | { from: ContextKey }
       | { const: string }
     ));
 
-// Default beneficiary designation. `beneficiary_clause` and `date_of_effect` are
-// both required at submission (POST /contracts/{id}/submit has no body), so the
-// context starts with a usable pair (see `initialState`) and both contract steps
-// seed them FROM the context — never from a constant, so a value the user edits
-// (in the form, then captured back, or directly in the context panel) survives
-// « Mettre à jour le contrat » instead of being overwritten.
+// Default beneficiary designation — the clause's `content`. The clause and
+// `date_of_effect` are both required at submission (POST /contracts/{id}/submit
+// has no body), so the context starts with usable values (see `initialState`)
+// and both contract steps seed them FROM the context — never from a constant, so
+// a value the user edits (in the form, then captured back, or directly in the
+// context panel) survives « Mettre à jour le contrat » instead of being
+// overwritten.
 export const DEFAULT_BENEFICIARY_CLAUSE = "Mes héritiers légaux, à parts égales";
 
 /** Today, as the `date` the contract API expects (local, not UTC). */
@@ -109,25 +135,63 @@ export function defaultDateOfEffect(): string {
   return toLocalIsoDate(new Date());
 }
 
+/** Tomorrow — the clause's own `date_of_effect` must be STRICTLY later than the
+ *  date of the request, or the contract API answers `422 OUT_OF_RANGE` on
+ *  `/beneficiary_clause/date_of_effect`. Distinct from the contract's own
+ *  `date_of_effect`, which is today. */
+export function defaultClauseDateOfEffect(): string {
+  const d = new Date();
+  d.setDate(d.getDate() + 1);
+  return toLocalIsoDate(d);
+}
+
+/** True while `iso` is strictly later than today — the clause rule above. Used
+ *  to refresh a persisted clause date that a long session has left behind. */
+export function isFutureDate(iso: string | undefined): boolean {
+  return !!iso && iso > defaultDateOfEffect();
+}
+
 // The submission-required contract fields, seeded identically on « Créer le
 // contrat » and « Mettre à jour le contrat » (a DRAFT that lost them is
-// completed by re-running the update step).
+// completed by re-running the update step). The clause is submitted as a WHOLE
+// — the contract requires both `content` and `date_of_effect` whenever the key
+// is present — which is why it is two path mappings rather than one field.
 const CONTRACT_SUBMISSION_SEEDS: SeedMapping[] = [
   { target: "body", name: "date_of_effect", from: "date_of_effect" },
-  { target: "body", name: "beneficiary_clause", from: "beneficiary_clause" },
+  {
+    target: "body",
+    name: "beneficiary_clause.content",
+    from: "beneficiary_clause_content",
+  },
+  {
+    target: "body",
+    name: "beneficiary_clause.date_of_effect",
+    from: "beneficiary_clause_date_of_effect",
+  },
 ];
 
 // Captured back from a contract response so the value the contract actually
 // carries (which may be the one the user typed over the default) becomes the
 // context value the next contract step re-sends.
+//
+// The clause is written through the singular `beneficiary_clause` but READ from
+// the `beneficiary_clauses` history, ordered by date_of_effect ascending — the
+// clause in force is therefore its last entry, hence `[-1]`. Only the content is
+// captured: an applied clause's date_of_effect is today or earlier, so
+// re-sending it on the next « Mettre à jour le contrat » would 422. The context
+// keeps a freshly computed future date instead.
+//
+// On the 202 path (a sensitive change to an ACCEPTED contract) the history is
+// left untouched and the pending clause rides in the embedded service request,
+// so nothing is captured and the context value survives — which is correct.
 const CONTRACT_SUBMISSION_PRODUCES: Array<{
   key: ContextKey;
   from: ProducerSpec;
 }> = [
   { key: "date_of_effect", from: { kind: "bodyField", fields: ["date_of_effect"] } },
   {
-    key: "beneficiary_clause",
-    from: { kind: "bodyField", fields: ["beneficiary_clause"] },
+    key: "beneficiary_clause_content",
+    from: { kind: "bodyField", fields: ["beneficiary_clauses[-1].content"] },
   },
 ];
 
@@ -168,6 +232,9 @@ const PREMIUM_FIELD_OPTIONS: FieldOptionSource[] = [
 export type ProducerSpec =
   // First present field wins — tolerates the id-vs-<entity>_id naming drift
   // across the APIs (person uses `id`, payment-method `payment_method_id`, …).
+  // Each entry is a PATH (lib/json-path), so a value nested in the response is
+  // reachable: `beneficiary_clauses[-1].content` reads the last entry of the
+  // clause history.
   | { kind: "bodyField"; fields: string[] }
   // Read `_embedded.service_requests[]` (any embedded array, defensively),
   // match on `type`, take the entry's id.
@@ -620,25 +687,30 @@ export function getParcours(id: string): ParcoursDef | null {
 // Build the ImportSeed a step's RequestBuilder should consume, resolving each
 // mapping against the current context. Returns undefined when nothing can be
 // pre-filled (so the builder starts empty, as usual).
+// `bodySchema` is optional: when the caller has the operation's request schema
+// (the parcours auto/semi modes do), a seed value is coerced to the leaf's
+// declared type, so seeding a numeric or boolean leaf doesn't post a string.
+// Without it, values stay strings — which is what every seeded leaf so far is.
 export function buildSeedForStep(
   step: ParcoursStep,
   values: ContextValues,
+  bodySchema?: JsonSchema,
 ): ImportSeed | undefined {
   if (!step.seedFrom?.length) return undefined;
   const params: Record<string, string> = {};
-  const body: Record<string, unknown> = {};
+  let body: Record<string, unknown> = {};
   let hasParam = false;
   let hasBody = false;
   for (const m of step.seedFrom) {
-    // (Body-list expansion was removed with the fund/preset picker steps; the
-    // premium now populates allocations inline via fetched field options.)
     const value = "const" in m ? m.const : values[m.from];
     if (value == null || value === "") continue;
     if (m.target === "param") {
       params[m.name] = value;
       hasParam = true;
     } else {
-      body[m.name] = value;
+      // `name` is a path, so a nested leaf (beneficiary_clause.content) builds
+      // the intermediate objects it needs.
+      body = setAtPath(body, m.name, coerceSeedValue(value, bodySchema, m.name));
       hasBody = true;
     }
   }
@@ -649,6 +721,15 @@ export function buildSeedForStep(
     ...(hasParam ? { params } : {}),
     ...(hasBody ? { body } : {}),
   };
+}
+
+function coerceSeedValue(
+  value: string,
+  bodySchema: JsonSchema | undefined,
+  path: string,
+): unknown {
+  if (!bodySchema) return value;
+  return coerceToSchema(value, schemaAtPath(bodySchema, path));
 }
 
 // A step's restored draft, minus the pre-filled values that have gone STALE.
@@ -669,6 +750,9 @@ export function buildSeedForStep(
 // A draft saved before seeds were recorded (`seeded` absent — only possible
 // within a session started on an older build) falls back to dropping, which is
 // what the stale-id case needs.
+// Comparison is per LEAF PATH, not per top-level key: a seed now reaches
+// `beneficiary_clause.content`, so a clause whose content the user retyped must
+// be kept while its untouched sibling date is still refreshable.
 export function draftWithoutSeededFields(
   step: ParcoursStep,
   values: ContextValues,
@@ -677,33 +761,60 @@ export function draftWithoutSeededFields(
   if (!draft) return undefined;
   const current = seedSnapshot(step, values);
   const { seeded, ...rest } = draft;
-  // Drop `name` when the context can re-supply it and the draft's value is still
+  // Drop `path` when the context can re-supply it and the draft's value is still
   // the one seeded there (or predates seed recording).
   const isStale = (
     target: "params" | "body",
-    name: string,
+    path: string,
     value: unknown,
   ): boolean => {
-    const now = current?.[target]?.[name];
+    const now = current?.[target]?.[path];
     if (now === undefined) return false; // nothing to put in its place
-    const was = seeded?.[target]?.[name];
+    const was = seeded?.[target]?.[path];
     return was === undefined || was === value;
   };
   const params: Record<string, string> = {};
   for (const [k, v] of Object.entries(rest.params ?? {}))
     if (!isStale("params", k, v)) params[k] = v;
   let body = rest.body;
-  const draftBody = asRecord(body);
-  if (draftBody) {
-    const kept: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(draftBody))
-      if (!isStale("body", k, v)) kept[k] = v;
-    body = kept;
-  }
+  if (asRecord(body) || Array.isArray(body))
+    body = pruneSeededLeaves(body, [], (path, v) => isStale("body", path, v));
   return {
     ...(Object.keys(params).length ? { params } : {}),
     ...(body !== undefined ? { body } : {}),
   };
+}
+
+// Drop the stale leaves of a draft body, walking it STRUCTURALLY.
+//
+// Deliberately not `flattenLeaves` → `setAtPath`: that round-trip renders every
+// key into a path string and parses it back, so an object key that looks like a
+// path separator or an index does not survive it — a map keyed "1"/"2" (the body
+// form's MapField accepts any key) came back as an array, losing the keys. Here a
+// key is only ever used as a key; the path string is built for the staleness
+// LOOKUP alone, never to reconstruct the value.
+//
+// Array elements keep their positions: only leaves are dropped, never elements,
+// so an index-addressed seed can't shift the rest of a list.
+function pruneSeededLeaves(
+  value: unknown,
+  segs: PathSeg[],
+  isStale: (path: string, value: unknown) => boolean,
+): unknown {
+  if (Array.isArray(value))
+    return value.map((v, i) => pruneSeededLeaves(v, [...segs, i], isStale));
+  const rec = asRecord(value);
+  if (!rec) return value;
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(rec)) {
+    const childSegs = [...segs, k];
+    // Only leaves are comparable: a `SeedMapping` value is always a string, so a
+    // container never appears in the snapshot and is kept (its own leaves having
+    // already been pruned).
+    if (isLeafValue(v) && isStale(formatPath(childSegs), v)) continue;
+    out[k] = pruneSeededLeaves(v, childSegs, isStale);
+  }
+  return out;
 }
 
 // --- capture ---------------------------------------------------------------
@@ -770,7 +881,9 @@ export function extractProduced(
     if (p.from.kind === "bodyField") {
       if (!body) continue;
       for (const field of p.from.fields) {
-        const id = coerceId(body[field]);
+        // A path, so a nested/array-indexed value is reachable
+        // (`beneficiary_clauses[-1].content`).
+        const id = coerceId(getAtPath(body, field));
         if (id) {
           out[p.key] = id;
           break;
@@ -888,8 +1001,9 @@ export interface StepDraft {
   seeded?: SeedSnapshot;
 }
 
-/** Seeded values per target, keyed by field name (both are strings: a context
- *  value or a `const` mapping). */
+/** Seeded values per target, keyed by the mapping's PATH (both are strings: a
+ *  context value or a `const` mapping). Body keys are leaf paths, matching what
+ *  `flattenLeaves` produces for a restored draft. */
 export interface SeedSnapshot {
   params?: Record<string, string>;
   body?: Record<string, string>;
@@ -964,8 +1078,32 @@ export interface ParcoursState {
 export function defaultContextValues(): ContextValues {
   return {
     date_of_effect: defaultDateOfEffect(),
-    beneficiary_clause: DEFAULT_BENEFICIARY_CLAUSE,
+    beneficiary_clause_content: DEFAULT_BENEFICIARY_CLAUSE,
+    beneficiary_clause_date_of_effect: defaultClauseDateOfEffect(),
   };
+}
+
+/** The clause was a single string until the contracts made it
+ *  `{content, date_of_effect}`. A session persisted before that carries the old
+ *  key; move its text to the content key so a run in progress keeps the
+ *  designation the user settled on. Also refreshes a clause date that is no
+ *  longer strictly in the future (a session that crossed midnight, or one
+ *  restored from an earlier day), which would otherwise 422. */
+export function migrateContextValues(values: ContextValues): ContextValues {
+  const legacy = (values as Record<string, unknown>).beneficiary_clause;
+  const next: ContextValues = { ...values };
+  delete (next as Record<string, unknown>).beneficiary_clause;
+  if (typeof legacy === "string" && legacy && !next.beneficiary_clause_content)
+    next.beneficiary_clause_content = legacy;
+  // Refresh a clause date that has gone stale, but NEVER resurrect one the user
+  // emptied on purpose: an absent key means "no value yet", `""` means "don't
+  // send this" (and `buildSeedForStep` honours that by omitting the leaf). Same
+  // rule `loadParcoursState` states for every other context value — only missing
+  // keys are filled, never empty ones.
+  const clauseDate = next.beneficiary_clause_date_of_effect;
+  if (clauseDate !== "" && !isFutureDate(clauseDate))
+    next.beneficiary_clause_date_of_effect = defaultClauseDateOfEffect();
+  return next;
 }
 
 export function initialState(def: ParcoursDef): ParcoursState {
@@ -999,7 +1137,13 @@ export function loadParcoursState(def: ParcoursDef): ParcoursState {
         // filled, never empty ones.
         return {
           ...parsed,
-          values: { ...defaultContextValues(), ...parsed.values },
+          // Migrate BEFORE filling defaults: the legacy clause string must land
+          // in the content key while that key is still empty, or the default
+          // would mask it.
+          values: {
+            ...defaultContextValues(),
+            ...migrateContextValues(parsed.values ?? {}),
+          },
           // Drop ids of steps that no longer exist or are no longer optional, so
           // a renamed step doesn't linger as a phantom selection for the session.
           ...(parsed.autoOptional

@@ -1,12 +1,51 @@
 "use client";
 
-import { Hand, ListChecks, Loader2, Square, Wand2 } from "lucide-react";
+import {
+  AlertTriangle,
+  Hand,
+  ListChecks,
+  Loader2,
+  Square,
+  Wand2,
+} from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
 import { Card, CardBody } from "@/components/Card";
 import type { ParcoursMode, ParcoursStep } from "@/lib/parcours";
+import type { SchemaIssue } from "@/lib/schema-sample";
+
+/** One step whose generated body didn't fit the synced contract. */
+export interface AutoDriftEntry {
+  stepTitle: string;
+  issues: SchemaIssue[];
+}
+
+// Grouped by what the reader has to DO about it, because the three cases have
+// very different causes and lumping them under « écarts avec le contrat » made a
+// missing prerequisite look like the spec had changed.
+const ISSUE_GROUPS: {
+  kinds: SchemaIssue["kind"][];
+  label: string;
+  hint: string;
+}[] = [
+  {
+    kinds: ["type-mismatch", "enum-violation", "constraint-violation"],
+    label: "Écarts avec le contrat OpenAPI",
+    hint: "Le contrat et la requête ne s'accordent pas : resynchronisez les contrats, puis signalez l'écart s'il persiste.",
+  },
+  {
+    kinds: ["missing-required"],
+    label: "Champs requis manquants",
+    hint: "En général une étape précédente n'a pas encore produit son identifiant — ce n'est pas un changement de contrat.",
+  },
+  {
+    kinds: ["unknown-property", "read-only-property"],
+    label: "Propriétés envoyées hors contrat",
+    hint: "Indicatif : la propriété n'est pas déclarée (ou est en lecture seule). Sans interdiction explicite, l'API peut l'accepter.",
+  },
+];
 
 // Status of the fully-automatic run, owned by app/parcours/page.tsx.
 export type AutoPhase =
@@ -44,8 +83,8 @@ const MODES: {
 
 // Steps whose title already says « (optionnel) » would read « ... (optionnel) »
 // twice next to a checkbox that says as much — drop the suffix.
-function shortTitle(step: ParcoursStep): string {
-  return step.title.replace(/\s*\(optionnel\)\s*$/i, "");
+function shortTitle(title: string): string {
+  return title.replace(/\s*\(optionnel\)\s*$/i, "");
 }
 
 // Mode selector for the parcours + the launch/stop/resume controls of the fully
@@ -63,6 +102,7 @@ export default function ParcoursModePanel({
   optionalSteps,
   selectedOptional,
   onToggleOptional,
+  drift = [],
 }: {
   mode: ParcoursMode;
   onModeChange: (mode: ParcoursMode) => void;
@@ -81,6 +121,9 @@ export default function ParcoursModePanel({
    *  ran from one skipped for being unticked, so it retries a ticked one. */
   selectedOptional: string[];
   onToggleOptional: (stepId: string, run: boolean) => void;
+  /** Contract mismatches collected during the run (see `autoRequestIssues`).
+   *  Purely informational — the run sent the request anyway. */
+  drift?: AutoDriftEntry[];
 }) {
   const active = MODES.find((m) => m.value === mode) ?? MODES[0];
   return (
@@ -190,7 +233,7 @@ export default function ParcoursModePanel({
                     htmlFor={inputId}
                     className="text-muted-foreground text-[11px] leading-snug font-normal"
                   >
-                    {shortTitle(step)}
+                    {shortTitle(step.title)}
                   </Label>
                 </div>
               );
@@ -201,6 +244,49 @@ export default function ParcoursModePanel({
             </p>
           </div>
         )}
+
+        {/* What the generated bodies could NOT satisfy. Bodies come from the
+            synced OpenAPI contracts, so this lists the leftovers — and separates
+            a genuine contract disagreement from a step that simply lacks an id
+            yet, which is not the same problem. The request was sent either way. */}
+        {mode === "auto" &&
+          ISSUE_GROUPS.map((group) => {
+            const entries = drift
+              .map((d) => ({
+                stepTitle: d.stepTitle,
+                issues: d.issues.filter((i) => group.kinds.includes(i.kind)),
+              }))
+              .filter((d) => d.issues.length > 0);
+            if (!entries.length) return null;
+            return (
+              <div
+                key={group.label}
+                className="border-border/60 space-y-1.5 rounded-md border p-2"
+              >
+                <p className="text-foreground flex items-center gap-1.5 text-[11px] font-medium">
+                  <AlertTriangle className="size-3.5 shrink-0 text-amber-600 dark:text-amber-500" />
+                  {group.label}
+                </p>
+                {entries.map((d, i) => (
+                  <div key={`${d.stepTitle}-${i}`} className="space-y-0.5">
+                    <p className="text-muted-foreground text-[11px] font-medium">
+                      {shortTitle(d.stepTitle)}
+                    </p>
+                    <ul className="text-muted-foreground list-disc space-y-0.5 pl-4 text-[11px] leading-snug">
+                      {d.issues.map((issue, j) => (
+                        <li key={`${issue.path}-${issue.kind}-${j}`}>
+                          {issue.message}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                ))}
+                <p className="text-muted-foreground text-[11px] leading-snug">
+                  {group.hint}
+                </p>
+              </div>
+            );
+          })}
       </CardBody>
     </Card>
   );
