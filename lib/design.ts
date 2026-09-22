@@ -14,6 +14,7 @@ import {
   FileSignature,
   User,
   FileText,
+  Mail,
   ScrollText,
   MessageSquareWarning,
   Webhook,
@@ -224,6 +225,15 @@ export const API_THEME: Record<string, ApiTheme> = {
     bgSoft: "bg-indigo-50 dark:bg-indigo-900/30",
     text: "text-indigo-800 dark:text-indigo-200",
     border: "border-indigo-200/80 dark:border-indigo-800/60",
+  },
+  letter: {
+    label: "Letter",
+    icon: Mail,
+    ring: "ring-cyan-500/25 dark:ring-cyan-400/25",
+    bg: "bg-cyan-100 dark:bg-cyan-900/40",
+    bgSoft: "bg-cyan-50 dark:bg-cyan-900/30",
+    text: "text-cyan-800 dark:text-cyan-200",
+    border: "border-cyan-200/80 dark:border-cyan-800/60",
   },
   "order-book": {
     label: "Order Book",
