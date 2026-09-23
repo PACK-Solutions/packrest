@@ -6,11 +6,11 @@ import {
   resolveDocumentOwner,
   type DocumentOwnerIds,
 } from "@/lib/document-owner";
+import { dereference } from "@/lib/deref";
 import type { OpenApiDocument } from "@/lib/types";
 
-// Trimmed document.yaml: the three owner-scoped sub-enums the contract uses to
-// say which owner a `document_type` may be attached to. They are orphan schemas
-// (DocumentCreate keeps the full enum), hence read from components.schemas.
+// Trimmed pre-0.0.96 document.yaml: the three owner-scoped sub-enums are orphan
+// schemas (DocumentCreate keeps the full enum), hence read by name.
 const doc = {
   openapi: "3.1.0",
   info: { title: "Document Management API", version: "0.0.73" },
@@ -68,6 +68,62 @@ describe("buildDocumentOwnerMap", () => {
       "payment_method_id",
     ]);
     expect(ownerMap.UNKNOWN_TYPE).toBeUndefined();
+  });
+
+  it("reads the sub-enums DocumentCreate's anyOf branches $ref (0.0.96+)", () => {
+    const schemas = doc.components!.schemas!;
+    const branch = (owner: string, subEnum: string) => ({
+      required: [owner],
+      properties: { document_type: { $ref: `#/components/schemas/${subEnum}` } },
+    });
+    const v96 = dereference({
+      ...doc,
+      components: {
+        schemas: {
+          ...schemas,
+          // Orphan look-alike: the branch reference wins over the name.
+          PersonDocumentType: { type: "string", enum: ["STALE"] },
+          PersonTypes: schemas.PersonDocumentType,
+          DocumentCreate: {
+            type: "object",
+            properties: { document_type: { enum: ["ANY"] } },
+            anyOf: [
+              branch("contract_id", "ContractDocumentType"),
+              branch("person_id", "PersonTypes"),
+              branch("payment_method_id", "PaymentMethodDocumentType"),
+            ],
+          },
+        },
+      },
+    } as unknown as OpenApiDocument);
+    expect(buildDocumentOwnerMap(v96)).toEqual(ownerMap);
+  });
+
+  it("falls back to the name only for an owner whose branch is unreadable", () => {
+    const partial = dereference({
+      ...doc,
+      components: {
+        schemas: {
+          ...doc.components!.schemas!,
+          DocumentCreate: {
+            type: "object",
+            anyOf: [
+              {
+                required: ["contract_id"],
+                properties: {
+                  document_type: {
+                    $ref: "#/components/schemas/ContractDocumentType",
+                  },
+                },
+              },
+              { required: ["person_id"] },
+              { required: ["payment_method_id"], properties: { document_type: {} } },
+            ],
+          },
+        },
+      },
+    } as unknown as OpenApiDocument);
+    expect(buildDocumentOwnerMap(partial)).toEqual(ownerMap);
   });
 
   it("returns an empty map without the sub-enums", () => {

@@ -1,15 +1,17 @@
 import { loadSpec } from "@/lib/specs";
-import type { OpenApiDocument } from "@/lib/types";
+import { mergeAllOf } from "@/lib/schema-normalize";
+import type { JsonSchema, OpenApiDocument } from "@/lib/types";
 
 // Which owner id a document may be attached to depends on its `document_type`:
 // the Document API validates the type against an owner-scoped sub-enum and
 // answers 422 `UNPROCESSABLE` otherwise ("Document type 'PROOF_OF_ADDRESS'
 // cannot be attached to the provided owner (contract_id)").
 //
-// The contract expresses that mapping as three sibling schemas — one per owner
-// field — each narrowing the master `DocumentType`. They are orphan schemas
-// (never `$ref`'d by `DocumentCreate`, which keeps the full enum), so the
-// mapping has to be read out of `components.schemas` ourselves.
+// The contract expresses that mapping as three sub-enums — one per owner field
+// — each narrowing the master `DocumentType`. Since 0.0.96 `DocumentCreate`
+// `$ref`s them from its `anyOf` branches (`required: [owner]` +
+// `properties.document_type`), which is where the mapping is read. Older
+// contracts left them orphan in `components.schemas`, looked up by name.
 
 export const OWNER_FIELDS = [
   "person_id",
@@ -54,9 +56,40 @@ export interface ResolvedDocumentOwner {
   missingPreferred: DocumentOwnerField | null;
 }
 
+type OwnerSubEnums = Partial<Record<DocumentOwnerField, unknown[]>>;
+
+function isOwnerField(name: string): name is DocumentOwnerField {
+  return (OWNER_FIELDS as readonly string[]).includes(name);
+}
+
+/** The sub-enums as `DocumentCreate`'s `anyOf` branches reference them. */
+function subEnumsFromCreateBranches(
+  schemas: Record<string, JsonSchema>,
+): OwnerSubEnums {
+  const found: OwnerSubEnums = {};
+  for (const branch of schemas.DocumentCreate?.anyOf ?? []) {
+    const values = mergeAllOf(branch.properties?.document_type ?? {}).enum;
+    if (!Array.isArray(values)) continue;
+    for (const owner of (branch.required ?? []).filter(isOwnerField)) {
+      found[owner] = [...(found[owner] ?? []), ...values];
+    }
+  }
+  return found;
+}
+
+function subEnumsByName(schemas: Record<string, JsonSchema>): OwnerSubEnums {
+  const found: OwnerSubEnums = {};
+  for (const owner of OWNER_FIELDS) {
+    const values = schemas[SUB_ENUM_BY_OWNER[owner]]?.enum;
+    if (Array.isArray(values)) found[owner] = values;
+  }
+  return found;
+}
+
 /**
- * Read the type → owners mapping out of a Document API document. Returns an
- * empty map when the sub-enums are absent (older contract) — callers then keep
+ * Read the type → owners mapping out of a Document API document, per owner:
+ * its `DocumentCreate` branch when readable, else its sub-enum by name. Returns
+ * an empty map when neither declares any owner's types — callers then keep
  * their own preference rather than inventing a mapping.
  */
 export function buildDocumentOwnerMap(
@@ -65,10 +98,12 @@ export function buildDocumentOwnerMap(
   const schemas = doc?.components?.schemas;
   const map: DocumentOwnerMap = {};
   if (!schemas) return map;
+  const subEnums = {
+    ...subEnumsByName(schemas),
+    ...subEnumsFromCreateBranches(schemas),
+  };
   for (const owner of OWNER_FIELDS) {
-    const values = schemas[SUB_ENUM_BY_OWNER[owner]]?.enum;
-    if (!Array.isArray(values)) continue;
-    for (const v of values) {
+    for (const v of subEnums[owner] ?? []) {
       if (typeof v !== "string" || !v.trim()) continue;
       const type = v.trim();
       const owners = (map[type] ??= []);
@@ -99,7 +134,7 @@ export async function loadDocumentOwnerMap(): Promise<DocumentOwnerMap> {
   if (!Object.keys(map).length)
     throw new Error(
       "Le contrat de l'API document ne déclare pas les types par propriétaire " +
-        `(${Object.values(SUB_ENUM_BY_OWNER).join(", ")}) — resynchronisez les specs.`,
+        `(ni dans les branches anyOf de DocumentCreate, ni via ${Object.values(SUB_ENUM_BY_OWNER).join(", ")}) — resynchronisez les specs.`,
     );
   return map;
 }
