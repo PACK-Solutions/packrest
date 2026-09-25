@@ -17,7 +17,11 @@ import {
   defaultClauseDateOfEffect,
   type ContextValues,
 } from "@/lib/parcours";
-import { randomAmountCents, tinNumber } from "@/lib/fake-fields";
+import {
+  externalReference,
+  randomAmountCents,
+  tinNumber,
+} from "@/lib/fake-fields";
 import { SAMPLE_SKIP, type SampleHint } from "@/lib/schema-sample";
 import type { AutoExtras, AutoRunCtx } from "@/lib/parcours-auto";
 
@@ -35,6 +39,13 @@ export function money(minEuros: number, maxEuros: number): Record<string, unknow
  *  falling back to this run's generated identity. */
 function holderName(ctx: AutoRunCtx): string {
   return ctx.values.person_name || ctx.identity.fullName;
+}
+
+/** The run's membership number. A semi-auto seed persisted before the identity
+ *  carried one gets it drawn once, onto that identity, so every later pre-fill
+ *  of the run agrees. */
+export function individualExternalReference(ctx: AutoRunCtx): string {
+  return (ctx.identity.externalReference ??= externalReference());
 }
 
 /** Every id already in the parcours context becomes a hint on its own name, so
@@ -60,6 +71,7 @@ export function parcoursHints(
     { name: "first_name", value: () => ctx.identity.firstName },
     { name: "last_name", value: () => ctx.identity.lastName },
     { name: "date_of_birth", value: () => ctx.identity.birthDate },
+    { name: "external_reference", value: () => individualExternalReference(ctx) },
 
     // --- address ----------------------------------------------------------
     { name: "line1", value: () => ctx.address.line1 },
