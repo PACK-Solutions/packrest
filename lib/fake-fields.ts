@@ -91,6 +91,13 @@ export function tinNumber(): string {
   return digits(9);
 }
 
+// The insurer's membership number (`external_reference` on an individual). It
+// must be unique across individuals, so 10 random digits after the insurer's
+// "75" prefix (the shape of the contract's example) keep collisions negligible.
+export function externalReference(): string {
+  return `75${digits(10)}`;
+}
+
 export interface FieldGenerator {
   key: string;
   label: string;

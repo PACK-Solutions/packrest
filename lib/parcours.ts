@@ -328,7 +328,7 @@ const STEPS: ParcoursStep[] = [
     operationId: "createIndividual",
     title: "Créer la personne",
     description:
-      "Renseignez le prénom, le nom et la date de naissance (first_name, last_name, birth). La personne est créée au statut DRAFT.",
+      "Renseignez le prénom, le nom, la date de naissance (first_name, last_name, birth) et la référence externe (external_reference, numéro d'adhérent unique chez l'assureur, obligatoire pour soumettre la personne). La personne est créée au statut DRAFT.",
     produces: [{ key: "person_id", from: { kind: "bodyField", fields: ["id", "person_id"] } }],
   },
   {

@@ -66,6 +66,7 @@ function makeCtx(values: ContextValues = {}) {
       lastName: "Durand",
       birthDate: "1980-01-15",
       fullName: "Test Durand",
+      externalReference: "7500000001",
     },
     iban: "FR7630006000011234567890189",
     bic: "AGRIFRPP",
@@ -176,6 +177,8 @@ const STUB_SCHEMAS: Record<string, JsonSchema> = {
         required: ["date_of_birth"],
         properties: { date_of_birth: { type: "string", format: "date" } },
       },
+      // Optional in the create schema, required by the submit endpoint.
+      external_reference: { type: "string", minLength: 1, maxLength: 50 },
     },
   },
   upsertPersonAddressByType: {
@@ -355,9 +358,9 @@ describe("fake-fields generators", () => {
 
 describe("buildAutoRequest", () => {
   it("create-individual carries the identity, derived from the contract", () => {
-    // No AUTO_PLAN body at all: every field here comes from IndividualCreate's
-    // required set, valued by the hint registry — including the nested
-    // `birth.date_of_birth` the contract nests one level down.
+    // IndividualCreate's required set, valued by the hint registry — including
+    // the nested `birth.date_of_birth` — plus the one optional field AUTO_PLAN
+    // sends because submitPerson requires it: external_reference.
     const ctx = makeCtx();
     const { pathParams, body } = buildWithSchema(step("create-individual"), ctx);
     expect(pathParams).toEqual({});
@@ -365,8 +368,20 @@ describe("buildAutoRequest", () => {
       first_name: "Test",
       last_name: "Durand",
       birth: { date_of_birth: "1980-01-15" },
+      external_reference: "7500000001",
     });
-    expect(AUTO_PLAN["create-individual"].body).toBeUndefined();
+    expect(
+      autoRequestIssues(body, stubSchema(step("create-individual"))),
+    ).toEqual([]);
+  });
+
+  it("create-individual draws an external_reference for a seed that lacks one", () => {
+    const ctx = makeCtx();
+    delete (ctx.identity as { externalReference?: string }).externalReference;
+    const first = buildWithSchema(step("create-individual"), ctx).body;
+    const again = buildWithSchema(step("create-individual"), ctx).body;
+    expect(first?.external_reference).toMatch(/^75\d{10}$/);
+    expect(again?.external_reference).toBe(first?.external_reference);
   });
 
   it("person-address merges seed path params with the random address", () => {
@@ -384,8 +399,11 @@ describe("buildAutoRequest", () => {
   it("sends nothing derived when the step has no contract to derive from", () => {
     // An unsynced API (or a body-less operation) leaves the seed and the
     // overrides in charge, exactly as before bodies were generated.
-    const ctx = makeCtx();
-    expect(buildAutoRequest(step("create-individual"), ctx).body).toBeNull();
+    const ctx = makeCtx({ person_id: "p-1" });
+    expect(buildAutoRequest(step("person-address"), ctx).body).toBeNull();
+    expect(buildAutoRequest(step("create-individual"), ctx).body).toEqual({
+      external_reference: "7500000001",
+    });
   });
 
   it("the bank account carries the IBAN/BIC, the payment method only its id", () => {
@@ -676,6 +694,7 @@ describe("buildAutoDraftForStep", () => {
       lastName: "Durand",
       birthDate: "1980-01-15",
       fullName: "Test Durand",
+      externalReference: "7500000001",
     },
     iban: "FR7630006000011234567890189",
     bic: "AGRIFRPP",
@@ -691,6 +710,7 @@ describe("buildAutoDraftForStep", () => {
         first_name: "Test",
         last_name: "Durand",
         birth: { date_of_birth: "1980-01-15" },
+        external_reference: "7500000001",
       },
     });
     expect(draft?.params).toBeUndefined();
@@ -1222,8 +1242,14 @@ describe("runParcoursAuto", () => {
         (c.body as Record<string, unknown>).first_name,
         (c.body as Record<string, unknown>).last_name,
         (c.body as Record<string, unknown>).birth,
+        (c.body as Record<string, unknown>).external_reference,
       ]),
     );
+    // A 409 may be a duplicate external_reference: every attempt redraws it.
+    const refs = attempts.map(
+      (c) => (c.body as Record<string, unknown>).external_reference,
+    );
+    expect(new Set(refs).size).toBe(3);
     // Each retry regenerated the identity (collisions are astronomically
     // unlikely across the pools; assert at least the last differs from the first).
     expect(new Set(identities).size).toBeGreaterThan(1);

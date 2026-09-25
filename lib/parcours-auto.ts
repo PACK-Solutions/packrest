@@ -31,6 +31,7 @@ import {
 import {
   adultBirthDate,
   bic,
+  externalReference,
   frCityPostal,
   frFirstName,
   frIban,
@@ -45,7 +46,11 @@ import {
   validateAgainstSchema,
   type SchemaIssue,
 } from "@/lib/schema-sample";
-import { money, parcoursHints } from "@/lib/parcours-hints";
+import {
+  individualExternalReference,
+  money,
+  parcoursHints,
+} from "@/lib/parcours-hints";
 import { findEndpoint, loadSpec } from "@/lib/specs";
 import type { JsonSchema } from "@/lib/types";
 
@@ -56,6 +61,10 @@ export interface AutoIdentity {
   lastName: string;
   birthDate: string; // YYYY-MM-DD
   fullName: string; // "Prénom Nom" — person_name context + account_holder_name
+  /** Membership number at the insurer. Part of the identity so the 409 retry
+   *  (duplicate person OR duplicate reference) redraws it too. Optional only
+   *  because a semi-auto seed persisted before it existed lacks it. */
+  externalReference?: string;
 }
 
 export function randomIdentity(): AutoIdentity {
@@ -66,6 +75,7 @@ export function randomIdentity(): AutoIdentity {
     lastName,
     birthDate: adultBirthDate(),
     fullName: `${firstName} ${lastName}`,
+    externalReference: externalReference(),
   };
 }
 
@@ -225,11 +235,16 @@ function fullAllocation(fundId?: string): Record<string, unknown> {
 //   • a path param no earlier step captures (the CRS country).
 //
 // Steps absent from the table run on the generated body plus their `seedFrom`
-// alone: the three address steps, « Créer la personne », « Compte bancaire »,
-// and both contract steps (whose date_of_effect and beneficiary clause are
+// alone: the three address steps, « Compte bancaire », and both contract steps (whose date_of_effect and beneficiary clause are
 // seeded from the context — see CONTRACT_SUBMISSION_SEEDS).
 export const AUTO_PLAN: Record<string, AutoStepPlan> = {
-  "create-individual": { skipIfPresent: "person_id" },
+  "create-individual": {
+    skipIfPresent: "person_id",
+    // Optional in IndividualCreate (a DRAFT may lack it) but required by
+    // POST /individuals/{id}/submit, which takes no body — a constraint the
+    // create schema cannot state. The value comes from the hint registry.
+    body: (ctx) => ({ external_reference: individualExternalReference(ctx) }),
+  },
   // The three address steps need nothing: AddressCreate requires line1 /
   // postal_code / city / country_code, all supplied by the hints from the run's
   // single address, and `address_type` comes from each step's `seedFrom` const.
