@@ -160,6 +160,45 @@ export function collapseNullableVariants(schema: JsonSchema): JsonSchema {
   return { ...schema, [key]: nonNull, nullable: true };
 }
 
+// The writable `const` properties of an object schema, with their values. A
+// const has exactly one valid value, so an object that is sent carries it.
+export function constProperties(
+  properties: Record<string, JsonSchema>,
+): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [name, sub] of Object.entries(properties)) {
+    if (isReadOnly(sub)) continue;
+    const eff = collapseNullableVariants(mergeAllOf(sub));
+    if (eff.const !== undefined) out[name] = eff.const;
+  }
+  return out;
+}
+
+// Whether an object value holds anything beyond its schema's consts. Blanks
+// (undefined, null, "", empty arrays, nested objects that are themselves blank
+// or const-only) and a const's own value don't count: an optional `Rate` that
+// only received its self-emitted `scale` is absent, not `{ scale: 5 }` — which
+// the server rejects for the missing `value`.
+export function hasNonConstContent(
+  value: Record<string, unknown>,
+  properties: Record<string, JsonSchema>,
+): boolean {
+  const consts = constProperties(properties);
+  return Object.entries(value).some(([name, v]) => {
+    if (v === undefined || v === null || v === "") return false;
+    if (Array.isArray(v)) return v.length > 0;
+    if (name in consts && consts[name] === v) return false;
+    if (typeof v === "object") {
+      const sub = properties[name];
+      const subProps = sub
+        ? (collapseNullableVariants(mergeAllOf(sub)).properties ?? {})
+        : {};
+      return hasNonConstContent(v as Record<string, unknown>, subProps);
+    }
+    return true;
+  });
+}
+
 // Orders object entries so required fields render before optional ones, each
 // group keeping its original (schema) order. Shared by the JSON body form
 // (SchemaField's ObjectField) and the multipart body form so the two never

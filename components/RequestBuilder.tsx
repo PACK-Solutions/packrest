@@ -419,10 +419,19 @@ export default function RequestBuilder(props: Props) {
     body: null,
   });
   draftSnapshotRef.current = { params: paramValues, body: bodyValue };
+  const mountSnapshotRef = useRef(JSON.stringify(draftSnapshotRef.current));
   const onDraftChangeRef = useRef(onDraftChange);
   onDraftChangeRef.current = onDraftChange;
   useEffect(() => {
-    return () => onDraftChangeRef.current?.(draftSnapshotRef.current);
+    return () => {
+      // Nothing changed since mount → nothing to report. StrictMode's simulated
+      // unmount lands here right after mount, and reporting that untouched
+      // snapshot would overwrite a draft the host wrote meanwhile (the semi-auto
+      // pre-fill, delivered through `seed`).
+      const snapshot = draftSnapshotRef.current;
+      if (JSON.stringify(snapshot) === mountSnapshotRef.current) return;
+      onDraftChangeRef.current?.(snapshot);
+    };
   }, []);
 
   // Keyboard shortcuts: ⌘/Ctrl+Entrée exécute, Échap ferme la navigation HAL.

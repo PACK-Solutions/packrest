@@ -334,7 +334,10 @@ function Parcours() {
   // Resolve the active step's endpoint (spec + operation) the same way the
   // single-endpoint page does.
   const [loaded, setLoaded] = useState<LoadedEntry | null>(null);
-  const [loadingEntry, setLoadingEntry] = useState(true);
+  // Id of the step whose endpoint resolution has settled (found or not). Tagged
+  // by step so the first render of a new step never reads the previous step's
+  // settled state — the once-per-step semi pre-fill depends on it.
+  const [resolvedStepId, setResolvedStepId] = useState<string | null>(null);
   // Tagged with the step it belongs to so an adjacent picker step never renders
   // the previous step's response through its own SelectSpec (mirrors LoadedEntry).
   const [stepResponse, setStepResponse] =
@@ -348,7 +351,7 @@ function Parcours() {
   useEffect(() => {
     if (!activeStep) return;
     let cancelled = false;
-    setLoadingEntry(true);
+    setResolvedStepId(null);
     setLoaded(null);
     // Clear a stale response from another step — but keep one already tagged
     // for THIS step (the auto-run pauses at the picker by storing the fetched
@@ -356,7 +359,9 @@ function Parcours() {
     setStepResponse((prev) =>
       prev && prev.stepId === activeStep.id ? prev : null,
     );
-    loadSpec(activeStep.apiId).then((spec) => {
+    // A spec that fails to parse settles like a missing one, so the step shows
+    // « introuvable » instead of resolving forever.
+    loadSpec(activeStep.apiId).catch(() => null).then((spec) => {
       if (cancelled) return;
       const entry = spec ? findEndpoint(spec, activeStep.apiId, activeStep.operationId) : null;
       if (spec && entry) {
@@ -371,7 +376,7 @@ function Parcours() {
       } else {
         setLoaded(null);
       }
-      setLoadingEntry(false);
+      setResolvedStepId(activeStep.id);
     });
     return () => {
       cancelled = true;
@@ -389,9 +394,12 @@ function Parcours() {
     [loaded, activeStep],
   );
   // `setMode` pre-fills the active step synchronously and must not be re-created
-  // on every schema change, so it reads the schema through a ref.
+  // on every schema change, so it reads the schema — and whether it is settled
+  // for the step it targets — through refs.
   const activeBodySchemaRef = useRef<JsonSchema | undefined>(undefined);
   activeBodySchemaRef.current = activeBodySchema;
+  const resolvedStepIdRef = useRef<string | null>(null);
+  resolvedStepIdRef.current = resolvedStepId;
 
   // Fetch dropdown options for the active step's `fieldOptions` (e.g. the chosen
   // product's funds) so matching leaf inputs in the body form become searchable
@@ -666,12 +674,14 @@ function Parcours() {
       setAutoError(null);
       setAutoStatus((s) => (s.phase === "idle" ? s : { phase: "idle" }));
     }
-    // The mode-switch remount (the builder's key includes the mode) unmounts
-    // the active step's form; discard the single onDraftChange it fires so the
-    // old mode's values (e.g. the semi pre-fill) don't persist back as a draft.
-    skipDraftSaveRef.current = activeStepIdRef.current ?? null;
     setState((prev) => {
       if (!prev || prev.mode === mode) return prev; // no-op: already this mode
+      // The mode-switch remount (the builder's key includes the mode) unmounts
+      // the active step's form; discard the onDraftChange it may fire so the
+      // old mode's values (e.g. the semi pre-fill) don't persist back as a
+      // draft. Idempotent, so safe in an updater; cleared once the new mode has
+      // committed (see the effect below).
+      skipDraftSaveRef.current = activeStepIdRef.current ?? null;
       const next: ParcoursState = { ...prev, mode };
       // Generate the stable identity/bank details the semi-auto pre-fill reuses
       // across steps (person ↔ holder, bank account ↔ SEPA mandate IBAN).
@@ -694,12 +704,14 @@ function Parcours() {
       }
       // Pre-fill the ACTIVE step's form synchronously so semi mode fills it on
       // the very next render — no wait for the follow-up effect. The premium
-      // steps (async fund list) and steps with nothing to fill are left to it.
+      // steps (async fund list), steps with nothing to fill and a step whose
+      // contract is still resolving are left to it.
       if (mode === "semi" && def) {
         const step = def.steps.find((s) => s.id === prev.currentStepId);
-        const draft = step
-          ? semiPrefillDraft(step, next, activeBodySchemaRef.current)
-          : null;
+        const draft =
+          step && resolvedStepIdRef.current === step.id
+            ? semiPrefillDraft(step, next, activeBodySchemaRef.current)
+            : null;
         if (step && draft) {
           next.drafts = { ...next.drafts, [step.id]: draft };
           next.semiPrefilled = [...(next.semiPrefilled ?? []), step.id];
@@ -709,6 +721,15 @@ function Parcours() {
       return next;
     });
   }, [def]);
+
+  // The skip covers one mode switch only. Passive unmounts run before this
+  // effect in the commit that applies the new mode, so the outgoing form has
+  // reported by now — or never will (step still resolving, form untouched) and
+  // a lingering skip would swallow the next real save.
+  const currentMode = state?.mode;
+  useEffect(() => {
+    skipDraftSaveRef.current = null;
+  }, [currentMode]);
 
   // Semi-automatic mode: pre-fill the active step's form with random-but-
   // plausible data (the same request the auto-run would send) so the user only
@@ -722,11 +743,12 @@ function Parcours() {
     if (state.done.includes(step.id)) return;
     if ((state.semiPrefilled ?? []).includes(step.id)) return; // filled once
     if (!state.autoSeed) return;
-    // Wait for the endpoint resolution: the pre-fill happens ONCE per step, so
-    // running it before the contract is available would permanently leave the
-    // form with only the seeded fields. A spec that fails to load resolves too
-    // (`loaded` stays null), and the pre-fill then proceeds without a schema.
-    if (loadingEntry) return;
+    // Wait for THIS step's endpoint resolution: the pre-fill happens ONCE per
+    // step, so running it before the contract is available would permanently
+    // leave the form with only the seeded fields. A spec that fails to load
+    // settles too (`loaded` stays null), and the pre-fill then proceeds without
+    // a schema.
+    if (resolvedStepId !== step.id) return;
     if (stepNeedsFund(step)) {
       // The fund catalogue is fetched into `fieldOpts` on step entry; wait only
       // while it is still resolving for THIS step. Once resolved with no fund
@@ -752,7 +774,7 @@ function Parcours() {
     state,
     fieldOpts,
     recordPrefill,
-    loadingEntry,
+    resolvedStepId,
     activeBodySchema,
   ]);
 
@@ -939,9 +961,7 @@ function Parcours() {
   // against the new step (which showed the wrong API otherwise).
   const stepEntry =
     loaded && activeStep && loaded.stepId === activeStep.id ? loaded : null;
-  const resolving =
-    !!activeStep &&
-    (loadingEntry || (!!loaded && loaded.stepId !== activeStep.id));
+  const resolving = !!activeStep && resolvedStepId !== activeStep.id;
 
   // Linear step navigation for the step card: Précédent always steps back one
   // (returning to correct an earlier step is always allowed); Suivant advances

@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   bodyHasEditableFields,
   collapseNullableVariants,
+  constProperties,
+  hasNonConstContent,
   isReadOnly,
   mergeAllOf,
 } from "@/lib/schema-normalize";
@@ -405,5 +407,58 @@ describe("defaultFromSchema with an allOf branch", () => {
         ],
       }),
     ).toEqual({ a: "", b: 0 });
+  });
+});
+
+// The person API's `Rate`: no `required` list, `value` enforced server-side,
+// `scale` a const the form self-emits.
+const rate = {
+  type: "object",
+  properties: {
+    scale: { type: "integer", const: 5 },
+    value: { type: "integer" },
+  },
+} satisfies JsonSchema;
+
+describe("constProperties", () => {
+  it("collects writable consts, through an allOf wrapper", () => {
+    expect(
+      constProperties({
+        ...rate.properties,
+        kind: { allOf: [{ type: "string", const: "CRS" }] },
+        server: { type: "string", const: "X", readOnly: true },
+      }),
+    ).toEqual({ scale: 5, kind: "CRS" });
+  });
+});
+
+describe("hasNonConstContent", () => {
+  it("ignores a lone self-emitted const", () => {
+    expect(hasNonConstContent({ scale: 5 }, rate.properties)).toBe(false);
+  });
+
+  it("counts a filled sibling, zero included", () => {
+    expect(hasNonConstContent({ scale: 5, value: 0 }, rate.properties)).toBe(true);
+  });
+
+  it("ignores blanks and nested const-only objects", () => {
+    const controllingPerson = {
+      shareholding_percentage: rate,
+      siren: { type: "string" },
+      tags: { type: "array", items: { type: "string" } },
+    } satisfies Record<string, JsonSchema>;
+    expect(
+      hasNonConstContent(
+        { shareholding_percentage: { scale: 5 }, siren: "", tags: [] },
+        controllingPerson,
+      ),
+    ).toBe(false);
+    expect(
+      hasNonConstContent({ siren: "123456789" }, controllingPerson),
+    ).toBe(true);
+  });
+
+  it("counts a const property holding another value", () => {
+    expect(hasNonConstContent({ scale: 4 }, rate.properties)).toBe(true);
   });
 });

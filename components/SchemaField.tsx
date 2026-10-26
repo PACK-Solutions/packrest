@@ -16,6 +16,8 @@ import Field, { FieldHint, ConstraintBadges } from "@/components/Field";
 import type { JsonSchema } from "@/lib/types";
 import {
   collapseNullableVariants,
+  constProperties,
+  hasNonConstContent,
   isReadOnly,
   mergeAllOf,
   partitionRequiredFirst,
@@ -353,6 +355,18 @@ function ObjectField({
     Object.entries(props).filter(([, sub]) => !isReadOnly(sub)),
     requiredSet,
   );
+  // An OPTIONAL object stays out of the payload until something besides its
+  // consts is filled — a child const self-emits on mount, which would otherwise
+  // post a half-built object (`shareholding_percentage: { scale: 5 }`). Once
+  // present, it carries every const, so filling `value` also sends `scale`.
+  // Array rows and oneOf variants render without `required`: an added row is
+  // never dropped.
+  const emit = (next: Record<string, unknown>) =>
+    onChange(
+      required === false && !hasNonConstContent(next, props)
+        ? undefined
+        : { ...constProperties(props), ...next },
+    );
   return (
     <fieldset className="bg-muted/30 space-y-3 rounded-md border p-3">
       {label && (
@@ -368,7 +382,7 @@ function ObjectField({
           key={propName}
           schema={sub}
           value={obj[propName]}
-          onChange={(next) => onChange({ ...obj, [propName]: next })}
+          onChange={(next) => emit({ ...obj, [propName]: next })}
           name={propName}
           required={childRequired(propName)}
           declaredRequired={requiredSet.has(propName)}
