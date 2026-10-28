@@ -19,7 +19,7 @@
 
 - [x] 3.1 Run `npm run typecheck`, `npm run test:unit` and `npm run build`; all pass.
 - [x] 3.2 Under `npm run tauri:dev`, from a reset parcours in semi mode: execute « Créer la personne » and confirm « Adresse principale » shows line1 / postal_code / city / country_code, then « Compte bancaire » shows holder name / IBAN / BIC / currency / validity date, and the payment-method and contract steps show their full contract-derived bodies.
-- [ ] 3.3 Under `npm run tauri:dev`: switch manual → semi on a not-yet-executed address step right after navigating to it and confirm the full body is pre-filled; edit a field, go back a step and return, and confirm the edit is kept (no re-fill).
+- [x] 3.3 Under `npm run tauri:dev`: switch manual → semi on a not-yet-executed address step right after navigating to it and confirm the full body is pre-filled; edit a field, go back a step and return, and confirm the edit is kept (no re-fill).
 
 ## Workflow follow-up
 
