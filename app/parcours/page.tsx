@@ -1220,6 +1220,7 @@ function Parcours() {
                   onResult(activeStep, res, stepEntry.entry.method.toUpperCase())
                 }
                 simplified
+                idOrigin="parcours"
                 // Restored WITHOUT the fields the context feeds: those come from
                 // `seed` above, so a re-created contract (or an edited context
                 // value) wins over the ids this step's snapshot was taken with.

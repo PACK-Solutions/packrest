@@ -720,6 +720,7 @@ export async function runParcoursAuto(
           pathParams: sent.pathParams,
           ...(sent.body !== null ? { body: sent.body } : {}),
           signal,
+          collectIds: "parcours",
         });
         if (!res || res.status !== 409 || signal.aborted) break;
       }

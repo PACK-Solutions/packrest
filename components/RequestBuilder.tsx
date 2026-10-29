@@ -7,6 +7,7 @@ import { Card, CardHeader, CardBody } from "@/components/Card";
 import Tabs from "@/components/Tabs";
 import MethodBadge from "@/components/MethodBadge";
 import Field, { ConstraintBadges } from "@/components/Field";
+import IdPicker, { IdPickerApiContext } from "@/components/IdPicker";
 import SchemaField from "@/components/SchemaField";
 import JsonEditor from "@/components/JsonEditor";
 import MultipartBodySection from "@/components/MultipartBodySection";
@@ -44,6 +45,7 @@ import type {
 import { buildManagedHeaders } from "@/lib/curl";
 import { formatUploadSize } from "@/lib/multipart";
 import { flattenLeaves, getAtPath, setAtPath } from "@/lib/json-path";
+import { isIdField, type IdOrigin } from "@/lib/id-collector";
 import {
   bodyHasEditableFields,
   collapseNullableVariants,
@@ -96,6 +98,8 @@ interface Props {
   /** Parcours: called on unmount with the current form snapshot so the host can
    *  persist it per step. */
   onDraftChange?: (draft: { params: Record<string, string>; body: unknown }) => void;
+  /** Marks the ids this form creates as coming from the Parcours. */
+  idOrigin?: IdOrigin;
   /** Parcours picker steps: cap the response panel to the form column's height
    *  (instead of the viewport) so a selection list rendered below the builder
    *  sits right under the « Exécuter » button rather than far down the page. */
@@ -126,6 +130,7 @@ export default function RequestBuilder(props: Props) {
     initialDraft,
     onDraftChange,
     compactResponse,
+    idOrigin,
   } = props;
 
   const allParams = useMemo<OpenApiParameter[]>(
@@ -296,6 +301,8 @@ export default function RequestBuilder(props: Props) {
     operationId,
     operation,
     path,
+    pathParamValues: pathParams.map((p) => paramValues[p.name] ?? ""),
+    idOrigin,
   });
 
   // HAL `_links` navigation — drives the followStack owned above.
@@ -636,78 +643,80 @@ export default function RequestBuilder(props: Props) {
 
       <Card>
         <CardBody className="p-3">
-          <Tabs
-            // Keep every tab mounted so a body-tab `const` discriminator
-            // (e.g. DecisionCreate's `outcome`) self-emits even when the form
-            // opens on the Paramètres tab — otherwise the body ships as `{}`.
-            mountAll
-            tabs={[
-              ...(pathParams.length || queryParams.length
-                ? [
-                    {
-                      id: "params",
-                      label: "Paramètres",
-                      count: pathParams.length + queryParams.length,
-                      content: (
-                        <div className="space-y-3">
-                          {pathParams.length > 0 && (
-                            <ParamGroup
-                              title="Path"
-                              params={pathParams}
-                              values={paramValues}
-                              onChange={setParamValues}
-                            />
-                          )}
-                          {queryParams.length > 0 && (
-                            <ParamGroup
-                              title="Query"
-                              params={queryParams}
-                              values={paramValues}
-                              onChange={setParamValues}
-                            />
-                          )}
-                        </div>
-                      ),
-                    },
-                  ]
-                : []),
-              ...(hasBody
-                ? [
-                    {
-                      id: "body",
-                      label: "Corps",
-                      content: (
-                        <RequestBodyTab
-                          bodySchema={bodySchema}
-                          multipartSchema={multipartSchema}
-                          multipartEncoding={multipartMedia?.encoding}
-                          value={bodyValue}
-                          onChange={setBodyValue}
-                          files={files}
-                          onFilesChange={setFiles}
-                        />
-                      ),
-                    },
-                  ]
-                : []),
-              ...(!simplified
-                ? [
-                    {
-                      id: "headers",
-                      label: "En-têtes",
-                      count: customHeaders.length,
-                      content: (
-                        <HeaderEditor
-                          value={customHeaders}
-                          onChange={setCustomHeaders}
-                          managed={managedHeaders}
-                        />
-                      ),
-                    },
-                  ]
-                : []),
-            ]}
-          />
+          <IdPickerApiContext.Provider value={apiId}>
+            <Tabs
+              // Keep every tab mounted so a body-tab `const` discriminator
+              // (e.g. DecisionCreate's `outcome`) self-emits even when the form
+              // opens on the Paramètres tab — otherwise the body ships as `{}`.
+              mountAll
+              tabs={[
+                ...(pathParams.length || queryParams.length
+                  ? [
+                      {
+                        id: "params",
+                        label: "Paramètres",
+                        count: pathParams.length + queryParams.length,
+                        content: (
+                          <div className="space-y-3">
+                            {pathParams.length > 0 && (
+                              <ParamGroup
+                                title="Path"
+                                params={pathParams}
+                                values={paramValues}
+                                onChange={setParamValues}
+                              />
+                            )}
+                            {queryParams.length > 0 && (
+                              <ParamGroup
+                                title="Query"
+                                params={queryParams}
+                                values={paramValues}
+                                onChange={setParamValues}
+                              />
+                            )}
+                          </div>
+                        ),
+                      },
+                    ]
+                  : []),
+                ...(hasBody
+                  ? [
+                      {
+                        id: "body",
+                        label: "Corps",
+                        content: (
+                          <RequestBodyTab
+                            bodySchema={bodySchema}
+                            multipartSchema={multipartSchema}
+                            multipartEncoding={multipartMedia?.encoding}
+                            value={bodyValue}
+                            onChange={setBodyValue}
+                            files={files}
+                            onFilesChange={setFiles}
+                          />
+                        ),
+                      },
+                    ]
+                  : []),
+                ...(!simplified
+                  ? [
+                      {
+                        id: "headers",
+                        label: "En-têtes",
+                        count: customHeaders.length,
+                        content: (
+                          <HeaderEditor
+                            value={customHeaders}
+                            onChange={setCustomHeaders}
+                            managed={managedHeaders}
+                          />
+                        ),
+                      },
+                    ]
+                  : []),
+              ]}
+            />
+          </IdPickerApiContext.Provider>
         </CardBody>
       </Card>
 
@@ -891,14 +900,22 @@ function ParamGroup({
                   </SelectContent>
                 </Select>
               ) : (
-                <Input
-                  value={values[p.name] ?? ""}
-                  aria-required={p.required || undefined}
-                  onChange={(e) =>
-                    onChange({ ...values, [p.name]: e.target.value })
-                  }
-                  className="h-8 font-mono text-sm"
-                />
+                <div className="flex gap-2">
+                  <Input
+                    value={values[p.name] ?? ""}
+                    aria-required={p.required || undefined}
+                    onChange={(e) =>
+                      onChange({ ...values, [p.name]: e.target.value })
+                    }
+                    className="h-8 font-mono text-sm"
+                  />
+                  {isIdField(p.name, s) && (
+                    <IdPicker
+                      name={p.name}
+                      onPick={(id) => onChange({ ...values, [p.name]: id })}
+                    />
+                  )}
+                </div>
               )}
             </Field>
           );

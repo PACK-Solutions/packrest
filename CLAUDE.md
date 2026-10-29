@@ -59,7 +59,12 @@ http/dialog) are unavailable there — see the fallback note below.
   - Token: `TokenInspector` (decode/inspect the JWT).
   - Helpers: `IdCollector` (reuse ids of created resources), `UuidGenerator`
     (UUIDs for form fields), `FieldGenerator` (checksum-valid sample values:
-    IBAN/BIC/NIR/SIREN/SIRET) — all topbar tools.
+    IBAN/BIC/NIR/SIREN/SIRET) — all topbar tools. `IdPicker` is the in-form
+    counterpart: a button beside every id input (path param or `uuid`/`*_id`
+    body leaf) offering the created and seen ids; parcours `fieldOptions`
+    comboboxes don't get one. For a name in `FETCHABLE_ID_LISTS` (`product_id`)
+    it runs the list itself on first opening and offers a refresh; that input
+    offers those ids only, and no other input offers them.
   - Parcours (guided flow, behind `/parcours`): `ParcoursStepper` (collapsible
     phase rail), `ParcoursModePanel` (manuel / semi-auto / auto + the auto run's
     controls and the checklist of optional steps to execute),
@@ -89,8 +94,17 @@ http/dialog) are unavailable there — see the fallback note below.
   - `update-check.ts` — unified "is something newer?" across both update
     channels (app via GitHub, specs via GitLab); pure logic behind the startup
     notifier + Settings "Mises à jour" card.
-  - `id-collector.ts` — records `id` from 2xx POST response bodies for reuse
-    across APIs; sync cache like `storage.ts`, keeps the 3 most-recent per API.
+  - `id-collector.ts` — records ids for reuse across APIs; sync cache like
+    `storage.ts`. Created: the `id` of a 2xx POST body, 5 most-recent per API,
+    skipped when it equals a path param of the request (submit/update/cancel
+    act on an existing resource). Seen: the items of a 2xx GET on a collection
+    path (`isCollectionPath`, `extractSeenItems`), 20 per list operation.
+    `itemLabel` names both (naming field, else « last_name first_name », else
+    none — the id is shown alone). `recordResponseIds` is the one entry point:
+    RequestBuilder's run, and `callOperation({ collectIds })` — the parcours
+    auto-run uses it on its step calls, the documents step on `createDocument`;
+    ids created in the parcours (any mode)
+    carry `origin: "parcours"`, shown as a « Parcours » badge. `isIdField` decides which inputs get an `IdPicker`.
   - `bruno.ts` / `bruno-export.ts` — Bruno collection (pure JS, unchanged).
   - `dialog.ts` (folder/save pickers), `exporter.ts` (save via `write_file`).
   - `github.ts` (GitHub Releases update check), `app-version.ts` (running app

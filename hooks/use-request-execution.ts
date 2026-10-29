@@ -11,7 +11,7 @@
 
 import { useCallback, useRef, useState } from "react";
 import { executeRequest, type ProxyResponse } from "@/lib/http";
-import { recordCreatedId } from "@/lib/id-collector";
+import { recordResponseIds, type IdOrigin } from "@/lib/id-collector";
 import { buildMultipart } from "@/lib/multipart";
 import { isCustomEnvActive, type SavedHeader } from "@/lib/storage";
 import type { OpenApiOperation, JsonSchema } from "@/lib/types";
@@ -30,6 +30,8 @@ export function useRequestExecution(params: {
   operationId: string;
   operation: OpenApiOperation;
   path: string;
+  pathParamValues: string[];
+  idOrigin?: IdOrigin;
 }) {
   // Operation's own response (set by run). The current displayed response is
   // either this or the top of `followStack` if non-empty.
@@ -83,28 +85,20 @@ export function useRequestExecution(params: {
         custom: isCustomEnvActive(),
       });
       setResponse(res);
-      // ID collector: a POST that created a resource returns its id in the JSON
-      // body's `id` field. Capture it so it can be reused across APIs. The 2xx
-      // guard skips the network-error case (status 0, non-object body).
-      const bodyId =
-        res.body && typeof res.body === "object" && !Array.isArray(res.body)
-          ? (res.body as Record<string, unknown>).id
-          : undefined;
-      if (
-        p.method.toUpperCase() === "POST" &&
-        res.status >= 200 &&
-        res.status < 300 &&
-        (typeof bodyId === "string" || typeof bodyId === "number") &&
-        String(bodyId).trim()
-      ) {
-        recordCreatedId({
+      // ID collector: a created resource's id, or the items of a list, for
+      // reuse across APIs.
+      recordResponseIds(
+        {
           apiId: p.apiId,
           operationId: p.operationId,
           method: p.method,
-          id: String(bodyId).trim(),
-          label: p.operation.summary?.trim() || p.path,
-        });
-      }
+          path: p.path,
+          operationLabel: p.operation.summary?.trim() || p.path,
+          pathParamValues: p.pathParamValues,
+          origin: p.idOrigin,
+        },
+        res,
+      );
     } catch (e) {
       setError((e as Error).message);
     } finally {

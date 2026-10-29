@@ -351,6 +351,7 @@ export default function ParcoursDocuments({
             apiId: "document",
             operationId: "createDocument",
             multipart,
+            collectIds: "parcours",
           });
           if (!created || !isSuccess(created)) {
             setRowError((p) => ({ ...p, [rowKey]: apiErrorMessage(created) }));

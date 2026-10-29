@@ -24,6 +24,7 @@ import {
   isCustomEnvActive,
 } from "@/lib/storage";
 import { fetchToken, currentToken } from "@/lib/token";
+import { recordResponseIds, type IdOrigin } from "@/lib/id-collector";
 import {
   executeRequest,
   type ProxyResponse,
@@ -49,6 +50,9 @@ async function resolveAndAuth(
   url: string;
   headers: Record<string, string>;
   method: string;
+  path: string;
+  summary?: string;
+  pathParamValues: string[];
 } | null> {
   const doc = await loadSpec(apiId);
   if (!doc) return null;
@@ -121,6 +125,9 @@ async function resolveAndAuth(
     url: `${baseUrl}${filledPath}${query ? `?${query}` : ""}`,
     headers,
     method: entry.method.toUpperCase(),
+    path: entry.path,
+    summary: entry.summary,
+    pathParamValues: [...pathKeys].map((k) => pathParams[k] ?? ""),
   };
 }
 
@@ -136,6 +143,8 @@ export async function callOperation(opts: {
   multipart?: MultipartPayload;
   /** Caller-driven cancellation, forwarded to the HTTP layer. */
   signal?: AbortSignal;
+  /** Record the created/listed ids in the ID collector, marked with this origin. */
+  collectIds?: IdOrigin;
 }): Promise<ProxyResponse | null> {
   const resolved = await resolveAndAuth(
     opts.apiId,
@@ -144,9 +153,10 @@ export async function callOperation(opts: {
   );
   if (!resolved) return null;
 
-  return executeRequest({
-    // Default to the spec-declared verb; an explicit opts.method still wins.
-    method: opts.method ?? resolved.method,
+  // Default to the spec-declared verb; an explicit opts.method still wins.
+  const method = opts.method ?? resolved.method;
+  const res = await executeRequest({
+    method,
     url: resolved.url,
     headers: resolved.headers,
     body: opts.body,
@@ -154,6 +164,20 @@ export async function callOperation(opts: {
     custom: isCustomEnvActive(),
     signal: opts.signal,
   });
+  if (opts.collectIds)
+    recordResponseIds(
+      {
+        apiId: opts.apiId,
+        operationId: opts.operationId,
+        method,
+        path: resolved.path,
+        operationLabel: resolved.summary?.trim() || resolved.path,
+        pathParamValues: resolved.pathParamValues,
+        origin: opts.collectIds,
+      },
+      res,
+    );
+  return res;
 }
 
 // GET convenience wrapper (used by the Parcours fieldOptions picker fetch).

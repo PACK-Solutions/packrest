@@ -27,6 +27,8 @@ import { humanizeKey } from "@/lib/humanize";
 import { cn } from "@/lib/utils";
 import { useFieldOptions } from "@/components/FieldOptionsContext";
 import FieldCombobox from "@/components/FieldCombobox";
+import IdPicker from "@/components/IdPicker";
+import { isIdField } from "@/lib/id-collector";
 
 // Sentinel value for the enum <Select>'s "clear" row — Radix throws on an
 // empty <SelectItem value="">.
@@ -249,30 +251,35 @@ export default function SchemaField({
               required={required}
             />
           ) : (
-            <Input
-              type={inputTypeForFormat(effective.format)}
-              // Native date/datetime pickers format from the element's lang.
-              lang="fr-FR"
-              aria-required={required || undefined}
-              value={
-                value === null || value === undefined
-                  ? ""
-                  : effective.format === "date-time"
-                    ? toDatetimeLocal(String(value))
-                    : String(value)
-              }
-              minLength={effective.minLength}
-              maxLength={effective.maxLength}
-              pattern={effective.pattern}
-              // Clearing an optional field should omit it from the payload
-              // (`undefined` → JSON.stringify drops the key), not send `""`.
-              onChange={(e) => {
-                const v = e.target.value;
-                if (v === "")
-                  return onChange((declaredRequired ?? required) ? "" : undefined);
-                onChange(effective.format === "date-time" ? toInstant(v) : v);
-              }}
-            />
+            <div className="flex gap-2">
+              <Input
+                type={inputTypeForFormat(effective.format)}
+                // Native date/datetime pickers format from the element's lang.
+                lang="fr-FR"
+                aria-required={required || undefined}
+                value={
+                  value === null || value === undefined
+                    ? ""
+                    : effective.format === "date-time"
+                      ? toDatetimeLocal(String(value))
+                      : String(value)
+                }
+                minLength={effective.minLength}
+                maxLength={effective.maxLength}
+                pattern={effective.pattern}
+                // Clearing an optional field should omit it from the payload
+                // (`undefined` → JSON.stringify drops the key), not send `""`.
+                onChange={(e) => {
+                  const v = e.target.value;
+                  if (v === "")
+                    return onChange((declaredRequired ?? required) ? "" : undefined);
+                  onChange(effective.format === "date-time" ? toInstant(v) : v);
+                }}
+              />
+              {isIdField(name, effective) && (
+                <IdPicker name={name} onPick={onChange} />
+              )}
+            </div>
           )}
         </Field>
       );

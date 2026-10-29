@@ -4,6 +4,7 @@ import * as React from "react";
 import { Copy, KeyRound, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Sheet,
@@ -23,6 +24,7 @@ import {
 } from "@/components/ui/tooltip";
 import {
   loadCollectedIds,
+  loadSeenIds,
   clearCollectedIds,
   COLLECTED_IDS_CHANGED_EVENT,
   type CollectedId,
@@ -39,11 +41,17 @@ export function IdCollector() {
   const [groups, setGroups] = React.useState<Record<string, CollectedId[]>>(
     {},
   );
+  // Seen ids aren't listed here (the IdPicker offers them) but « Tout vider »
+  // clears them too, so it shows while any are kept.
+  const [hasSeen, setHasSeen] = React.useState(false);
   // apiId → human title, for nicer group headers (falls back to the apiId).
   const [titles, setTitles] = React.useState<Record<string, string>>({});
 
   React.useEffect(() => {
-    const sync = () => setGroups({ ...loadCollectedIds() });
+    const sync = () => {
+      setGroups({ ...loadCollectedIds() });
+      setHasSeen(Object.values(loadSeenIds()).some((list) => list.length > 0));
+    };
     sync();
     window.addEventListener(COLLECTED_IDS_CHANGED_EVENT, sync);
     return () => window.removeEventListener(COLLECTED_IDS_CHANGED_EVENT, sync);
@@ -103,7 +111,7 @@ export function IdCollector() {
         <SheetHeader className="pr-10">
           <SheetTitle>Collecteur d&apos;IDs</SheetTitle>
           <SheetDescription>
-            Les 3 dernières ressources créées par API.
+            Les 5 dernières ressources créées par API.
           </SheetDescription>
         </SheetHeader>
 
@@ -111,8 +119,9 @@ export function IdCollector() {
 
         {apiIds.length === 0 ? (
           <div className="text-muted-foreground flex flex-1 items-center justify-center p-8 text-center text-sm">
-            Aucun id collecté pour l&apos;instant. Créez une ressource (POST)
-            pour commencer.
+            {hasSeen
+              ? "Aucune ressource créée. Les ids vus dans les listes (GET) restent proposés à côté des champs d'id."
+              : "Aucun id collecté pour l'instant. Créez une ressource (POST) pour commencer."}
           </div>
         ) : (
           <ScrollArea className="min-h-0 flex-1">
@@ -130,7 +139,7 @@ export function IdCollector() {
           </ScrollArea>
         )}
 
-        {total > 0 && (
+        {(total > 0 || hasSeen) && (
           <div className="border-border shrink-0 border-t p-3">
             <Button
               variant="ghost"
@@ -208,6 +217,12 @@ function IdRow({ entry }: { entry: CollectedId }) {
       <div className="min-w-0 flex-1">
         <div className="text-muted-foreground truncate text-[11px]">
           {entry.label}
+          {entry.name && <span className="text-foreground"> · {entry.name}</span>}
+          {entry.origin === "parcours" && (
+            <Badge variant="secondary" className="ml-1.5 px-1.5 py-0 text-[10px]">
+              Parcours
+            </Badge>
+          )}
         </div>
         <div className="truncate font-mono text-xs" title={entry.id}>
           {entry.id}
