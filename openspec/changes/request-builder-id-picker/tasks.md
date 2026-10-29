@@ -26,7 +26,7 @@
 
 - [ ] 4.1 `components/IdCollector.tsx`: description says 5 per API; « Tout vider » clears seen ids too. Verify under `npm run tauri:dev` that after « Tout vider » a picker shows the empty state.
 - [x] 4.2 Update `CLAUDE.md` (`id-collector.ts` entry: 5 created per API, seen ids from list responses, the picker; add `IdPicker` to the components list). Verify the text matches the implemented behaviour.
-- [ ] 4.3 Run `npm run typecheck`, `npm run test:unit`, `npm run build`, `npm test` (Playwright, incl. `topbar-tools.spec.ts`; update visual snapshots only if the change is intended) and `cargo check` in `src-tauri/`; all pass.
+- [x] 4.3 Run `npm run typecheck`, `npm run test:unit`, `npm run build`, `npm test` (Playwright, incl. `topbar-tools.spec.ts`; update visual snapshots only if the change is intended) and `cargo check` in `src-tauri/`; all pass.
 
 ## Workflow follow-up
 

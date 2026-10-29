@@ -183,15 +183,25 @@ export default function HelpPage() {
             <p className="text-muted-foreground">
               Quand vous <strong>créez une ressource</strong> (une requête{" "}
               <strong>POST</strong> qui réussit), PackRest mémorise
-              automatiquement son <strong>id</strong>. L&apos;icône{" "}
-              <em>clé</em> du bandeau — avec une pastille indiquant le nombre
-              d&apos;ids retenus — ouvre la liste des{" "}
-              <strong>3 dernières ressources créées par API</strong>. Copiez un
-              id d&apos;un clic pour le réutiliser dans une autre requête (par
-              exemple pour consulter ou modifier la fiche que vous venez de
-              créer). Les boutons <strong>« Vider cette API »</strong> et{" "}
+              automatiquement son <strong>id</strong>, et celui des éléments
+              d&apos;une <strong>liste</strong> (une requête <strong>GET</strong>{" "}
+              sur une collection). L&apos;icône <em>clé</em> du bandeau — avec
+              une pastille indiquant le nombre d&apos;ids créés retenus — ouvre
+              la liste des <strong>5 dernières ressources créées par API</strong>
+              ; celles créées par le parcours portent la pastille{" "}
+              <strong>« Parcours »</strong>. Copiez un id d&apos;un clic pour le
+              réutiliser dans une autre requête. Les boutons{" "}
+              <strong>« Vider cette API »</strong> et{" "}
               <strong>« Tout vider »</strong> effacent la liste quand vous
               n&apos;en avez plus besoin.
+            </p>
+            <p className="text-muted-foreground">
+              Dans un formulaire, chaque champ d&apos;id (un paramètre de chemin
+              ou un champ <code>…_id</code> du corps) a sa propre icône{" "}
+              <em>clé</em> : elle propose, avec une recherche, les ids créés et
+              ceux vus dans les listes, et remplit le champ d&apos;un clic. Sur{" "}
+              <code>product_id</code>, elle charge elle-même la liste des
+              produits la première fois et ne propose que des produits.
             </p>
           </div>
           <div>

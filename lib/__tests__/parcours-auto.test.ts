@@ -31,6 +31,7 @@ import {
 import type { JsonSchema } from "@/lib/types";
 import {
   adultBirthDate,
+  externalReference,
   frCityPostal,
   frFirstName,
   frLastName,
@@ -66,7 +67,7 @@ function makeCtx(values: ContextValues = {}) {
       lastName: "Durand",
       birthDate: "1980-01-15",
       fullName: "Test Durand",
-      externalReference: "7500000001",
+      externalReference: "PACKREST-19800115-AB12",
     },
     iban: "FR7630006000011234567890189",
     bic: "AGRIFRPP",
@@ -315,6 +316,12 @@ function buildWithSchema(
 // --- generators ---------------------------------------------------------------
 
 describe("fake-fields generators", () => {
+  it("externalReference is dated by the local day", () => {
+    expect(externalReference(new Date(2026, 9, 29, 23, 30))).toMatch(
+      /^PACKREST-20261029-[A-Z0-9]{4}$/,
+    );
+  });
+
   it("adultBirthDate stays within 18–80 years", () => {
     for (let i = 0; i < 50; i++) {
       const iso = adultBirthDate();
@@ -368,7 +375,7 @@ describe("buildAutoRequest", () => {
       first_name: "Test",
       last_name: "Durand",
       birth: { date_of_birth: "1980-01-15" },
-      external_reference: "7500000001",
+      external_reference: "PACKREST-19800115-AB12",
     });
     expect(
       autoRequestIssues(body, stubSchema(step("create-individual"))),
@@ -380,7 +387,7 @@ describe("buildAutoRequest", () => {
     delete (ctx.identity as { externalReference?: string }).externalReference;
     const first = buildWithSchema(step("create-individual"), ctx).body;
     const again = buildWithSchema(step("create-individual"), ctx).body;
-    expect(first?.external_reference).toMatch(/^75\d{10}$/);
+    expect(first?.external_reference).toMatch(/^PACKREST-\d{8}-[A-Z0-9]{4}$/);
     expect(again?.external_reference).toBe(first?.external_reference);
   });
 
@@ -402,7 +409,7 @@ describe("buildAutoRequest", () => {
     const ctx = makeCtx({ person_id: "p-1" });
     expect(buildAutoRequest(step("person-address"), ctx).body).toBeNull();
     expect(buildAutoRequest(step("create-individual"), ctx).body).toEqual({
-      external_reference: "7500000001",
+      external_reference: "PACKREST-19800115-AB12",
     });
   });
 
@@ -694,7 +701,7 @@ describe("buildAutoDraftForStep", () => {
       lastName: "Durand",
       birthDate: "1980-01-15",
       fullName: "Test Durand",
-      externalReference: "7500000001",
+      externalReference: "PACKREST-19800115-AB12",
     },
     iban: "FR7630006000011234567890189",
     bic: "AGRIFRPP",
@@ -710,7 +717,7 @@ describe("buildAutoDraftForStep", () => {
         first_name: "Test",
         last_name: "Durand",
         birth: { date_of_birth: "1980-01-15" },
-        external_reference: "7500000001",
+        external_reference: "PACKREST-19800115-AB12",
       },
     });
     expect(draft?.params).toBeUndefined();

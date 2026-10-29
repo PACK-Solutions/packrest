@@ -299,6 +299,59 @@ export function seenIdsFor(apiId: string, operationId: string): SeenId[] {
   return seenCache[`${apiId}::${operationId}`] ?? [];
 }
 
+export interface PickerEntry {
+  id: string;
+  label?: string; // absent when nothing obvious names the resource
+  origin?: IdOrigin;
+  at: number;
+}
+
+export interface PickerGroup {
+  apiId: string;
+  operationId?: string; // seen groups only
+  source: string;
+  entries: PickerEntry[];
+}
+
+// A fetchable list and its input belong to each other: product ids offered on
+// a `subscriber_id` would be noise, and so would persons on a `product_id`.
+function isReservedElsewhere(apiId: string, operationId: string, name?: string): boolean {
+  return Object.entries(FETCHABLE_ID_LISTS).some(
+    ([field, l]) => field !== name && l.apiId === apiId && l.operationId === operationId,
+  );
+}
+
+// The picker's groups for an input named `name`: created ids by API and
+// operation, then each list's seen ids.
+export function pickerGroups(name?: string): PickerGroup[] {
+  const groups: PickerGroup[] = [];
+  for (const [apiId, list] of Object.entries(cache)) {
+    const byOperation = new Map<string, PickerEntry[]>();
+    for (const e of list) {
+      const entries = byOperation.get(e.label) ?? [];
+      entries.push({ id: e.id, label: e.name, origin: e.origin, at: e.createdAt });
+      byOperation.set(e.label, entries);
+    }
+    for (const [operation, entries] of byOperation)
+      groups.push({ apiId, source: `Créés · ${operation}`, entries });
+  }
+  for (const list of Object.values(seenCache)) {
+    if (!list.length) continue;
+    const { apiId, operationId, operationLabel } = list[0];
+    if (isReservedElsewhere(apiId, operationId, name)) continue;
+    groups.push({
+      apiId,
+      operationId,
+      source: `Vus · ${operationLabel}`,
+      entries: list.map((e) => ({ id: e.id, label: e.label, at: e.seenAt })),
+    });
+  }
+  const own = name ? FETCHABLE_ID_LISTS[name] : undefined;
+  return own
+    ? groups.filter((g) => g.apiId === own.apiId && g.operationId === own.operationId)
+    : groups;
+}
+
 // An input that holds a resource id: a uuid, or a `*_id` name (the premium
 // bodies' `payment_method_id` carries no format).
 export function isIdField(name: string | undefined, schema?: JsonSchema): boolean {

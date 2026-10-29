@@ -91,11 +91,15 @@ export function tinNumber(): string {
   return digits(9);
 }
 
-// The insurer's membership number (`external_reference` on an individual). It
-// must be unique across individuals, so 10 random digits after the insurer's
-// "75" prefix (the shape of the contract's example) keep collisions negligible.
-export function externalReference(): string {
-  return `75${digits(10)}`;
+// The insurer's membership number (`external_reference` on an individual):
+// dated and recognisable as test data in the back-office, with a random suffix
+// because it must be unique across individuals (409 otherwise).
+export function externalReference(now = new Date()): string {
+  const day = toLocalIsoDate(now).replaceAll("-", "");
+  let suffix = "";
+  for (let i = 0; i < 4; i++)
+    suffix += "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"[Math.floor(Math.random() * 36)];
+  return `PACKREST-${day}-${suffix}`;
 }
 
 export interface FieldGenerator {

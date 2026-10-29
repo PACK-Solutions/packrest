@@ -21,12 +21,11 @@ import {
   COLLECTED_IDS_CHANGED_EVENT,
   extractSeenItems,
   FETCHABLE_ID_LISTS,
-  loadCollectedIds,
-  loadSeenIds,
+  pickerGroups,
   recordSeenIds,
   seenIdsFor,
   type FetchableIdList,
-  type IdOrigin,
+  type PickerGroup,
 } from "@/lib/id-collector";
 import { callOperation } from "@/lib/operation-fetch";
 import { findEndpoint, listApiSummaries, loadSpec } from "@/lib/specs";
@@ -34,57 +33,6 @@ import { findEndpoint, listApiSummaries, loadSpec } from "@/lib/specs";
 // The API of the form the picker sits in, listed first. Provided by
 // RequestBuilder; SchemaField has no apiId of its own.
 export const IdPickerApiContext = createContext<string | undefined>(undefined);
-
-interface Entry {
-  id: string;
-  label?: string; // absent when nothing obvious names the resource
-  origin?: IdOrigin;
-  at: number;
-}
-
-interface Group {
-  apiId: string;
-  operationId?: string; // seen groups only
-  source: string;
-  entries: Entry[];
-}
-
-// A fetchable list and its input belong to each other: product ids offered on
-// a `subscriber_id` would be noise, and so would persons on a `product_id`.
-function isReservedElsewhere(apiId: string, operationId: string, name?: string): boolean {
-  return Object.entries(FETCHABLE_ID_LISTS).some(
-    ([field, l]) => field !== name && l.apiId === apiId && l.operationId === operationId,
-  );
-}
-
-function collectGroups(name?: string): Group[] {
-  const groups: Group[] = [];
-  for (const [apiId, list] of Object.entries(loadCollectedIds())) {
-    const byOperation = new Map<string, Entry[]>();
-    for (const e of list) {
-      const entries = byOperation.get(e.label) ?? [];
-      entries.push({ id: e.id, label: e.name, origin: e.origin, at: e.createdAt });
-      byOperation.set(e.label, entries);
-    }
-    for (const [operation, entries] of byOperation)
-      groups.push({ apiId, source: `Créés · ${operation}`, entries });
-  }
-  for (const list of Object.values(loadSeenIds())) {
-    if (!list.length) continue;
-    const { apiId, operationId, operationLabel } = list[0];
-    if (isReservedElsewhere(apiId, operationId, name)) continue;
-    groups.push({
-      apiId,
-      operationId,
-      source: `Vus · ${operationLabel}`,
-      entries: list.map((e) => ({ id: e.id, label: e.label, at: e.seenAt })),
-    });
-  }
-  const own = name ? FETCHABLE_ID_LISTS[name] : undefined;
-  return own
-    ? groups.filter((g) => g.apiId === own.apiId && g.operationId === own.operationId)
-    : groups;
-}
 
 const relative = new Intl.RelativeTimeFormat("fr", { numeric: "auto" });
 
@@ -139,7 +87,7 @@ export default function IdPicker({
   const currentApi = useContext(IdPickerApiContext);
   const list = name ? FETCHABLE_ID_LISTS[name] : undefined;
   const [open, setOpen] = useState(false);
-  const [groups, setGroups] = useState<Group[]>([]);
+  const [groups, setGroups] = useState<PickerGroup[]>([]);
   const [titles, setTitles] = useState<Record<string, string>>({});
   const [fetching, setFetching] = useState(false);
   const [fetchError, setFetchError] = useState<string | null>(null);
@@ -162,7 +110,7 @@ export default function IdPicker({
 
   useEffect(() => {
     if (!open) return;
-    const sync = () => setGroups(collectGroups(name));
+    const sync = () => setGroups(pickerGroups(name));
     sync();
     window.addEventListener(COLLECTED_IDS_CHANGED_EVENT, sync);
     return () => window.removeEventListener(COLLECTED_IDS_CHANGED_EVENT, sync);

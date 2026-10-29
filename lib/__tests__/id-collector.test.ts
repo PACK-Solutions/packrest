@@ -7,6 +7,7 @@ import {
   isIdField,
   itemLabel,
   loadSeenIds,
+  pickerGroups,
   recordCreatedId,
   recordResponseIds,
   recordSeenIds,
@@ -221,6 +222,49 @@ describe("recordSeenIds", () => {
     recordSeenIds(funds, [{ id: "f-1", label: "A" }]);
     clearCollectedIds();
     expect(loadSeenIds()).toEqual({});
+  });
+});
+
+describe("pickerGroups", () => {
+  const products = {
+    apiId: "product",
+    operationId: "listProducts",
+    operationLabel: "List Products",
+  };
+  const sources = (name?: string) =>
+    pickerGroups(name).map((g) => `${g.apiId} ${g.source}`);
+
+  beforeEach(() => {
+    recordCreatedId({
+      apiId: "person",
+      operationId: "createIndividual",
+      method: "POST",
+      id: "p-1",
+      label: "Créer une personne",
+      name: "Martin Léa",
+      origin: "parcours",
+    });
+    recordSeenIds(products, [{ id: "pr-1", label: "Épargne" }]);
+    recordSeenIds(funds, [{ id: "f-1", label: "Fonds euro" }]);
+  });
+
+  it("offers only the products on product_id", () => {
+    expect(sources("product_id")).toEqual(["product Vus · List Products"]);
+  });
+
+  it("offers everything but the products elsewhere", () => {
+    expect(sources("subscriber_id")).toEqual([
+      "person Créés · Créer une personne",
+      "product Vus · Lister les fonds",
+    ]);
+  });
+
+  it("carries the created resource's name and origin", () => {
+    expect(pickerGroups("subscriber_id")[0].entries[0]).toMatchObject({
+      id: "p-1",
+      label: "Martin Léa",
+      origin: "parcours",
+    });
   });
 });
 
