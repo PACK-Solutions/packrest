@@ -42,19 +42,19 @@ export default function HelpPage() {
           Aide &amp; diagnostic
         </h1>
         <p className="text-muted-foreground mt-1 text-sm">
-          Comment utiliser PackRest et comprendre les réponses des APIs.
+          Comment utiliser PACKRest et comprendre les réponses des APIs.
         </p>
       </header>
 
       <Card>
         <CardHeader>
           <Info className="text-muted-foreground size-3.5" />
-          <span className="font-semibold">Qu&apos;est-ce que PackRest ?</span>
+          <span className="font-semibold">Qu&apos;est-ce que PACKRest ?</span>
         </CardHeader>
         <CardBody className="space-y-2 p-4 text-sm">
           <p>
-            PackRest est une <strong>application de bureau</strong>{" "}
-            qui charge les contrats OpenAPI des APIs Pack Solutions et vous
+            PACKRest est une <strong>application de bureau</strong>{" "}
+            qui charge les contrats OpenAPI des APIs PACK Solutions et vous
             permet de les
             appeler sans écrire de code. Tout se passe sur votre machine : il
             n&apos;y a pas de serveur intermédiaire.
@@ -182,7 +182,7 @@ export default function HelpPage() {
             </p>
             <p className="text-muted-foreground">
               Quand vous <strong>créez une ressource</strong> (une requête{" "}
-              <strong>POST</strong> qui réussit), PackRest mémorise
+              <strong>POST</strong> qui réussit), PACKRest mémorise
               automatiquement son <strong>id</strong>, et celui des éléments
               d&apos;une <strong>liste</strong> (une requête <strong>GET</strong>{" "}
               sur une collection). L&apos;icône <em>clé</em> du bandeau — avec

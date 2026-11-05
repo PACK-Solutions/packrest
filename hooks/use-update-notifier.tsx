@@ -121,7 +121,7 @@ async function notify(current: UpdateCheckOutcome): Promise<void> {
     if ((await getNotifiedAppVersion()) !== latest.tag) {
       await setNotifiedAppVersion(latest.tag);
       const id = "packrest-update-app";
-      toast.info("Mise à jour de PackRest disponible", {
+      toast.info("Mise à jour de PACKRest disponible", {
         id,
         description: `Version ${latest.tag} — vous utilisez v${currentVersion}.`,
         action: settingsAction(id),

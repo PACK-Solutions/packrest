@@ -1,4 +1,4 @@
-// Tiny JWT decoder. We never verify the signature — PackRest just needs to
+// Tiny JWT decoder. We never verify the signature — PACKRest just needs to
 // surface the claims (scope, sub, aud, exp) for diagnosis: "why does the
 // upstream return 403 with a token that looks fine in curl?" is almost
 // always a scope or audience mismatch, and reading the claims confirms it.

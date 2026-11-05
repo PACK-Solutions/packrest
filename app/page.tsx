@@ -40,7 +40,7 @@ export default function Home() {
           Choisissez une API
         </h1>
         <p className="text-muted-foreground mt-1 text-sm">
-          Toutes les APIs Pack Solutions, prêtes à être appelées depuis cette
+          Toutes les APIs PACK Solutions, prêtes à être appelées depuis cette
           application. Les formulaires sont générés à partir des contrats
           OpenAPI.
         </p>

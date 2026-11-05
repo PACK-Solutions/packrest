@@ -1,8 +1,8 @@
 [package]
 name = "packrest"
 version = "1.5.6"
-description = "PackRest — client REST guidé pour les APIs Pack Solutions"
-authors = ["Pack Solutions"]
+description = "PackRest — client REST guidé pour les APIs PACK Solutions"
+authors = ["PACK Solutions"]
 edition = "2021"
 
 # The library that main.rs (and the mobile entry point) calls into.

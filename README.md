@@ -1,12 +1,12 @@
-# PackRest
+# PACKRest
 
 Client REST **de bureau** (application Tauri) pour utilisateurs
-non-développeurs. L'app charge les contrats OpenAPI de Pack Solutions et permet
+non-développeurs. L'app charge les contrats OpenAPI de PACK Solutions et permet
 d'exécuter chaque endpoint depuis une fenêtre native : choix de l'API → choix
 de l'endpoint → formulaire généré à partir du contrat →
 obtention d'un token OAuth2 → exécution → panneau de réponse.
 
-![Grille des APIs disponibles dans PackRest](docs/screenshots/01-apis.png)
+![Grille des APIs disponibles dans PACKRest](docs/screenshots/01-apis.png)
 
 ## Points forts
 
@@ -81,7 +81,7 @@ Les requêtes ne sont pas persistées ; l'échange se fait via des collections
 Le bouton de bascule (barre du haut) alterne clair / sombre ; le choix est
 mémorisé.
 
-![PackRest en thème sombre](docs/screenshots/07-theme-dark.png)
+![PACKRest en thème sombre](docs/screenshots/07-theme-dark.png)
 
 ## Démarrage
 
@@ -142,7 +142,7 @@ Plus large : couvre tous vos projets accessibles.
 2. Cocher le scope `read_api`, choisir une expiration, **Create**.
 3. Copier le token (`glpat-…`).
 
-### 2. Enregistrer le token dans PackRest
+### 2. Enregistrer le token dans PACKRest
 
 1. Lancer l'app (`npm run tauri:dev`) et ouvrir **Paramètres** depuis le menu
    **Outils**.
