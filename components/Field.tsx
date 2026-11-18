@@ -1,6 +1,11 @@
 import { cloneElement, isValidElement, useId, type ReactNode } from "react";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import Markdown from "@/components/Markdown";
 import {
   describeConstraints,
@@ -93,17 +98,41 @@ export function ConstraintBadges({ schema }: { schema?: JsonSchema }) {
   const parts = describeConstraints(schema);
   if (parts.length === 0) return null;
   return (
-    <div className="flex flex-1 flex-wrap justify-end gap-1">
-      {parts.map((p) => (
-        <Badge
-          key={p.label}
-          variant={TONE_VARIANT[p.tone]}
-          className="px-1.5 py-0 font-mono text-[10px] font-normal"
-        >
-          {p.label}
-        </Badge>
-      ))}
+    <div className="flex min-w-0 flex-1 flex-wrap justify-end gap-1">
+      {parts.map((p) =>
+        p.tone === "pattern" ? (
+          <PatternBadge key={p.label} label={p.label} />
+        ) : (
+          <Badge
+            key={p.label}
+            variant={TONE_VARIANT[p.tone]}
+            className={CONSTRAINT_BADGE_CLASS}
+          >
+            {p.label}
+          </Badge>
+        ),
+      )}
     </div>
+  );
+}
+
+const CONSTRAINT_BADGE_CLASS = "px-1.5 py-0 font-mono text-[10px] font-normal";
+
+function PatternBadge({ label }: { label: string }) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <Badge
+          variant={TONE_VARIANT.pattern}
+          className={cn(CONSTRAINT_BADGE_CLASS, "max-w-full justify-start")}
+        >
+          <span className="truncate">{label}</span>
+        </Badge>
+      </TooltipTrigger>
+      <TooltipContent side="bottom" className="max-w-md font-mono break-all">
+        {label}
+      </TooltipContent>
+    </Tooltip>
   );
 }
 
