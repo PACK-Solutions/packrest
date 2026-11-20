@@ -1,6 +1,6 @@
 import { defineConfig, devices } from "@playwright/test";
 
-// PackRest is a Tauri desktop app whose frontend is a Next.js static export.
+// PACKRest is a Tauri desktop app whose frontend is a Next.js static export.
 // These tests exercise the *no-Tauri* surface — the UI reachable in a plain
 // browser, where `isTauri()` is false and the spec store is empty. We test the
 // built static export (`out/`, served statically) rather than `next dev`: it

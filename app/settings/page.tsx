@@ -455,7 +455,7 @@ export default function SettingsPage() {
 
       <SettingsSection
         title="Sources des contrats d'API"
-        description="D'où proviennent les specs OpenAPI chargées dans PackRest : une release GitLab (recommandé) ou un dossier local."
+        description="D'où proviennent les specs OpenAPI chargées dans PACKRest : une release GitLab (recommandé) ou un dossier local."
       >
       <div id="gitlab-sync" className="scroll-mt-16">
       <Card>
@@ -952,7 +952,7 @@ export default function SettingsPage() {
   );
 }
 
-// The « Mises à jour » card. PackRest updates on two independent channels —
+// The « Mises à jour » card. PACKRest updates on two independent channels —
 // the application itself (GitHub Releases, installed manually) and the API
 // contracts (GitLab release bundles, synced in-app) — so the card shows one
 // row per channel and a single button that checks both at once. This is the
@@ -1012,7 +1012,7 @@ function AboutUpdateCard({ gitlabConnected }: { gitlabConnected: boolean }) {
       </CardHeader>
       <CardBody className="space-y-3 p-4">
         <p className="text-muted-foreground text-xs">
-          PackRest se met à jour à deux niveaux indépendants :{" "}
+          PACKRest se met à jour à deux niveaux indépendants :{" "}
           <strong>l&apos;application</strong> elle-même (le logiciel installé
           sur votre poste, publié sur GitHub) et les{" "}
           <strong>contrats d&apos;API</strong> (les specs OpenAPI qui décrivent
@@ -1028,7 +1028,7 @@ function AboutUpdateCard({ gitlabConnected }: { gitlabConnected: boolean }) {
             </span>
           </div>
           <p className="text-muted-foreground text-[11px]">
-            Le logiciel de bureau PackRest. Nouvelles versions publiées sur
+            Le logiciel de bureau PACKRest. Nouvelles versions publiées sur
             GitHub Releases — installation manuelle.
           </p>
           {outcome?.appError && (
@@ -1059,7 +1059,7 @@ function AboutUpdateCard({ gitlabConnected }: { gitlabConnected: boolean }) {
               )}
               <p className="text-muted-foreground text-[11px]">
                 Le programme d&apos;installation s&apos;ouvre dans votre
-                navigateur ; lancez-le puis relancez PackRest une fois
+                navigateur ; lancez-le puis relancez PACKRest une fois
                 installé.
               </p>
             </div>

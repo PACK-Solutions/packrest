@@ -51,7 +51,7 @@ export async function getLatestRelease(): Promise<LatestRelease> {
       {
         headers: {
           Accept: "application/vnd.github+json",
-          "User-Agent": "PackRest",
+          "User-Agent": "PACKRest",
           "X-GitHub-Api-Version": "2022-11-28",
         },
       },

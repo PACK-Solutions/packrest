@@ -164,7 +164,7 @@ export async function executeRequest(opts: {
     (k) => !(k in headers) && k.toLowerCase() !== "host",
   );
   if (!hasHeader(headers, "user-agent")) {
-    headers["User-Agent"] = "PackRest/0.1 (+https://pack-solutions.com)";
+    headers["User-Agent"] = "PACKRest/0.1 (+https://pack-solutions.com)";
   }
 
   // maxRedirections: 0 — the proxied request carries the user's bearer token;

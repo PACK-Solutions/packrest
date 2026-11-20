@@ -1,4 +1,4 @@
-// Minimal OpenAPI 3.1 type surface used by PackRest. Bundles are fully
+// Minimal OpenAPI 3.1 type surface used by PACKRest. Bundles are fully
 // dereferenced (no $ref) so we keep the type narrow on purpose: it's not
 // a full openapi-types replacement, just enough to drive the UI.
 

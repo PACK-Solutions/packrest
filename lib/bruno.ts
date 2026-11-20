@@ -28,7 +28,7 @@ export interface BrunoBody {
 }
 
 // The live request, stripped of the response `examples` Bruno also stores —
-// PackRest only round-trips the request itself.
+// PACKRest only round-trips the request itself.
 export interface BrunoRequest {
   name: string;
   seq?: number;

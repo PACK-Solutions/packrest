@@ -1,4 +1,4 @@
-// Persistence for PackRest. Backed by tauri-plugin-store when running inside
+// Persistence for PACKRest. Backed by tauri-plugin-store when running inside
 // the Tauri webview, and by localStorage as a fallback (plain-browser
 // `next dev` / prerender). Either way the public API stays *synchronous* —
 // an in-memory cache is hydrated once at startup by `bootstrapStorage()`

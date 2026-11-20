@@ -11,7 +11,7 @@ test.describe("App shell — desktop navigation", () => {
 
   test("brand link returns home", async ({ page }) => {
     await gotoReady(page, "/help", HEADING.help);
-    await page.getByRole("link", { name: "PackRest", exact: true }).click();
+    await page.getByRole("link", { name: "PACKRest", exact: true }).click();
     await expect(page).toHaveURL(/\/$|\/index/);
     await expect(page.getByRole("heading", { name: HEADING.home })).toBeVisible();
   });
@@ -41,6 +41,6 @@ test.describe("App shell — desktop navigation", () => {
   test("sidebar shows the no-specs empty state and version footer", async ({ page }) => {
     await gotoReady(page, "/", HEADING.home);
     await expect(page.getByText("Aucune spec trouvée", { exact: false })).toBeVisible();
-    await expect(page.getByText(/PackRest v\d/)).toBeVisible();
+    await expect(page.getByText(/PACKRest v\d/)).toBeVisible();
   });
 });

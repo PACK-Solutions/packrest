@@ -69,7 +69,7 @@ while IFS= read -r subject; do
 # trailing newline and would make `read` drop the last commit).
 done < <(git log --format='%s' "$RANGE")
 
-printf '## PackRest %s\n' "$TAG"
+printf '## PACKRest %s\n' "$TAG"
 
 if [ -z "$feats" ] && [ -z "$fixes" ] && [ -z "$others" ]; then
   printf '\n_Maintenance release._\n'

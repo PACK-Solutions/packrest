@@ -277,7 +277,7 @@ function NavFooter({
 
   return (
     <div className="text-muted-foreground px-2 pb-2 text-[11px] leading-tight">
-      <div className="font-medium">PackRest{version ? ` v${version}` : ""}</div>
+      <div className="font-medium">PACKRest{version ? ` v${version}` : ""}</div>
       {appUpdate && (
         <Link
           href="/settings"
@@ -305,9 +305,9 @@ function Brand() {
       href="/"
       className="group flex items-center gap-2.5 rounded-md leading-tight outline-none focus-visible:ring-2 focus-visible:ring-ring"
     >
-      <PackRestMark className="size-8 shrink-0 transition-transform group-hover:scale-[1.05]" />
+      <PACKRestMark className="size-8 shrink-0 transition-transform group-hover:scale-[1.05]" />
       <span className="text-foreground text-base font-semibold tracking-tight">
-        PackRest
+        PACKRest
       </span>
     </Link>
   );
@@ -315,7 +315,7 @@ function Brand() {
 
 // Brand mark — same daisy as the corner watermark (white petals, gold outline
 // and a two-tone amber centre) so the logo, favicon and filigrane all match.
-function PackRestMark({ className }: { className?: string }) {
+function PACKRestMark({ className }: { className?: string }) {
   return (
     <svg
       viewBox="0 0 200 200"
